@@ -82,5 +82,9 @@ out('docs/img/logo.svg', icon);
 out('docs/img/favicon.png', png(icon, 64));
 out('docs/img/apple-touch-icon.png', png(icon, 180));
 out('docs/img/social-card.png', png(wordmark({ width: 1200, height: 630 }), 1200));
+for (const [theme, ink] of [['dark', '#ffffff'], ['light', '#1b1b1b']]) {
+  out(`docs/img/tray-${theme}.svg`, trayIcon({ ink }));
+  out(`docs/img/tray-${theme}-on.svg`, trayIcon({ ink, dot: '#ff2a2a' }));
+}
 
 console.log('Brand assets written.');

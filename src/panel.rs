@@ -597,6 +597,7 @@ impl Panel {
             Command::Toggle,
             Command::Off,
             Command::Undo,
+            Command::Redo,
             Command::Clear,
             Command::ToggleInk,
             Command::Quit,
@@ -862,6 +863,9 @@ impl Panel {
         }
         settings::set(current);
         settings::save();
+        if widget == Widget::Toggle(0) && !current.look.ink {
+            crate::remove_kept_strokes();
+        }
         Action::SettingsChanged
     }
 
@@ -1108,7 +1112,7 @@ impl Panel {
         }
         self.target
             .PushAxisAlignedClip(&PREVIEW, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-        stroke::draw(
+        if let Err(error) = stroke::draw_points(
             &self.factory,
             &self.target,
             &self.brush,
@@ -1117,7 +1121,9 @@ impl Panel {
             look,
             1.0,
             &mut self.preview.scratch,
-        );
+        ) {
+            eprintln!("Could not draw preview: {error}");
+        }
         if dot_cursor {
             let (hx, hy) = Preview::position(self.preview.t);
             let color = hex(look.color);
@@ -1254,7 +1260,7 @@ impl Panel {
             let hint = if self.capturing.is_some() {
                 "Press the keys you want. Click anywhere else to cancel."
             } else {
-                "Esc, Undo and Clear only listen while they can do something."
+                "Esc, Undo, Redo and Clear only listen while they can do something."
             };
             self.text(hint, &self.fonts.small_line, rect(MARGIN, LIST_BOTTOM + 8.0, INNER, 24.0), theme.muted);
         }

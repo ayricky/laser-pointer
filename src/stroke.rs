@@ -18,10 +18,46 @@ pub const MIN_STEP: f32 = 2.0;
 const CURVE_STEP: f32 = 3.0;
 const CAP_STEPS: usize = 8;
 
+#[derive(Clone, Debug)]
 pub struct Point {
     pub x: f32,
     pub y: f32,
     pub at: Instant,
+}
+
+#[derive(Clone, Debug)]
+pub struct Stroke {
+    pub points: Vec<Point>,
+    pub look: Look,
+    pub scale: f32,
+    pub baked: bool,
+}
+
+impl Stroke {
+    pub fn translate(&mut self, offset: (i32, i32)) {
+        for point in &mut self.points {
+            point.x += offset.0 as f32;
+            point.y += offset.1 as f32;
+        }
+    }
+
+    /// Conservative bounds avoid tessellating just to decide which pixels need repainting.
+    pub fn bounds(&self) -> Option<Bounds> {
+        let radius = self.look.width as f32 * self.scale * layers(self.look.style)[0].0 / 2.0 + 2.0;
+        self.points.iter().fold(None, |bounds, point| {
+            union(bounds, Some(Bounds::around(point.x, point.y, radius)))
+        })
+    }
+
+    pub fn prune(&mut self, now: Instant, scratch: &mut Scratch) {
+        prune(
+            &mut self.points,
+            now,
+            &self.look,
+            self.scale,
+            &mut scratch.radii,
+        );
+    }
 }
 
 /// Buffers reused frame to frame so drawing doesn't allocate.
@@ -100,27 +136,36 @@ pub fn draw(
     factory: &ID2D1Factory,
     target: &ID2D1RenderTarget,
     brush: &ID2D1SolidColorBrush,
+    stroke: &mut Stroke,
+    now: Instant,
+    scratch: &mut Scratch,
+) -> Result<Option<Bounds>> {
+    draw_points(
+        factory,
+        target,
+        brush,
+        &mut stroke.points,
+        now,
+        &stroke.look,
+        stroke.scale,
+        scratch,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn draw_points(
+    factory: &ID2D1Factory,
+    target: &ID2D1RenderTarget,
+    brush: &ID2D1SolidColorBrush,
     points: &mut Vec<Point>,
     now: Instant,
     look: &Look,
     scale: f32,
     scratch: &mut Scratch,
-) -> Option<Bounds> {
-    let base = look.width as f32 / 2.0 * scale;
-    radii(points, now, base, look, scale, &mut scratch.radii);
-    if !look.ink {
-        let faded = scratch.radii.iter().take_while(|&&radius| radius < 0.1).count();
-        // Keep one faded point so the tail still tapers all the way to nothing.
-        let drop = if faded == points.len() {
-            faded
-        } else {
-            faded.saturating_sub(1)
-        };
-        points.drain(..drop);
-        scratch.radii.drain(..drop);
-    }
+) -> Result<Option<Bounds>> {
+    prune(points, now, look, scale, &mut scratch.radii);
     if points.is_empty() {
-        return None;
+        return Ok(None);
     }
     smooth(points, look.smoothing as usize, &mut scratch.path);
     curve_through(
@@ -135,7 +180,9 @@ pub fn draw(
     let mut bounds = None;
     for &(width, alpha, white) in layers(look.style) {
         scratch.layer.clear();
-        scratch.layer.extend(scratch.widths.iter().map(|radius| radius * width));
+        scratch
+            .layer
+            .extend(scratch.widths.iter().map(|radius| radius * width));
         outline(&scratch.centre, &scratch.layer, &mut scratch.outline);
         bounds = union(bounds, extent(&scratch.outline));
         let mut color = rgba(look.color, alpha * opacity);
@@ -143,9 +190,30 @@ pub fn draw(
         color.g += (1.0 - color.g) * white;
         color.b += (1.0 - color.b) * white;
         unsafe { brush.SetColor(&color) };
-        let _ = fill(factory, target, brush, &scratch.outline);
+        fill(factory, target, brush, &scratch.outline)?;
     }
-    bounds
+    Ok(bounds)
+}
+
+fn prune(points: &mut Vec<Point>, now: Instant, look: &Look, scale: f32, widths: &mut Vec<f32>) {
+    radii(
+        points,
+        now,
+        look.width as f32 / 2.0 * scale,
+        look,
+        scale,
+        widths,
+    );
+    if !look.ink {
+        let faded = widths.iter().take_while(|&&radius| radius < 0.1).count();
+        let drop = if faded == points.len() {
+            faded
+        } else {
+            faded.saturating_sub(1)
+        };
+        points.drain(..drop);
+        widths.drain(..drop);
+    }
 }
 
 fn ease_out(k: f32) -> f32 {
@@ -155,14 +223,7 @@ fn ease_out(k: f32) -> f32 {
 /// Thinner the older a point is and the further it sits behind the head, whichever is smaller.
 /// Measured in distance rather than point count, so the tail is the same length however fast
 /// the mouse reports.
-fn radii(
-    points: &[Point],
-    now: Instant,
-    base: f32,
-    look: &Look,
-    scale: f32,
-    radii: &mut Vec<f32>,
-) {
+fn radii(points: &[Point], now: Instant, base: f32, look: &Look, scale: f32, radii: &mut Vec<f32>) {
     radii.clear();
     radii.resize(points.len(), base);
     if look.ink {
@@ -288,9 +349,9 @@ fn outline(centre: &[Vector2], radii: &[f32], out: &mut Vec<Vector2>) {
         tangents_end = t;
     }
     let head = count - 1;
-    out.extend((1..CAP_STEPS).map(|step| {
-        offset(head, tangents_end, angle(step).sin(), angle(step).cos())
-    }));
+    out.extend(
+        (1..CAP_STEPS).map(|step| offset(head, tangents_end, angle(step).sin(), angle(step).cos())),
+    );
     // Walk back down the other side; tangents again, since they weren't kept.
     let start = out.len();
     let mut direction = first;
@@ -300,6 +361,7 @@ fn outline(centre: &[Vector2], radii: &[f32], out: &mut Vec<Vector2>) {
     }
     out[start..].reverse();
     out.extend((1..CAP_STEPS).map(|step| offset(0, first, -angle(step).sin(), -angle(step).cos())));
+    out.push(out[0]);
 }
 
 fn extent(points: &[Vector2]) -> Option<Bounds> {
@@ -334,4 +396,105 @@ fn fill(
         target.FillGeometry(&geometry, brush, None);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::settings::Settings;
+    use std::time::Duration;
+
+    fn points(now: Instant) -> Vec<Point> {
+        (0..5)
+            .map(|index| Point {
+                x: index as f32 * 30.0,
+                y: 40.0,
+                at: now,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn outline_closes_and_contains_centres() {
+        let now = Instant::now();
+        let mut scratch = Scratch::default();
+        smooth(&points(now), 2, &mut scratch.path);
+        curve_through(
+            &scratch.path,
+            &[3.0; 5],
+            3.0,
+            &mut scratch.centre,
+            &mut scratch.widths,
+        );
+        outline(&scratch.centre, &scratch.widths, &mut scratch.outline);
+        assert_eq!(scratch.outline.first(), scratch.outline.last());
+        let bounds = extent(&scratch.outline).unwrap();
+        for point in &scratch.centre {
+            assert!(bounds.left <= point.X && point.X <= bounds.right);
+            assert!(bounds.top <= point.Y && point.Y <= bounds.bottom);
+        }
+        outline(&[Vector2 { X: 4.0, Y: 7.0 }], &[3.0], &mut scratch.outline);
+        assert_eq!(scratch.outline.first(), scratch.outline.last());
+    }
+
+    #[test]
+    fn radii_taper_towards_tail() {
+        let now = Instant::now();
+        let look = Settings::default().look;
+        let mut widths = Vec::new();
+        radii(&points(now), now, 3.0, &look, 1.0, &mut widths);
+        assert!(widths.windows(2).all(|pair| pair[0] <= pair[1]));
+        assert_eq!(widths.last(), Some(&3.0));
+        assert!(widths[0] < 3.0);
+    }
+
+    #[test]
+    fn prune_preserves_one_faded_tail_point() {
+        let now = Instant::now();
+        let mut points = points(now);
+        for point in points.iter_mut().take(3) {
+            point.at = now - Duration::from_secs(10);
+        }
+        let mut widths = Vec::new();
+        let look = Settings::default().look;
+        prune(&mut points, now, &look, 1.0, &mut widths);
+        assert_eq!(points.len(), 3);
+        assert_eq!(points[0].x, 60.0);
+        assert_eq!(widths[0], 0.0);
+        prune(
+            &mut points,
+            now + Duration::from_secs(10),
+            &look,
+            1.0,
+            &mut widths,
+        );
+        assert!(points.is_empty());
+    }
+
+    #[test]
+    fn origin_change_preserves_screen_positions_and_look() {
+        let now = Instant::now();
+        let mut stroke = Stroke {
+            points: points(now),
+            look: Settings::default().look,
+            scale: 1.5,
+            baked: true,
+        };
+        let original = stroke.clone();
+        let (old_origin, new_origin) = ((-1920, -100), (-2560, -400));
+        stroke.translate((old_origin.0 - new_origin.0, old_origin.1 - new_origin.1));
+        for (before, after) in original.points.iter().zip(&stroke.points) {
+            assert_eq!(
+                before.x + old_origin.0 as f32,
+                after.x + new_origin.0 as f32
+            );
+            assert_eq!(
+                before.y + old_origin.1 as f32,
+                after.y + new_origin.1 as f32
+            );
+            assert_eq!(before.at, after.at);
+        }
+        assert_eq!(stroke.look, original.look);
+        assert_eq!(stroke.scale, original.scale);
+    }
 }
