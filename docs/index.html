@@ -1,0 +1,758 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Laser Pointer — interactive demo</title>
+<style>
+  :root { --bg: #0e1014; --panel: #161920; --line: #262b36; --text: #eef1f6; --muted: #98a1b0; --red: #ff3b3b; --good: #3ddc84; }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.55 "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif; }
+  kbd { font: 12px Consolas, monospace; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 1px 6px; background: #0b0d11; color: var(--text); white-space: nowrap; }
+  header { padding: 56px 24px 28px; text-align: center; background: radial-gradient(1100px 380px at 50% -90px, rgba(255, 59, 59, .2), transparent 70%); }
+  header .dot { width: 14px; height: 14px; border-radius: 50%; background: var(--red); display: inline-block; vertical-align: middle; margin-right: 14px; box-shadow: 0 0 0 6px rgba(255, 59, 59, .18), 0 0 24px 6px rgba(255, 59, 59, .55); }
+  h1 { font: 600 40px/1.1 "Segoe UI Variable Display", "Segoe UI", sans-serif; margin: 0 0 10px; letter-spacing: -.02em; }
+  header p { color: var(--muted); max-width: 780px; margin: 0 auto; font-size: 16px; }
+  main { max-width: 1400px; margin: 0 auto; padding: 0 24px 80px; }
+
+  .bar { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; margin: 8px 0 14px; }
+  .seg { display: inline-flex; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 3px; }
+  .seg button { all: unset; cursor: pointer; padding: 7px 14px; border-radius: 7px; color: var(--muted); font-size: 14px; }
+  .seg button.on { background: #2a303c; color: var(--text); }
+  .seg button small { display: block; font-size: 11px; color: var(--muted); }
+  .keys { color: var(--muted); font-size: 13px; display: flex; gap: 14px; flex-wrap: wrap; }
+  .demo { display: grid; grid-template-columns: minmax(0, 1fr) 420px; gap: 22px; align-items: start; }
+  @media (max-width: 1100px) { .demo { grid-template-columns: 1fr; } .panel-wrap { justify-self: center; } }
+  .stage { position: relative; border-radius: 12px; overflow: hidden; border: 1px solid var(--line); background: #fff; aspect-ratio: 16 / 9; touch-action: none; }
+  .stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .status { position: absolute; right: 12px; top: 16px; font-size: 12px; padding: 4px 10px; border-radius: 999px; background: rgba(17, 20, 26, .78); color: #fff; pointer-events: none; display: flex; align-items: center; gap: 8px; }
+  .status i { width: 8px; height: 8px; border-radius: 50%; background: #7b8494; display: inline-block; }
+  .status.on i { background: var(--laser, #ff2a2a); box-shadow: 0 0 8px var(--laser, #ff2a2a); }
+  .note { margin-top: 10px; font-size: 13px; color: var(--muted); min-height: 20px; }
+
+  /* Settings panel replica: same geometry as the app (420 x 600). */
+  .panel-tools { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; color: var(--muted); font-size: 13px; }
+  .panel-tools button { all: unset; cursor: pointer; border: 1px solid var(--line); background: var(--panel); border-radius: 6px; padding: 4px 10px; font-size: 13px; color: var(--text); }
+  .panel {
+    --p-bg: #f3f3f3; --p-border: #e0e0e0; --p-text: #1a1a1a; --p-muted: #5f5f5f; --p-control: #fff; --p-hover: #f6f6f6;
+    --p-cborder: #d4d4d4; --p-accent: #005fb8; --p-on-accent: #fff; --p-rail: #c6c6c6; --p-danger: #c42b1c; --p-paper: #fff; --p-sketch: #e3e7ef;
+    width: 420px; height: 600px; position: relative; background: var(--p-bg); color: var(--p-text); border-radius: 8px;
+    border: 1px solid var(--p-border); box-shadow: 0 16px 48px rgba(0, 0, 0, .45); font-size: 14px; user-select: none; overflow: hidden;
+  }
+  .panel.dark {
+    --p-bg: #202020; --p-border: #3a3a3a; --p-text: #fff; --p-muted: #a8a8a8; --p-control: #373737; --p-hover: #3f3f3f;
+    --p-cborder: #484848; --p-accent: #60cdff; --p-on-accent: #000; --p-rail: #6a6a6a; --p-danger: #ff99a4; --p-paper: #1b1d22; --p-sketch: #3a3f4a;
+  }
+  .panel .a { position: absolute; }
+  .p-title { left: 44px; top: 14px; font: 600 20px/30px "Segoe UI Variable Display", "Segoe UI", sans-serif; }
+  .p-dot { left: 22px; top: 23px; width: 12px; height: 12px; border-radius: 50%; background: var(--p-rail); }
+  .p-dot.on { background: var(--laser); box-shadow: 0 0 0 5px color-mix(in srgb, var(--laser) 20%, transparent); }
+  .p-sub { left: 20px; top: 42px; font-size: 12px; line-height: 18px; color: var(--p-muted); white-space: nowrap; }
+  .tab { top: 66px; height: 38px; display: grid; place-items: start center; padding-top: 6px; cursor: pointer; color: var(--p-muted); }
+  .tab:hover, .tab.on { color: var(--p-text); }
+  .tab.on { font-weight: 600; }
+  .tab.on::after { content: ""; position: absolute; bottom: 4px; left: 50%; width: 16px; height: 3px; margin-left: -8px; border-radius: 2px; background: var(--p-accent); }
+  .rule { left: 0; right: 0; top: 106px; height: 1px; background: var(--p-border); }
+  .h { font-weight: 600; line-height: 18px; }
+  .switch { width: 40px; height: 20px; border-radius: 10px; border: 1px solid var(--p-muted); background: var(--p-control); cursor: pointer; position: absolute; }
+  .switch::after { content: ""; position: absolute; left: 4px; top: 4px; width: 10px; height: 10px; border-radius: 50%; background: var(--p-muted); transition: left .12s, transform .12s; }
+  .switch:hover::after { transform: scale(1.2); }
+  .switch.on { background: var(--p-accent); border-color: var(--p-accent); }
+  .switch.on::after { left: 24px; background: var(--p-on-accent); }
+  .switch.big { width: 44px; height: 22px; border-radius: 11px; }
+  .switch.big::after { width: 12px; height: 12px; }
+  .switch.big.on::after { left: 26px; }
+  .chip { height: 30px; border-radius: 6px; border: 1px solid var(--p-cborder); background: var(--p-control); display: grid; place-items: center; cursor: pointer; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; padding: 0 6px; }
+  .chip:hover { background: var(--p-hover); }
+  .chip.on { background: var(--p-accent); border-color: var(--p-accent); color: var(--p-on-accent); }
+  .segbox { left: 20px; top: 376px; width: 380px; height: 30px; border-radius: 6px; border: 1px solid var(--p-cborder); background: var(--p-control); display: grid; grid-template-columns: repeat(3, 1fr); padding: 2px; gap: 2px; }
+  .segbox div { border-radius: 4px; display: grid; place-items: center; cursor: pointer; }
+  .segbox div:hover { background: var(--p-hover); }
+  .segbox div.on { background: var(--p-accent); color: var(--p-on-accent); }
+  .sw { width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; cursor: pointer; }
+  .sw i { width: 19px; height: 19px; border-radius: 50%; display: grid; place-items: center; box-shadow: 0 0 0 1px rgba(0, 0, 0, .12) inset; font-style: normal; color: var(--p-muted); }
+  .sw:hover { box-shadow: 0 0 0 1px var(--p-muted) inset; }
+  .sw.on { box-shadow: 0 0 0 2px var(--p-text) inset; }
+  .sw.custom i { background: var(--p-control); box-shadow: 0 0 0 1px var(--p-cborder) inset; }
+  .sw input { position: absolute; opacity: 0; width: 0; height: 0; }
+  .lbl { line-height: 34px; height: 34px; }
+  .val { line-height: 34px; height: 34px; width: 56px; text-align: right; color: var(--p-muted); }
+  .dim { opacity: .4; }
+  input.slider { -webkit-appearance: none; appearance: none; height: 34px; background: transparent; margin: 0; cursor: pointer; }
+  input.slider::-webkit-slider-runnable-track { height: 4px; border-radius: 2px; background: linear-gradient(var(--p-accent), var(--p-accent)) 0 / var(--k, 50%) 100% no-repeat, var(--p-rail); }
+  input.slider::-webkit-slider-thumb { -webkit-appearance: none; width: 20px; height: 20px; margin-top: -8px; border-radius: 50%; background: radial-gradient(circle, var(--p-accent) 0 5px, var(--p-control) 5.5px); box-shadow: 0 0 0 1px var(--p-cborder); }
+  input.slider:hover::-webkit-slider-thumb { background: radial-gradient(circle, var(--p-accent) 0 7px, var(--p-control) 7.5px); }
+  input.slider::-moz-range-track { height: 4px; border-radius: 2px; background: var(--p-rail); }
+  input.slider::-moz-range-progress { height: 4px; border-radius: 2px; background: var(--p-accent); }
+  input.slider::-moz-range-thumb { width: 18px; height: 18px; border-radius: 50%; border: 1px solid var(--p-cborder); background: radial-gradient(circle, var(--p-accent) 0 5px, var(--p-control) 5.5px); }
+  .small { font-size: 12px; color: var(--p-muted); line-height: 16px; }
+  .card { left: 20px; width: 380px; height: 44px; border-radius: 6px; border: 1px solid var(--p-cborder); background: var(--p-control); cursor: pointer; }
+  .card:hover { background: var(--p-hover); }
+  .card.on { border: 1.5px solid var(--p-accent); }
+  .card.on::before { content: ""; position: absolute; left: 1px; top: 12px; width: 3px; height: 20px; border-radius: 2px; background: var(--p-accent); }
+  .card .dotc { position: absolute; left: 14px; top: 14px; width: 16px; height: 16px; border-radius: 50%; }
+  .card .name { position: absolute; left: 42px; top: 3px; width: 190px; line-height: 22px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .card .name input { font: inherit; color: var(--p-text); background: var(--p-bg); border: 1.5px solid var(--p-accent); border-radius: 3px; width: 196px; height: 22px; padding: 0 4px; outline: none; margin-left: -4px; }
+  .card .sum { position: absolute; left: 42px; top: 24px; font-size: 12px; color: var(--p-muted); white-space: nowrap; }
+  .ib { position: absolute; top: 8px; width: 28px; height: 28px; border-radius: 4px; display: grid; place-items: center; font: 15px "Segoe Fluent Icons", "Segoe MDL2 Assets", "Segoe UI Symbol", sans-serif; }
+  .ib:hover { background: var(--p-hover); }
+  .btn { height: 32px; border-radius: 4px; border: 1px solid var(--p-cborder); background: var(--p-control); display: grid; place-items: center; cursor: pointer; }
+  .btn:hover { background: var(--p-hover); }
+  .list { left: 0; right: 0; top: 112px; bottom: 40px; overflow-y: auto; padding: 6px 20px 8px; }
+  .list::-webkit-scrollbar { width: 6px; } .list::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--p-muted) 50%, transparent); border-radius: 3px; }
+  .srow { display: grid; grid-template-columns: 1fr 150px 30px; gap: 6px; align-items: center; height: 44px; }
+  .srow b { font-weight: 400; display: block; line-height: 20px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .srow span.small { display: block; }
+  .kbox { height: 30px; border-radius: 4px; border: 1px solid var(--p-cborder); background: var(--p-control); display: grid; place-items: center; cursor: pointer; font-size: 13px; }
+  .kbox:hover { background: var(--p-hover); }
+  .kbox.unset { color: var(--p-muted); }
+  .kbox.cap { border: 2px solid var(--p-accent); color: var(--p-muted); background: var(--p-hover); }
+  .x { height: 30px; border-radius: 4px; display: grid; place-items: center; cursor: pointer; color: var(--p-muted); font: 12px "Segoe Fluent Icons", "Segoe MDL2 Assets", sans-serif; }
+  .x:hover { background: var(--p-hover); }
+  .sec { font-weight: 600; margin: 10px 0 2px; }
+  .foot { left: 0; right: 0; bottom: 0; height: 40px; border-top: 1px solid var(--p-border); padding: 10px 20px; font-size: 12px; color: var(--p-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .foot.err { color: var(--p-danger); }
+  .trow { left: 12px; width: 396px; height: 48px; border-radius: 6px; cursor: pointer; }
+  .trow:hover { background: var(--p-hover); }
+  .trow b { position: absolute; left: 8px; top: 4px; font-weight: 400; line-height: 22px; }
+  .trow span { position: absolute; left: 8px; top: 25px; font-size: 12px; color: var(--p-muted); }
+  .trow .switch { right: 8px; top: 14px; }
+  .trow.disabled { cursor: default; }
+  .old { width: 420px; min-height: 300px; border: 1px dashed var(--line); border-radius: 10px; padding: 18px; color: var(--muted); }
+  .old img { display: block; margin: 12px auto 0; max-width: 100%; border-radius: 6px; }
+
+  h2.sec2 { font: 600 26px/1.2 "Segoe UI Variable Display", "Segoe UI", sans-serif; margin: 56px 0 6px; }
+  p.sec2 { color: var(--muted); margin: 0 0 20px; }
+  .features { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px; }
+  .feature { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 18px 18px 16px; display: flex; flex-direction: column; gap: 8px; }
+  .feature .n { font: 600 12px/1 "Segoe UI", sans-serif; color: var(--red); background: rgba(255, 59, 59, .13); border-radius: 6px; padding: 5px 7px; align-self: flex-start; }
+  .feature h3 { margin: 0; font-size: 17px; }
+  .feature p { margin: 0; color: var(--muted); font-size: 14px; flex: 1; }
+  .ba { display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; font-size: 13px; }
+  .ba dt { color: #7b8494; } .ba dd { margin: 0; } .ba dd.after { color: var(--good); }
+  .feature button { all: unset; cursor: pointer; align-self: flex-start; margin-top: 4px; padding: 6px 12px; border-radius: 6px; background: #2a303c; font-size: 13px; }
+  .feature button:hover { background: #343b49; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+  th, td { text-align: left; padding: 11px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
+  td.good { color: var(--good); }
+</style>
+</head>
+<body>
+<header>
+  <h1><span class="dot"></span>Laser Pointer — try it</h1>
+  <p>Draw on the slide below. It runs the app's real stroke maths, ported to JavaScript, next to a working copy of the new settings panel — including your own presets and shortcuts, which the demo obeys. Switch versions to feel the difference.</p>
+</header>
+
+<main>
+  <div class="bar">
+    <div class="seg" id="versions">
+      <button data-v="original">Original<small>choppy tail, keys only</small></button>
+      <button data-v="v1">v1<small>tray + smooth trail</small></button>
+      <button data-v="now" class="on">Now<small>everything below</small></button>
+    </div>
+    <div class="keys" id="keys"></div>
+  </div>
+
+  <div class="demo">
+    <div>
+      <div class="stage" id="stage">
+        <canvas id="slide"></canvas>
+        <canvas id="laser"></canvas>
+        <div class="status" id="status"><i></i><span></span></div>
+      </div>
+      <div class="note" id="note"></div>
+    </div>
+    <div class="panel-wrap">
+      <div class="panel-tools"><span id="panelCaption">Settings panel (left-click the tray icon)</span><button id="theme">Dark theme</button></div>
+      <div id="panelHost"></div>
+    </div>
+  </div>
+
+  <h2 class="sec2">Ten new features</h2>
+  <p class="sec2">Each <b>Try it</b> button switches the demo above to the new build and sets it up for you.</p>
+  <div class="features" id="features"></div>
+
+  <h2 class="sec2">Also in this release</h2>
+  <p class="sec2">What you asked for last time, and what changed under the hood.</p>
+  <table>
+    <tr><th style="width:26%">What</th><th>Before</th><th>Now</th></tr>
+    <tr><td>Turning off vs. clearing</td><td>Turning the laser off wiped kept strokes</td><td class="good">Separate shortcuts: <b>Turn laser off</b> (Esc) leaves annotations up, clicks pass through them, and <b>Clear strokes</b> (Alt+X) removes them.</td></tr>
+    <tr><td>Never two copies</td><td>A second copy added a second tray icon</td><td class="good">A second launch exits and opens the running copy's settings panel.</td></tr>
+    <tr><td>Overlay while off</td><td>A full-screen, always-on-top layer, always composited</td><td class="good">Hidden unless there is something to show.</td></tr>
+    <tr><td>Pixels touched per frame</td><td>Both monitors cleared and presented every frame</td><td class="good">Only the area that changed.</td></tr>
+    <tr><td>Scroll wheel</td><td>Swallowed while the laser was on</td><td class="good">Scrolls the app underneath; <kbd>Ctrl</kbd>+wheel changes thickness.</td></tr>
+    <tr><td>Spotlight</td><td>—</td><td>Removed, as requested.</td></tr>
+  </table>
+</main>
+
+<script>
+// ---- Settings, presets, shortcuts ---------------------------------------------------------------
+const LOOK = { color: '#ff2a2a', width: 4, opacity: 100, fade: 1000, trail: 500, smoothing: 2, style: 'glow', ink: false };
+const OPTIONS = { dot: true, ripples: true, indicator: true };
+const COMMANDS = [
+  { id: 'toggle', label: 'Turn laser on or off', scope: 'always', key: { alt: 1, key: 'L' } },
+  { id: 'off', label: 'Turn laser off', scope: 'while the laser is on', key: { key: 'Escape' } },
+  { id: 'undo', label: 'Undo last stroke', scope: 'while the laser is on', key: { ctrl: 1, key: 'Z' } },
+  { id: 'clear', label: 'Clear strokes', scope: 'while strokes are on screen', key: { alt: 1, key: 'X' } },
+  { id: 'ink', label: 'Keep strokes on or off', scope: 'always', key: { alt: 1, key: 'K' } },
+  { id: 'quit', label: 'Quit', scope: 'always', key: { alt: 1, shift: 1, key: 'L' } },
+  { id: 'next', label: 'Next preset', scope: 'always', key: { alt: 1, key: ']' }, group: 'Presets' },
+  { id: 'prev', label: 'Previous preset', scope: 'always', key: { alt: 1, key: '[' }, group: 'Presets' },
+];
+const DEFAULT_PRESETS = [
+  { name: 'Laser', look: { ...LOOK } },
+  { name: 'Highlighter', look: { color: '#ffd400', width: 18, opacity: 40, fade: 3000, trail: 2000, smoothing: 2, style: 'solid', ink: false } },
+  { name: 'Pen', look: { color: '#1e90ff', width: 4, opacity: 100, fade: 1000, trail: 500, smoothing: 2, style: 'solid', ink: true } },
+];
+const SWATCHES = ['#ff2a2a', '#ff8a00', '#ffd400', '#2ecc40', '#1e90ff', '#d62aff'];
+const STYLES = ['solid', 'glow', 'neon'];
+const LAYERS = { solid: [[1, 1, 0]], glow: [[3.4, .10, 0], [2.1, .20, 0], [1, 1, 0]], neon: [[3.8, .12, 0], [2.3, .26, 0], [1, 1, 0], [.45, 1, .85]] };
+const MAX_PRESETS = 8;
+
+let look = { ...LOOK }, opts = { ...OPTIONS };
+let keys = Object.fromEntries(COMMANDS.map(c => [c.id, { ...c.key }]));
+let presets = DEFAULT_PRESETS.map(p => ({ name: p.name, look: { ...p.look }, key: null }));
+let version = 'now', on = false;
+let strokes = [], drawing = false, ripples = [], toast = null;
+const now = () => performance.now();
+const sameLook = (a, b) => Object.keys(LOOK).every(k => a[k] === b[k]);
+const activePreset = () => presets.findIndex(p => sameLook(p.look, look));
+
+function keyName(k) {
+  if (!k) return 'Not set';
+  const names = { Escape: 'Esc', ' ': 'Space', ArrowLeft: 'Left', ArrowRight: 'Right', ArrowUp: 'Up', ArrowDown: 'Down' };
+  return [k.ctrl && 'Ctrl', k.alt && 'Alt', k.shift && 'Shift', names[k.key] || k.key].filter(Boolean).join('+');
+}
+const sameKey = (a, b) => a && b && a.key === b.key && !!a.ctrl === !!b.ctrl && !!a.alt === !!b.alt && !!a.shift === !!b.shift;
+function eventKey(e) {
+  const key = e.key.length === 1 ? e.key.toUpperCase() : e.key;
+  return { ctrl: e.ctrlKey ? 1 : 0, alt: e.altKey ? 1 : 0, shift: e.shiftKey ? 1 : 0, key };
+}
+
+// What each build could actually do; older builds ignore the newer settings.
+function effective() {
+  if (version === 'now') return { ...look, ...opts };
+  if (version === 'v1') return { ...look, style: 'solid', opacity: 100, ink: false, ripples: false, indicator: false, dot: false };
+  return { ...LOOK, style: 'solid', ink: false, ripples: false, indicator: false, dot: false };
+}
+
+// ---- Stroke maths, ported from src/stroke.rs ----------------------------------------------------
+const MIN_STEP = 2, CURVE_STEP = 3, CAP = 8;
+const easeOut = k => 1 - Math.pow(1 - k, 4);
+const dist = (a, b) => Math.hypot(b.x - a.x, b.y - a.y);
+function smooth(pts, span) {
+  const n = pts.length;
+  return pts.map((_, i) => {
+    const s = Math.min(span, i, n - 1 - i);
+    let x = 0, y = 0, w = 0;
+    for (let o = -s; o <= s; o++) { const k = s + 1 - Math.abs(o); x += pts[i + o].x * k; y += pts[i + o].y * k; w += k; }
+    return { x: x / w, y: y / w };
+  });
+}
+function curveThrough(p, r, step) {
+  const n = p.length;
+  if (n < 3) return [p.slice(), r.slice()];
+  const mid = i => ({ x: (p[i].x + p[i + 1].x) / 2, y: (p[i].y + p[i + 1].y) / 2 }), mr = i => (r[i] + r[i + 1]) / 2;
+  const pts = [p[0], mid(0)], ws = [r[0], mr(0)];
+  for (let i = 1; i < n - 1; i++) {
+    const f = mid(i - 1), c = p[i], t = mid(i), r0 = mr(i - 1), r1 = r[i], r2 = mr(i);
+    const steps = Math.min(16, Math.max(1, Math.ceil((dist(f, c) + dist(c, t)) / step)));
+    for (let k = 1; k <= steps; k++) {
+      const u = k / steps, a = (1 - u) * (1 - u), b = 2 * (1 - u) * u, cc = u * u;
+      pts.push({ x: a * f.x + b * c.x + cc * t.x, y: a * f.y + b * c.y + cc * t.y });
+      ws.push(a * r0 + b * r1 + cc * r2);
+    }
+  }
+  pts.push(p[n - 1]); ws.push(r[n - 1]);
+  return [pts, ws];
+}
+function outline(c, r) {
+  const n = c.length, out = [], tan = [];
+  let d = { x: 1, y: 0 };
+  for (let i = 0; i < n; i++) {
+    const a = c[Math.max(0, i - 1)], b = c[Math.min(n - 1, i + 1)], L = dist(a, b);
+    if (L > 1e-3) d = { x: (b.x - a.x) / L, y: (b.y - a.y) / L };
+    tan.push(d);
+  }
+  const off = (i, al, ac) => ({ x: c[i].x + (tan[i].x * al - tan[i].y * ac) * r[i], y: c[i].y + (tan[i].y * al + tan[i].x * ac) * r[i] });
+  for (let i = 0; i < n; i++) out.push(off(i, 0, 1));
+  for (let s = 1; s < CAP; s++) { const a = Math.PI * s / CAP; out.push(off(n - 1, Math.sin(a), Math.cos(a))); }
+  for (let i = n - 1; i >= 0; i--) out.push(off(i, 0, -1));
+  for (let s = 1; s < CAP; s++) { const a = Math.PI * s / CAP; out.push(off(0, -Math.sin(a), -Math.cos(a))); }
+  return out;
+}
+function rgb(hex) { const v = parseInt(hex.slice(1), 16); return [v >> 16 & 255, v >> 8 & 255, v & 255]; }
+function drawStroke(ctx, pts, t, s) {
+  const base = s.width / 2, n = pts.length, radii = new Array(n).fill(base);
+  if (!s.ink) {
+    let behind = 0;
+    for (let i = n - 1; i >= 0; i--) {
+      if (i + 1 < n) behind += dist(pts[i], pts[i + 1]);
+      const age = 1 - (t - pts[i].t) / s.fade, len = 1 - behind / s.trail;
+      radii[i] = base * Math.min(easeOut(Math.max(0, len)), easeOut(Math.max(0, age)));
+    }
+    let faded = 0;
+    while (faded < n && radii[faded] < .1) faded++;
+    const drop = faded === n ? n : Math.max(0, faded - 1);
+    pts.splice(0, drop); radii.splice(0, drop);
+  }
+  if (!pts.length) return;
+  const [centre, widths] = curveThrough(smooth(pts, s.smoothing), radii, CURVE_STEP);
+  const [r, g, b] = rgb(s.color);
+  for (const [w, a, white] of LAYERS[s.style]) {
+    const poly = outline(centre, widths.map(x => x * w)), m = v => Math.round(v + (255 - v) * white);
+    ctx.fillStyle = `rgba(${m(r)},${m(g)},${m(b)},${a * s.opacity / 100})`;
+    ctx.beginPath(); ctx.moveTo(poly[0].x, poly[0].y);
+    for (let i = 1; i < poly.length; i++) ctx.lineTo(poly[i].x, poly[i].y);
+    ctx.closePath(); ctx.fill('nonzero');
+  }
+}
+// The very first build: the tail was capped at 50 points and drawn as separate round-capped lines.
+function drawOriginal(ctx, pts, t) {
+  const D = 50, base = 2;
+  const rad = i => { const age = Math.max(0, 1 - (t - pts[i].t) / 1000), behind = Math.min(pts.length - 1 - i, D); return base * Math.min(easeOut((D - behind) / D), easeOut(age)); };
+  let faded = 0;
+  while (faded < pts.length && rad(faded) < .1) faded++;
+  pts.splice(0, faded);
+  if (!pts.length) return;
+  const r = pts.map((_, i) => rad(i)), p = smooth(pts, 2), n = p.length;
+  ctx.strokeStyle = '#ff2a2a'; ctx.lineCap = 'round';
+  const line = (a, b, w) => { if (w <= 0) return; ctx.lineWidth = w; ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke(); };
+  const mid = (a, b) => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
+  if (n === 1) return line(p[0], p[0], r[0] * 2);
+  if (n === 2) return line(p[0], p[1], r[0] + r[1]);
+  line(p[0], mid(p[0], p[1]), r[0] + r[1]);
+  for (let i = 1; i < n - 1; i++) {
+    const f = mid(p[i - 1], p[i]), c = p[i], to = mid(p[i], p[i + 1]);
+    let prev = f;
+    for (let k = 1; k <= 4; k++) {
+      const u = k / 4, a = (1 - u) * (1 - u), b = 2 * (1 - u) * u, cc = u * u;
+      const next = { x: a * f.x + b * c.x + cc * to.x, y: a * f.y + b * c.y + cc * to.y };
+      line(prev, next, r[i] * 2); prev = next;
+    }
+  }
+  line(mid(p[n - 2], p[n - 1]), p[n - 1], r[n - 2] + r[n - 1]);
+}
+
+// ---- Stage --------------------------------------------------------------------------------------
+const stage = document.getElementById('stage'), slide = document.getElementById('slide'), laser = document.getElementById('laser');
+const sctx = slide.getContext('2d'), lctx = laser.getContext('2d');
+let W = 0, H = 0, dpr = 1;
+function resize() {
+  const r = stage.getBoundingClientRect();
+  dpr = window.devicePixelRatio || 1; W = r.width; H = r.height;
+  for (const c of [slide, laser]) { c.width = Math.round(W * dpr); c.height = Math.round(H * dpr); }
+  strokes = [];
+  drawSlide();
+}
+function drawSlide() {
+  const c = sctx, k = W / 1280;
+  c.setTransform(dpr * k, 0, 0, dpr * k, 0, 0);
+  const g = c.createLinearGradient(0, 0, 1280, 720); g.addColorStop(0, '#fafafc'); g.addColorStop(1, '#e8ecf4');
+  c.fillStyle = g; c.fillRect(0, 0, 1280, 720);
+  c.fillStyle = '#1c3879'; c.fillRect(0, 0, 1280, 8);
+  c.fillStyle = '#1e222c'; c.font = '600 44px "Segoe UI Variable Display", "Segoe UI", sans-serif'; c.fillText('Q3 Platform Review', 64, 100);
+  c.fillStyle = '#6e7687'; c.font = '20px "Segoe UI", sans-serif'; c.fillText('Latency, adoption and what ships next', 66, 136);
+  ['p99 latency down 38% after cache rollout', 'Daily active teams up to 1,240', 'Two regions still on the legacy path', 'Migration complete by end of Q4'].forEach((b, i) => {
+    c.fillStyle = '#1c3879'; c.beginPath(); c.arc(76, 222 + i * 70, 6, 0, 7); c.fill();
+    c.fillStyle = '#1e222c'; c.font = '27px "Segoe UI", sans-serif'; c.fillText(b, 98, 232 + i * 70);
+  });
+  const values = [150, 205, 180, 280, 330], labels = ['Q4', 'Q1', 'Q2', 'Q3', 'Q4e'], x0 = 860, baseY = 620;
+  values.forEach((v, i) => {
+    c.fillStyle = i === 4 ? '#96aad2' : '#1c3879'; c.fillRect(x0 + i * 76, baseY - v, 46, v);
+    c.fillStyle = '#6e7687'; c.font = '18px "Segoe UI", sans-serif'; c.fillText(labels[i], x0 + i * 76 + 6, baseY + 28);
+  });
+  c.strokeStyle = '#b4bac8'; c.lineWidth = 2; c.beginPath(); c.moveTo(x0 - 16, baseY); c.lineTo(x0 + 390, baseY); c.stroke();
+}
+const local = e => { const r = stage.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
+
+stage.addEventListener('pointerdown', e => {
+  if (e.button !== 0) return;
+  if (!on) { note(`The laser is off — press ${keyName(keys.toggle)} (or L), or flip the switch in the panel.`); return; }
+  stage.setPointerCapture(e.pointerId);
+  drawing = true;
+  const p = local(e);
+  strokes.push([{ x: p.x, y: p.y, t: now() }]);
+});
+stage.addEventListener('pointermove', e => {
+  if (!drawing) return;
+  const pts = strokes[strokes.length - 1];
+  // Coalesced events give the full mouse report rate, like the Windows message stream.
+  const events = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+  for (const ev of events.length ? events : [e]) {
+    const p = local(ev), last = pts[pts.length - 1];
+    if (last && Math.hypot(p.x - last.x, p.y - last.y) < MIN_STEP) continue;
+    pts.push({ x: p.x, y: p.y, t: now() });
+  }
+});
+stage.addEventListener('pointerup', () => { drawing = false; });
+stage.addEventListener('contextmenu', e => {
+  e.preventDefault();
+  if (!on) { note('With the laser off (or only kept strokes showing), clicks go straight to the app underneath.'); return; }
+  if (effective().ripples) ripples.push({ ...local(e), t: now() });
+  note('Right-click: the app passes a left click through to whatever is underneath.');
+});
+stage.addEventListener('wheel', e => {
+  if (!on) return;
+  if (version !== 'now') { e.preventDefault(); note('This build swallows the scroll wheel while the laser is on.'); return; }
+  if (e.ctrlKey) {
+    e.preventDefault();
+    look.width = Math.max(2, Math.min(24, look.width + (e.deltaY < 0 ? 1 : -1)));
+    notify(`Thickness  ${look.width} px`); syncPanel();
+  }
+}, { passive: false });
+
+function inkVisible() { return effective().ink && strokes.some(p => p.length); }
+
+// Shortcuts, scoped like the app: Off and Undo only while on, Clear only while strokes show.
+document.addEventListener('keydown', e => {
+  if (e.target instanceof HTMLInputElement) return;
+  if (capturing) return;
+  const k = eventKey(e), s = effective();
+  const match = id => sameKey(keys[id], k);
+  if (version !== 'now') {
+    if (k.key === 'L' && !k.ctrl) { e.preventDefault(); setOn(!on); }
+    return;
+  }
+  const run = (id, fn) => { if (match(id)) { e.preventDefault(); fn(); return true; } return false; };
+  if (run('toggle', () => setOn(!on))) return;
+  if (on && run('off', () => setOn(false))) return;
+  if (on && run('undo', () => { strokes = strokes.filter(p => p.length); strokes.pop(); syncStatus(); })) return;
+  if ((on || inkVisible()) && run('clear', () => { strokes = []; drawing = false; note('Strokes cleared.'); syncStatus(); })) return;
+  if (run('ink', () => { look.ink = !look.ink; notify(look.ink ? 'Keep strokes on' : 'Keep strokes off'); syncPanel(); })) return;
+  if (run('quit', () => { setOn(false); strokes = []; note('Quit closes the app and removes the tray icon.'); })) return;
+  if (run('next', () => cyclePreset(1))) return;
+  if (run('prev', () => cyclePreset(-1))) return;
+  const index = presets.findIndex(p => sameKey(p.key, k));
+  if (index >= 0) { e.preventDefault(); applyPreset(index, true); return; }
+  // Convenience in the browser, where Alt+L may belong to the browser.
+  if (k.key === 'L' && !k.ctrl && !k.alt && !k.shift) { e.preventDefault(); setOn(!on); }
+});
+
+function setOn(value) {
+  on = value; drawing = false; ripples = [];
+  if (!effective().ink) strokes = [];
+  notify(on ? 'Laser on' : 'Laser off');
+  render();
+}
+function notify(text) { toast = effective().indicator ? { text, t: now() } : null; }
+function cyclePreset(step) {
+  if (!presets.length) return;
+  const i = activePreset();
+  applyPreset(i < 0 ? 0 : (i + step + presets.length) % presets.length, true);
+}
+function applyPreset(i, announce) {
+  look = { ...presets[i].look };
+  if (announce) notify(presets[i].name);
+  syncPanel();
+}
+let noteTimer;
+function note(text) { const el = document.getElementById('note'); el.textContent = text; clearTimeout(noteTimer); noteTimer = setTimeout(() => el.textContent = '', 3500); }
+
+const PEN = 'm7.868 11.113 7.773 7.774a2.359 2.359 0 0 0 1.667.691 2.368 2.368 0 0 0 2.357-2.358c0-.625-.248-1.225-.69-1.667L11.201 7.78 9.558 9.469l-1.69 1.643v.001Zm10.273 3.606-3.333 3.333m-3.25-6.583 2 2m-7-7 3 3M3.664 3.625l1 1M2.529 6.922l1.407-.144m5.735-2.932-1.118.866M4.285 9.823l.758-1.194m1.863-6.207-.13 1.408';
+function cursorFor(s) {
+  if (!on) return 'default';
+  if (s.dot) {
+    const c = s.color;
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="34" height="34"><defs><radialGradient id="g"><stop offset="0" stop-color="${c}" stop-opacity=".65"/><stop offset=".35" stop-color="${c}" stop-opacity=".35"/><stop offset="1" stop-color="${c}" stop-opacity="0"/></radialGradient></defs><circle cx="17" cy="17" r="17" fill="url(#g)"/><circle cx="17" cy="17" r="5" fill="${c}"/><circle cx="17" cy="17" r="2" fill="#fff" fill-opacity=".9"/></svg>`;
+    return `url("data:image/svg+xml,${encodeURIComponent(svg)}") 17 17, crosshair`;
+  }
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24"><path stroke="#1b1b1f" fill="#fff" stroke-width="1" d="${PEN}"/></svg>`;
+  return `url("data:image/svg+xml,${encodeURIComponent(svg)}") 0 0, crosshair`;
+}
+
+function frame() {
+  const t = now(), s = effective();
+  lctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  lctx.clearRect(0, 0, W, H);
+  for (const pts of strokes) version === 'original' ? drawOriginal(lctx, pts, t) : drawStroke(lctx, pts, t, s);
+  strokes = strokes.filter((p, i) => p.length || (drawing && i === strokes.length - 1));
+  ripples = ripples.filter(r => t - r.t < 450);
+  for (const r of ripples) {
+    const q = (t - r.t) / 450, [cr, cg, cb] = rgb(s.color);
+    lctx.strokeStyle = `rgba(${cr},${cg},${cb},${.9 * Math.pow(1 - q, 1.5)})`; lctx.lineWidth = 3 * (1 - .5 * q);
+    lctx.beginPath(); lctx.arc(r.x, r.y, 6 + 30 * (1 - Math.pow(1 - q, 3)), 0, 7); lctx.stroke();
+  }
+  if (toast) {
+    const age = (t - toast.t) / 1000;
+    if (age > 1.4) toast = null;
+    else {
+      const a = Math.max(0, Math.min(1, age / .15, (1.4 - age) / .3));
+      lctx.font = '600 15px "Segoe UI Variable Text", "Segoe UI", sans-serif';
+      const tw = lctx.measureText(toast.text).width, h = 38, w = tw + 56, x = W / 2 - w / 2, y = H - 28 - h;
+      lctx.fillStyle = `rgba(28,28,34,${.9 * a})`; lctx.beginPath(); lctx.roundRect(x, y, w, h, h / 2); lctx.fill();
+      const [cr, cg, cb] = rgb(s.color);
+      lctx.fillStyle = `rgba(${cr},${cg},${cb},${a})`; lctx.beginPath(); lctx.arc(x + 23, y + h / 2, 5, 0, 7); lctx.fill();
+      lctx.fillStyle = `rgba(255,255,255,${a})`; lctx.textBaseline = 'middle'; lctx.fillText(toast.text, x + 38, y + h / 2 + 1);
+    }
+  }
+  stage.style.cursor = cursorFor(s);
+  drawPreview(t);
+  requestAnimationFrame(frame);
+}
+
+// ---- Settings panel replica ---------------------------------------------------------------------
+const SLIDERS = [
+  { key: 'width', label: 'Thickness', min: 2, max: 24, step: 1, show: v => `${v} px` },
+  { key: 'opacity', label: 'Opacity', min: 10, max: 100, step: 5, show: v => `${v}%` },
+  { key: 'fade', label: 'Fade time', min: 200, max: 5000, step: 100, show: v => `${(v / 1000).toFixed(1)} s` },
+  { key: 'trail', label: 'Trail length', min: 100, max: 2000, step: 50, show: v => `${v} px` },
+  { key: 'smoothing', label: 'Smoothing', min: 0, max: 8, step: 1, show: v => `${v}` },
+];
+const TOGGLES = [
+  { get: () => look.ink, set: v => look.ink = v, title: 'Keep strokes', detail: 'Drawings stay up, even with the laser off, until cleared' },
+  { get: () => opts.dot, set: v => opts.dot = v, title: 'Laser dot cursor', detail: 'A glowing dot instead of the pen' },
+  { get: () => opts.ripples, set: v => opts.ripples = v, title: 'Click ripples', detail: 'Show where right-clicks land' },
+  { get: () => opts.indicator, set: v => opts.indicator = v, title: 'On-screen indicator', detail: 'Confirm toggles, presets and size changes' },
+  { get: () => false, set: null, title: 'Start with Windows', detail: 'Ready in the tray after you sign in' },
+];
+const TABS = [['Pen', 56], ['Presets', 82], ['Shortcuts', 96], ['Options', 82]];
+let tab = 0, dark = matchMedia('(prefers-color-scheme: dark)').matches, capturing = null, renaming = null, status = null;
+const host = document.getElementById('panelHost');
+const h = (tag, cls, style, html) => { const e = document.createElement(tag); if (cls) e.className = cls; if (style) e.style.cssText = style; if (html !== undefined) e.innerHTML = html; return e; };
+const esc = s => s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+const summary = l => `${l.width} px · ${l.style[0].toUpperCase() + l.style.slice(1)}${l.opacity < 100 ? ` · ${l.opacity}%` : ''}${l.ink ? ' · keeps strokes' : ` · fades in ${(l.fade / 1000).toFixed(1)} s`}`;
+function say(text, error) { status = { text, error, t: now() }; setTimeout(() => { if (status && now() - status.t >= 5000) { status = null; render(); } }, 5100); }
+
+function render() {
+  host.innerHTML = '';
+  if (version !== 'now') {
+    document.getElementById('panelCaption').textContent = version === 'v1' ? 'v1 settings flyout (screenshot)' : 'Original build';
+    host.append(h('div', 'old', '', version === 'v1'
+      ? 'The first tray version had a basic Win32 flyout: colour, thickness, fade, trail length, smoothing and one shortcut.<img src="img/before-flyout.png" alt="v1 flyout">'
+      : 'No settings: <kbd>Alt</kbd>+<kbd>L</kbd> to toggle, <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>L</kbd> to quit. Red, 4 px, with the tail capped at 50 mouse samples, which is why it looked short and choppy with a fast mouse. (Press <kbd>L</kbd> here.)'));
+    syncStatus();
+    return;
+  }
+  document.getElementById('panelCaption').textContent = 'Settings panel (left-click the tray icon)';
+  const p = h('div', 'panel' + (dark ? ' dark' : ''), '');
+  const A = (cls, style, html) => { const e = h('div', 'a ' + cls, style, html); p.append(e); return e; };
+  A('p-dot' + (on ? ' on' : ''), '');
+  A('p-title', '', 'Laser Pointer');
+  const hints = [keys.toggle && `${keyName(keys.toggle)} to toggle`, keys.off && `${keyName(keys.off)} to stop`].filter(Boolean);
+  A('p-sub', '', esc(hints.length ? hints.join('  ·  ') : 'No shortcuts set — see the Shortcuts tab'));
+  A('', 'right:76px;top:20px;line-height:22px', on ? 'On' : 'Off');
+  A('switch big' + (on ? ' on' : ''), 'right:20px;top:20px').onclick = () => setOn(!on);
+  let x = 12;
+  TABS.forEach(([name, w], i) => { const t = A('tab' + (i === tab ? ' on' : ''), `left:${x}px;width:${w}px`, name); t.onclick = () => { tab = i; status = null; capturing = null; render(); }; x += w; });
+  A('rule', '');
+  [drawPenTab, drawPresetsTab, drawShortcutsTab, drawOptionsTab][tab](A, p);
+  host.append(p);
+  syncStatus();
+}
+
+function drawPenTab(A, p) {
+  const c = h('canvas', 'a', 'left:20px;top:118px;width:380px;height:100px;border-radius:8px;border:1px solid var(--p-border)');
+  c.width = 380; c.height = 100; p.append(c);
+  A('h', 'left:20px;top:230px', 'Presets');
+  const active = activePreset(), many = presets.length > 4, quick = many ? presets.slice(0, 3) : presets;
+  const n = quick.length + (many ? 1 : 0), w = n ? (380 - 8 * (n - 1)) / n : 380;
+  quick.forEach((pr, i) => { const ch = A('chip' + (i === active ? ' on' : ''), `left:${20 + i * (w + 8)}px;top:252px;width:${w}px`, esc(pr.name)); ch.onclick = () => applyPreset(i, false); });
+  if (many) A('chip', `left:${20 + 3 * (w + 8)}px;top:252px;width:${w}px`, 'More…').onclick = () => { tab = 1; render(); };
+  if (!presets.length) A('small', 'left:20px;top:258px', 'No presets yet');
+  A('h', 'left:20px;top:294px', 'Colour');
+  const gap = (380 - 7 * 28) / 6, custom = !SWATCHES.includes(look.color);
+  SWATCHES.forEach((col, i) => { const sw = A('sw' + (col === look.color ? ' on' : ''), `left:${20 + i * (28 + gap)}px;top:316px`, `<i style="background:${col}"></i>`); sw.onclick = () => { look.color = col; render(); syncPanel(); }; });
+  const cs = h('label', 'a sw custom' + (custom ? ' on' : ''), `left:${20 + 6 * (28 + gap)}px;top:316px`, `<i style="${custom ? `background:${look.color}` : ''}">${custom ? '' : '+'}</i>`);
+  const input = h('input'); input.type = 'color'; input.value = look.color; input.onchange = () => { look.color = input.value; render(); syncPanel(); };
+  cs.append(input); p.append(cs);
+  A('h', 'left:20px;top:354px', 'Style');
+  const seg = A('segbox', '');
+  STYLES.forEach(st => { const d = h('div', st === look.style ? 'on' : '', '', st[0].toUpperCase() + st.slice(1)); d.onclick = () => { look.style = st; render(); }; seg.append(d); });
+  SLIDERS.forEach((sl, i) => {
+    const y = 414 + i * 34, off = (sl.key === 'fade' || sl.key === 'trail') && look.ink;
+    A('lbl' + (off ? ' dim' : ''), `left:20px;top:${y}px`, sl.label);
+    const r = h('input', 'a slider' + (off ? ' dim' : ''), `left:118px;top:${y}px;width:228px`);
+    Object.assign(r, { type: 'range', min: sl.min, max: sl.max, step: sl.step, value: look[sl.key], disabled: off });
+    r.style.setProperty('--k', `${(look[sl.key] - sl.min) / (sl.max - sl.min) * 100}%`);
+    const v = A('val' + (off ? ' dim' : ''), `left:344px;top:${y}px`, sl.show(look[sl.key]));
+    r.oninput = () => { look[sl.key] = +r.value; r.style.setProperty('--k', `${(look[sl.key] - sl.min) / (sl.max - sl.min) * 100}%`); v.textContent = sl.show(look[sl.key]); syncPanel(); };
+    r.onchange = () => render();
+    p.append(r);
+  });
+}
+
+function drawPresetsTab(A) {
+  A('small', 'left:20px;top:118px;width:380px', 'Click a preset to switch to it. Give each one its own shortcut on the Shortcuts tab.');
+  const active = activePreset();
+  presets.forEach((pr, i) => {
+    const card = A('card' + (i === active ? ' on' : ''), `top:${158 + i * 48}px`);
+    const glow = pr.look.style !== 'solid' ? `box-shadow:0 0 0 4px color-mix(in srgb, ${pr.look.color} 22%, transparent)` : '';
+    card.append(h('div', 'dotc', `background:${pr.look.color};${glow}`));
+    const name = h('div', 'name', '', esc(pr.name));
+    if (renaming === i) {
+      const input = h('input'); input.value = pr.name; input.maxLength = 24;
+      const done = keep => { if (renaming !== i) return; renaming = null; const v = input.value.replace(/\|/g, '').trim(); if (keep && v) pr.name = v; render(); };
+      input.onkeydown = e => { e.stopPropagation(); if (e.key === 'Enter') done(true); if (e.key === 'Escape') done(false); };
+      input.onblur = () => done(true);
+      name.innerHTML = ''; name.append(input); setTimeout(() => { input.focus(); input.select(); });
+    }
+    card.append(name, h('div', 'sum', '', esc(summary(pr.look))));
+    const icon = (glyph, right, tip, color, fn) => { const b = h('div', 'ib', `right:${right}px;${color ? `color:${color}` : ''}`, glyph); b.title = tip; b.onclick = e => { e.stopPropagation(); fn(); }; card.append(b); };
+    icon('\ue74e', 72, 'Overwrite with the current pen', '', () => { pr.look = { ...look }; say(`Updated “${pr.name}” to the current pen`); render(); });
+    icon('\ue8ac', 40, 'Rename', '', () => { renaming = i; render(); });
+    icon('\ue74d', 8, 'Delete', 'var(--p-danger)', () => { presets.splice(i, 1); say(`Deleted “${pr.name}”`); render(); });
+    card.onclick = () => { if (renaming !== i) applyPreset(i, false); };
+  });
+  if (presets.length < MAX_PRESETS) {
+    const b = A('btn', `left:20px;top:${162 + presets.length * 48}px;width:380px;height:34px;justify-items:start;padding-left:12px`, '<span style="font-family:\'Segoe Fluent Icons\',\'Segoe MDL2 Assets\';margin-right:10px">\ue710</span>New preset from the current pen');
+    b.onclick = () => { let n = 1; while (presets.some(p => p.name === `Preset ${n}`)) n++; presets.push({ name: `Preset ${n}`, look: { ...look }, key: null }); renaming = presets.length - 1; render(); };
+  }
+  A('foot' + (status && status.error ? ' err' : ''), '', esc(status ? status.text : presets.length >= MAX_PRESETS ? "That's the most presets there's room for." : 'Hover the icons for what they do.'));
+}
+
+function drawShortcutsTab(A) {
+  const list = A('list', '');
+  list.append(h('div', 'small', 'margin:0 0 6px', 'Click a box, then press any combination — single keys included.'));
+  const row = (label, scope, get, set, owner) => {
+    const r = h('div', 'srow'), k = get(), cap = capturing === owner;
+    r.append(h('div', '', '', `<b>${esc(label)}</b><span class="small">${esc(scope)}</span>`));
+    const box = h('div', 'kbox' + (cap ? ' cap' : k ? '' : ' unset'), '', cap ? 'Press keys…' : esc(keyName(k)));
+    box.onclick = e => { e.stopPropagation(); capturing = cap ? null : owner; status = null; capture = { set, owner }; render(); };
+    r.append(box);
+    const x = h('div', 'x', k ? '' : 'visibility:hidden', '\ue711'); x.title = 'Remove shortcut';
+    x.onclick = () => { set(null); capturing = null; render(); };
+    r.append(x); list.append(r);
+  };
+  list.append(h('div', 'sec', '', 'Laser'));
+  COMMANDS.filter(c => !c.group).forEach(c => row(c.label, c.scope, () => keys[c.id], v => keys[c.id] = v, c.id));
+  list.append(h('div', 'sec', '', 'Presets'));
+  COMMANDS.filter(c => c.group).forEach(c => row(c.label, c.scope, () => keys[c.id], v => keys[c.id] = v, c.id));
+  presets.forEach((pr, i) => row(pr.name, 'switches to this preset', () => pr.key, v => pr.key = v, 'preset' + i));
+  const hint = capturing ? 'Press the keys you want. Click anywhere else to cancel.' : 'Esc, Undo and Clear only listen while they can do something.';
+  A('foot' + (status && status.error ? ' err' : ''), '', esc(status ? status.text : hint));
+}
+
+let capture = null;
+document.addEventListener('keydown', e => {
+  if (!capturing || !capture) return;
+  if (['Control', 'Alt', 'Shift', 'Meta'].includes(e.key)) return;
+  e.preventDefault(); e.stopImmediatePropagation();
+  const k = eventKey(e);
+  const owners = [...COMMANDS.map(c => [c.id, c.label, keys[c.id]]), ...presets.map((p, i) => ['preset' + i, `the “${p.name}” preset`, p.key])];
+  const clash = owners.find(([id, , key]) => id !== capture.owner && sameKey(key, k));
+  if (clash) { say(`${keyName(k)} is already used by ${clash[1]}`, true); render(); return; }
+  capture.set(k); capturing = null;
+  const always = !['off', 'undo', 'clear'].includes(capture.owner);
+  say(always && !k.ctrl && !k.alt && !k.shift && !/^F\d+$/.test(k.key) ? `Saved. ${keyName(k)} on its own won't type in other apps any more` : `Saved ${keyName(k)}`);
+  render();
+}, true);
+document.addEventListener('click', e => { if (capturing && !e.target.closest('.kbox')) { capturing = null; render(); } });
+
+function drawOptionsTab(A) {
+  TOGGLES.forEach((tg, i) => {
+    const r = A('trow' + (tg.set ? '' : ' disabled'), `top:${118 + i * 52}px`, `<b>${tg.title}</b><span>${tg.detail}</span>`);
+    r.append(h('div', 'switch' + (tg.get() ? ' on' : ''), ''));
+    if (tg.set) r.onclick = () => { tg.set(!tg.get()); render(); syncPanel(); }; else r.title = 'Not available in a browser';
+  });
+  A('small', 'left:20px;top:388px;width:380px', 'Right-click passes a click through to the app underneath. The scroll wheel scrolls the page; Ctrl+wheel changes thickness.');
+  if (status) A('small', 'left:20px;top:520px', esc(status.text));
+  A('btn', 'left:20px;top:548px;width:160px', 'Reset pen &amp; options').onclick = () => { look = { ...LOOK }; opts = { ...OPTIONS }; say('Pen and options reset; shortcuts and presets kept'); render(); };
+  A('btn', 'right:20px;top:548px;width:100px;color:var(--p-danger)', 'Quit').onclick = () => { setOn(false); strokes = []; note('Quit closes the app and removes the tray icon.'); };
+}
+
+function syncStatus() {
+  document.documentElement.style.setProperty('--laser', look.color);
+  const st = document.getElementById('status');
+  st.classList.toggle('on', on);
+  const tk = version === 'now' ? keyName(keys.toggle) : 'L';
+  st.querySelector('span').textContent = on ? 'Laser on — drag to draw' : inkVisible() ? 'Laser off — kept strokes stay up' : `Laser off — press ${tk}`;
+  const kk = document.getElementById('keys');
+  kk.innerHTML = version === 'now'
+    ? [['toggle', 'on/off'], ['off', 'off'], ['undo', 'undo'], ['clear', 'clear'], ['next', 'next preset']].filter(([id]) => keys[id]).map(([id, what]) => `<span><kbd>${esc(keyName(keys[id]))}</kbd> ${what}</span>`).join('') + '<span>right-click clicks through</span><span><kbd>Ctrl</kbd>+wheel thickness</span>'
+    : '<span><kbd>L</kbd> on/off</span><span>drag to draw</span>';
+}
+// Light refresh used while dragging sliders; the full panel re-renders on discrete changes.
+function syncPanel() {
+  syncStatus();
+  if (version === 'now' && tab !== 0 && !capturing && renaming === null) render();
+  else if (version === 'now' && tab === 0) {
+    const dot = host.querySelector('.p-dot'); if (dot) dot.classList.toggle('on', on);
+  }
+}
+
+// The panel's live preview: a pretend hand tracing a figure of eight.
+const preview = { pts: [], t: 0, last: now() };
+function drawPreview(t) {
+  const c = version === 'now' && tab === 0 && host.querySelector('canvas');
+  if (!c) return;
+  const ctx = c.getContext('2d'), dt = Math.min(.1, (t - preview.last) / 1000);
+  preview.last = t;
+  const pos = u => ({ x: 190 + 130 * Math.sin(u), y: 56 + 26 * Math.sin(2 * u) });
+  const before = preview.t, after = before + dt * 1.8;
+  preview.t = after;
+  if (look.ink && Math.floor(after / (2 * Math.PI)) > Math.floor(before / (2 * Math.PI))) preview.pts = [];
+  const a = pos(before), b = pos(after), steps = Math.max(1, Math.ceil(dist(a, b) / 2.5));
+  for (let i = 1; i <= steps; i++) preview.pts.push({ ...pos(before + (after - before) * i / steps), t });
+  const css = getComputedStyle(host.firstChild);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = css.getPropertyValue('--p-paper'); ctx.fillRect(0, 0, 380, 100);
+  ctx.fillStyle = css.getPropertyValue('--p-sketch');
+  const bar = (x, y, w, hh) => { ctx.beginPath(); ctx.roundRect(x, y, w, hh, 3); ctx.fill(); };
+  bar(16, 14, 140, 10); [0, 1, 2].forEach(i => bar(16, 38 + i * 15, 170 - i * 30, 6));
+  [24, 36, 30, 48].forEach((hh, i) => bar(280 + i * 20, 86 - hh, 12, hh));
+  drawStroke(ctx, preview.pts, t, { ...look });
+  if (opts.dot) {
+    const head = pos(after), [r, g, bb] = rgb(look.color);
+    [[9, .18], [6, .35], [3.5, 1]].forEach(([rad, al]) => { ctx.fillStyle = `rgba(${r},${g},${bb},${al})`; ctx.beginPath(); ctx.arc(head.x, head.y, rad, 0, 7); ctx.fill(); });
+    ctx.fillStyle = 'rgba(255,255,255,.9)'; ctx.beginPath(); ctx.arc(head.x, head.y, 1.5, 0, 7); ctx.fill();
+  }
+}
+
+function setVersion(v) {
+  version = v;
+  document.querySelectorAll('#versions button').forEach(b => b.classList.toggle('on', b.dataset.v === v));
+  strokes = []; ripples = []; toast = null; capturing = null; renaming = null;
+  render();
+}
+document.querySelectorAll('#versions button').forEach(b => b.onclick = () => setVersion(b.dataset.v));
+const themeButton = document.getElementById('theme');
+function applyTheme() { themeButton.textContent = dark ? 'Light theme' : 'Dark theme'; render(); }
+themeButton.onclick = () => { dark = !dark; applyTheme(); };
+
+const FEATURES = [
+  { title: 'Tabbed Windows 11 settings', text: 'Pen, Presets, Shortcuts and Options tabs, in your accent colour, light or dark, with a live preview of the pen.',
+    before: 'One stock grey flyout', after: 'Four tabs, live preview', hint: 'Click through the panel tabs; try the Dark theme button.', go: () => { tab = 0; } },
+  { title: 'Your own presets', text: 'Save the current pen as a preset, rename it, overwrite it with new settings, or delete it. Up to eight.',
+    before: 'Three fixed presets', after: 'Create, rename, update, delete', hint: 'Presets tab → "New preset from the current pen", then type a name.', go: () => { tab = 1; } },
+  { title: 'Shortcuts for everything', text: 'Every action — on/off, off, undo, clear, keep strokes, quit — takes any combination you like, single keys included. Clashes are caught.',
+    before: 'One shortcut; Esc hard-wired', after: 'Rebind or remove any of them', hint: 'Shortcuts tab → click a box and press keys. The demo obeys your new keys.', go: () => { tab = 2; } },
+  { title: 'Switch presets from the keyboard', text: 'Next and previous preset shortcuts, plus an optional shortcut on each preset. The indicator names the preset you switched to.',
+    before: 'Open the panel to change pen', after: 'Alt+] / Alt+[ or your own keys', hint: `Press ${'Alt+]'} a few times while drawing.`, go: () => { setOn(true); } },
+  { title: 'Kept strokes survive laser-off', text: 'With Keep strokes on, turning the laser off leaves your annotations up while clicks pass through to the app. Clear them with their own shortcut.',
+    before: 'Esc turned it off and wiped everything', after: 'Esc stops drawing; Alt+X clears', hint: 'Draw, press Esc (strokes stay), then Alt+X to clear.', set: { ...DEFAULT_PRESETS[2].look } },
+  { title: 'Glow and Neon styles', text: 'A soft halo (the default) or a white-hot core, so the trail stands out on busy slides.',
+    before: 'Flat line only', after: 'Solid, Glow or Neon', hint: 'Neon is on — draw a quick loop.', set: { ...LOOK, style: 'neon' } },
+  { title: 'Laser-dot cursor', text: 'The pointer becomes a glowing dot in your colour. It is the real system cursor, so it never lags.',
+    before: 'Pen-shaped cursor', after: 'Glowing dot', hint: 'Move over the slide: the cursor is a dot.', opt: { dot: true } },
+  { title: 'Click ripples', text: 'Right-click passes a real click through; a ring shows the audience where it landed.',
+    before: 'Invisible click', after: 'Ripple at the click', hint: 'Right-click anywhere on the slide.', opt: { ripples: true } },
+  { title: 'On-screen indicator', text: 'A pill confirms "Laser on", "Laser off", preset changes and thickness, then fades.',
+    before: 'No feedback', after: 'Confirms every change', hint: 'Toggle the laser, or Ctrl+scroll over the slide.', opt: { indicator: true } },
+  { title: 'Opacity', text: 'A true highlighter: text shows through, and a stroke never darkens where it crosses itself.',
+    before: 'Opaque strokes hide text', after: '10–100% opacity', hint: 'Highlight a bullet point.', set: { ...DEFAULT_PRESETS[1].look } },
+];
+const fl = document.getElementById('features');
+FEATURES.forEach((f, i) => {
+  const card = h('div', 'feature', '', `<span class="n">${String(i + 1).padStart(2, '0')}</span><h3>${f.title}</h3><p>${f.text}</p><dl class="ba"><dt>Before</dt><dd>${f.before}</dd><dt>Now</dt><dd class="after">${f.after}</dd></dl>`);
+  const b = h('button', '', '', 'Try it ↑');
+  b.onclick = () => {
+    version = 'now'; document.querySelectorAll('#versions button').forEach(x => x.classList.toggle('on', x.dataset.v === 'now'));
+    if (f.set) look = { ...f.set };
+    if (f.opt) Object.assign(opts, f.opt);
+    if (f.go) f.go();
+    if (!on) setOn(true); else render();
+    stage.scrollIntoView({ block: 'center' });
+    note(f.hint);
+  };
+  card.append(b); fl.append(card);
+});
+
+new ResizeObserver(resize).observe(stage);
+applyTheme();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
