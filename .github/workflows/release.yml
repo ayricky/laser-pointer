@@ -1,0 +1,58 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          toolchain: stable
+          components: clippy
+          target: x86_64-pc-windows-msvc
+          build-warnings: warn
+          cache: false
+      - uses: Swatinem/rust-cache@v2
+      - name: Validate and build
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "([^"]+)"').Matches[0].Groups[1].Value
+          if ($env:GITHUB_REF_NAME -ne "v$version") { throw 'Tag must match the Cargo.toml version.' }
+          cargo build --release
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo test
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo clippy
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Package
+        shell: pwsh
+        run: |
+          ./packaging/build-msix.ps1 -NoBuild -Publisher "CN=LaserPointerDev"
+          $version = $env:GITHUB_REF_NAME.Substring(1)
+          Compress-Archive -LiteralPath target/release/laser-pointer.exe, LICENSE, THIRD-PARTY-NOTICES.txt, README.md -DestinationPath "dist/laser-pointer-$version-x64.zip"
+          $tagType = git for-each-ref --format='%(objecttype)' "refs/tags/$env:GITHUB_REF_NAME"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $notes = ''
+          if ($tagType -eq 'tag') {
+            $notes = git for-each-ref --format='%(contents)' "refs/tags/$env:GITHUB_REF_NAME"
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          }
+          if (-not ($notes -join "`n").Trim()) { $notes = "Laser Pointer $version for Windows x64. The MSIX is unsigned; use the zip for a portable build or the Microsoft Store for a signed installation." }
+          $notes | Set-Content -Path dist/release-notes.md -Encoding utf8
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = $env:GITHUB_REF_NAME.Substring(1)
+          gh release create $env:GITHUB_REF_NAME "dist/laser-pointer-$version-x64.zip" "dist/LaserPointer_$version.0_x64.msix" --title "Laser Pointer $version" --notes-file dist/release-notes.md --verify-tag
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }

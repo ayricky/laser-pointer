@@ -1,0 +1,36 @@
+name: CI
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          toolchain: stable
+          components: clippy
+          target: x86_64-pc-windows-msvc
+          build-warnings: warn
+          cache: false
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release
+      - name: Test
+        run: cargo test
+      - name: Clippy
+        run: cargo clippy
+      - name: Package
+        shell: pwsh
+        run: ./packaging/build-msix.ps1 -NoBuild -Publisher "CN=LaserPointerDev"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LaserPointer-windows-x64
+          path: |
+            target/release/laser-pointer.exe
+            dist/LaserPointer_*_x64.msix
+          if-no-files-found: error
