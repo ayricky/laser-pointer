@@ -3,7 +3,23 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Laser Pointer — interactive demo</title>
+<title>Laser Pointer — draw over anything on Windows</title>
+<meta name="description" content="Draw over anything while you present with a smooth, fading laser for Windows. Try the interactive demo. Open source, private and available on the Microsoft Store.">
+<link rel="canonical" href="https://ayricky.github.io/laser-pointer/">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Laser Pointer — draw over anything">
+<meta property="og:description" content="A smooth, fading laser for Windows. Try it right in your browser.">
+<meta property="og:url" content="https://ayricky.github.io/laser-pointer/">
+<meta property="og:image" content="https://ayricky.github.io/laser-pointer/img/social-card.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Laser Pointer for Windows">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Laser Pointer — draw over anything">
+<meta name="twitter:description" content="A smooth, fading laser for Windows. Try the interactive demo.">
+<meta name="twitter:image" content="https://ayricky.github.io/laser-pointer/img/social-card.png">
+<link rel="icon" href="img/favicon.png" type="image/png">
+<link rel="apple-touch-icon" href="img/apple-touch-icon.png">
 <style>
   :root { --bg: #0e1014; --panel: #161920; --line: #262b36; --text: #eef1f6; --muted: #98a1b0; --red: #ff3b3b; --good: #3ddc84; }
   * { box-sizing: border-box; }
@@ -11,16 +27,11 @@
   body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.55 "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif; }
   kbd { font: 12px Consolas, monospace; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 1px 6px; background: #0b0d11; color: var(--text); white-space: nowrap; }
   header { padding: 56px 24px 28px; text-align: center; background: radial-gradient(1100px 380px at 50% -90px, rgba(255, 59, 59, .2), transparent 70%); }
-  header .dot { width: 14px; height: 14px; border-radius: 50%; background: var(--red); display: inline-block; vertical-align: middle; margin-right: 14px; box-shadow: 0 0 0 6px rgba(255, 59, 59, .18), 0 0 24px 6px rgba(255, 59, 59, .55); }
   h1 { font: 600 40px/1.1 "Segoe UI Variable Display", "Segoe UI", sans-serif; margin: 0 0 10px; letter-spacing: -.02em; }
   header p { color: var(--muted); max-width: 780px; margin: 0 auto; font-size: 16px; }
   main { max-width: 1400px; margin: 0 auto; padding: 0 24px 80px; }
 
   .bar { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; margin: 8px 0 14px; }
-  .seg { display: inline-flex; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 3px; }
-  .seg button { all: unset; cursor: pointer; padding: 7px 14px; border-radius: 7px; color: var(--muted); font-size: 14px; }
-  .seg button.on { background: #2a303c; color: var(--text); }
-  .seg button small { display: block; font-size: 11px; color: var(--muted); }
   .keys { color: var(--muted); font-size: 13px; display: flex; gap: 14px; flex-wrap: wrap; }
   .demo { display: grid; grid-template-columns: minmax(0, 1fr) 420px; gap: 22px; align-items: start; }
   @media (max-width: 1100px) { .demo { grid-template-columns: 1fr; } .panel-wrap { justify-self: center; } }
@@ -119,8 +130,6 @@
   .trow span { position: absolute; left: 8px; top: 25px; font-size: 12px; color: var(--p-muted); }
   .trow .switch { right: 8px; top: 14px; }
   .trow.disabled { cursor: default; }
-  .old { width: 420px; min-height: 300px; border: 1px dashed var(--line); border-radius: 10px; padding: 18px; color: var(--muted); }
-  .old img { display: block; margin: 12px auto 0; max-width: 100%; border-radius: 6px; }
 
   h2.sec2 { font: 600 26px/1.2 "Segoe UI Variable Display", "Segoe UI", sans-serif; margin: 56px 0 6px; }
   p.sec2 { color: var(--muted); margin: 0 0 20px; }
@@ -129,40 +138,68 @@
   .feature .n { font: 600 12px/1 "Segoe UI", sans-serif; color: var(--red); background: rgba(255, 59, 59, .13); border-radius: 6px; padding: 5px 7px; align-self: flex-start; }
   .feature h3 { margin: 0; font-size: 17px; }
   .feature p { margin: 0; color: var(--muted); font-size: 14px; flex: 1; }
-  .ba { display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; font-size: 13px; }
-  .ba dt { color: #7b8494; } .ba dd { margin: 0; } .ba dd.after { color: var(--good); }
   .feature button { all: unset; cursor: pointer; align-self: flex-start; margin-top: 4px; padding: 6px 12px; border-radius: 6px; background: #2a303c; font-size: 13px; }
   .feature button:hover { background: #343b49; }
   table { width: 100%; border-collapse: collapse; font-size: 14px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
   th, td { text-align: left; padding: 11px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
   th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
   td.good { color: var(--good); }
+  a { color: #ff8787; }
+  a:focus-visible, button:focus-visible { outline: 2px solid #ff8787; outline-offset: 4px; }
+  .hero-logo { width: 96px; height: 96px; margin-bottom: 20px; }
+  .hero-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 12px; margin: 26px 0 16px; }
+  .hero-actions a { padding: 12px 20px; border: 1px solid var(--line); border-radius: 8px; text-decoration: none; background: var(--panel); color: var(--text); font-weight: 600; }
+  .hero-actions .primary { background: #c92832; border-color: #c92832; color: #fff; }
+  header .try { font-size: 13px; margin-top: 24px; }
+  .touch-note { display: none; color: var(--muted); font-size: 13px; }
+  .table-wrap { overflow-x: auto; }
+  .faq { max-width: 850px; color: var(--muted); }
+  footer { display: flex; justify-content: center; flex-wrap: wrap; gap: 12px 24px; padding: 28px 24px; border-top: 1px solid var(--line); color: var(--muted); }
+  @media (pointer: coarse) { .touch-note { display: block; } }
+  @media (max-width: 480px) {
+    main { padding: 0 12px 48px; }
+    header { padding: 32px 16px 24px; }
+    h1 { font-size: 34px; }
+    .panel-wrap { width: 100%; max-width: 420px; }
+    .panel-tools { gap: 8px; }
+    #panelHost { width: 100%; position: relative; }
+    .features { grid-template-columns: 1fr; }
+    .status { top: 8px; right: 8px; font-size: 10px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
+    *, *::before, *::after { transition: none !important; animation: none !important; }
+  }
 </style>
 </head>
 <body>
 <header>
-  <h1><span class="dot"></span>Laser Pointer — try it</h1>
-  <p>Draw on the slide below. It runs the app's real stroke maths, ported to JavaScript, next to a working copy of the new settings panel — including your own presets and shortcuts, which the demo obeys. Switch versions to feel the difference.</p>
+  <img class="hero-logo" src="img/logo.svg" width="96" height="96" alt="">
+  <h1>Laser Pointer</h1>
+  <p>Draw over anything while you present — a smooth, fading laser for Windows</p>
+  <div class="hero-actions">
+    <!-- When the listing is live: set href to the product URL and the text to "Get it from the Microsoft Store". -->
+    <a class="primary" id="store-link" href="https://github.com/ayricky/laser-pointer/releases">Microsoft Store — coming soon</a>
+    <a href="https://github.com/ayricky/laser-pointer">Free &amp; open source on GitHub</a>
+  </div>
+  <p>Windows 10 1809 or later · US$2.99 on the Store · MIT licensed</p>
+  <p class="try"><a href="#demo">Try it right here ↓</a></p>
 </header>
 
 <main>
   <div class="bar">
-    <div class="seg" id="versions">
-      <button data-v="original">Original<small>choppy tail, keys only</small></button>
-      <button data-v="v1">v1<small>tray + smooth trail</small></button>
-      <button data-v="now" class="on">Now<small>everything below</small></button>
-    </div>
     <div class="keys" id="keys"></div>
   </div>
 
-  <div class="demo">
+  <p class="touch-note">Best on a desktop with a mouse. You can also draw here with a finger or stylus.</p>
+  <div class="demo" id="demo">
     <div>
-      <div class="stage" id="stage">
+      <div class="stage" id="stage" tabindex="0" aria-label="Interactive drawing demo. Press L to turn the laser on, then drag to draw.">
         <canvas id="slide"></canvas>
         <canvas id="laser"></canvas>
         <div class="status" id="status"><i></i><span></span></div>
       </div>
-      <div class="note" id="note"></div>
+      <div class="note" id="note" aria-live="polite"></div>
     </div>
     <div class="panel-wrap">
       <div class="panel-tools"><span id="panelCaption">Settings panel (left-click the tray icon)</span><button id="theme">Dark theme</button></div>
@@ -170,22 +207,38 @@
     </div>
   </div>
 
-  <h2 class="sec2">Ten new features</h2>
-  <p class="sec2">Each <b>Try it</b> button switches the demo above to the new build and sets it up for you.</p>
+  <h2 class="sec2">Make your point</h2>
+  <p class="sec2">From a fleeting laser trail to lasting annotations. Try each feature in the demo above.</p>
   <div class="features" id="features"></div>
 
-  <h2 class="sec2">Also in this release</h2>
-  <p class="sec2">What you asked for last time, and what changed under the hood.</p>
-  <table>
-    <tr><th style="width:26%">What</th><th>Before</th><th>Now</th></tr>
-    <tr><td>Turning off vs. clearing</td><td>Turning the laser off wiped kept strokes</td><td class="good">Separate shortcuts: <b>Turn laser off</b> (Esc) leaves annotations up, clicks pass through them, and <b>Clear strokes</b> (Alt+X) removes them.</td></tr>
-    <tr><td>Never two copies</td><td>A second copy added a second tray icon</td><td class="good">A second launch exits and opens the running copy's settings panel.</td></tr>
-    <tr><td>Overlay while off</td><td>A full-screen, always-on-top layer, always composited</td><td class="good">Hidden unless there is something to show.</td></tr>
-    <tr><td>Pixels touched per frame</td><td>Both monitors cleared and presented every frame</td><td class="good">Only the area that changed.</td></tr>
-    <tr><td>Scroll wheel</td><td>Swallowed while the laser was on</td><td class="good">Scrolls the app underneath; <kbd>Ctrl</kbd>+wheel changes thickness.</td></tr>
-    <tr><td>Spotlight</td><td>—</td><td>Removed, as requested.</td></tr>
-  </table>
+  <h2 class="sec2">Default shortcuts</h2>
+  <p class="sec2">Rebind any shortcut in the app. In this demo, L also toggles the laser when your browser reserves Alt+L.</p>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Action</th><th>Shortcut</th><th>Active</th></tr></thead>
+    <tbody>
+      <tr><td>Turn laser on or off</td><td>Alt+L</td><td>always</td></tr>
+      <tr><td>Turn laser off</td><td>Esc</td><td>while the laser is on</td></tr>
+      <tr><td>Undo last stroke or Clear</td><td>Ctrl+Z</td><td>while the laser is on</td></tr>
+      <tr><td>Redo</td><td>Ctrl+Y</td><td>while the laser is on</td></tr>
+      <tr><td>Clear strokes</td><td>Alt+X</td><td>while strokes are on screen</td></tr>
+      <tr><td>Keep strokes on or off</td><td>Alt+K</td><td>always</td></tr>
+      <tr><td>Next / previous preset</td><td>Alt+] / Alt+[</td><td>always</td></tr>
+      <tr><td>Quit</td><td>Alt+Shift+L</td><td>always</td></tr>
+    </tbody>
+  </table></div>
+  <p class="sec2">While the laser is on: drag to draw, right-click to click through, scroll to scroll the app underneath, and Ctrl+wheel to change thickness.</p>
+  <h2 class="sec2">Why pay for something open source?</h2>
+  <p class="faq">The Store version uses the same code. You get a signed build, automatic updates and a clean way to start with Windows. Buying it funds development. Building it yourself is always free.</p>
+  <h2 class="sec2">Does it send anything anywhere?</h2>
+  <p class="faq">The app makes no network connections and collects no personal data. No telemetry, ads or accounts. Your settings stay on your PC.</p>
 </main>
+<footer>
+  <span>© 2026 Ricardo Mariano</span>
+  <a href="privacy.html">Privacy</a>
+  <a href="whats-new.html">What's new in 1.1</a>
+  <a href="https://github.com/ayricky/laser-pointer">GitHub</a>
+  <a href="https://github.com/ayricky/laser-pointer/blob/main/LICENSE">MIT licence</a>
+</footer>
 
 <script>
 // ---- Settings, presets, shortcuts ---------------------------------------------------------------
@@ -195,6 +248,7 @@ const COMMANDS = [
   { id: 'toggle', label: 'Turn laser on or off', scope: 'always', key: { alt: 1, key: 'L' } },
   { id: 'off', label: 'Turn laser off', scope: 'while the laser is on', key: { key: 'Escape' } },
   { id: 'undo', label: 'Undo last stroke', scope: 'while the laser is on', key: { ctrl: 1, key: 'Z' } },
+  { id: 'redo', label: 'Redo', scope: 'while the laser is on', key: { ctrl: 1, key: 'Y' } },
   { id: 'clear', label: 'Clear strokes', scope: 'while strokes are on screen', key: { alt: 1, key: 'X' } },
   { id: 'ink', label: 'Keep strokes on or off', scope: 'always', key: { alt: 1, key: 'K' } },
   { id: 'quit', label: 'Quit', scope: 'always', key: { alt: 1, shift: 1, key: 'L' } },
@@ -214,8 +268,10 @@ const MAX_PRESETS = 8;
 let look = { ...LOOK }, opts = { ...OPTIONS };
 let keys = Object.fromEntries(COMMANDS.map(c => [c.id, { ...c.key }]));
 let presets = DEFAULT_PRESETS.map(p => ({ name: p.name, look: { ...p.look }, key: null }));
-let version = 'now', on = false;
+let on = false;
 let strokes = [], drawing = false, ripples = [], toast = null;
+let redoStack = [], clearedStrokes = null, clearingStrokes = [];
+const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
 const now = () => performance.now();
 const sameLook = (a, b) => Object.keys(LOOK).every(k => a[k] === b[k]);
 const activePreset = () => presets.findIndex(p => sameLook(p.look, look));
@@ -231,12 +287,7 @@ function eventKey(e) {
   return { ctrl: e.ctrlKey ? 1 : 0, alt: e.altKey ? 1 : 0, shift: e.shiftKey ? 1 : 0, key };
 }
 
-// What each build could actually do; older builds ignore the newer settings.
-function effective() {
-  if (version === 'now') return { ...look, ...opts };
-  if (version === 'v1') return { ...look, style: 'solid', opacity: 100, ink: false, ripples: false, indicator: false, dot: false };
-  return { ...LOOK, style: 'solid', ink: false, ripples: false, indicator: false, dot: false };
-}
+function effective() { return { ...look, ...opts }; }
 
 // ---- Stroke maths, ported from src/stroke.rs ----------------------------------------------------
 const MIN_STEP = 2, CURVE_STEP = 3, CAP = 8;
@@ -309,32 +360,6 @@ function drawStroke(ctx, pts, t, s) {
     ctx.closePath(); ctx.fill('nonzero');
   }
 }
-// The very first build: the tail was capped at 50 points and drawn as separate round-capped lines.
-function drawOriginal(ctx, pts, t) {
-  const D = 50, base = 2;
-  const rad = i => { const age = Math.max(0, 1 - (t - pts[i].t) / 1000), behind = Math.min(pts.length - 1 - i, D); return base * Math.min(easeOut((D - behind) / D), easeOut(age)); };
-  let faded = 0;
-  while (faded < pts.length && rad(faded) < .1) faded++;
-  pts.splice(0, faded);
-  if (!pts.length) return;
-  const r = pts.map((_, i) => rad(i)), p = smooth(pts, 2), n = p.length;
-  ctx.strokeStyle = '#ff2a2a'; ctx.lineCap = 'round';
-  const line = (a, b, w) => { if (w <= 0) return; ctx.lineWidth = w; ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke(); };
-  const mid = (a, b) => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
-  if (n === 1) return line(p[0], p[0], r[0] * 2);
-  if (n === 2) return line(p[0], p[1], r[0] + r[1]);
-  line(p[0], mid(p[0], p[1]), r[0] + r[1]);
-  for (let i = 1; i < n - 1; i++) {
-    const f = mid(p[i - 1], p[i]), c = p[i], to = mid(p[i], p[i + 1]);
-    let prev = f;
-    for (let k = 1; k <= 4; k++) {
-      const u = k / 4, a = (1 - u) * (1 - u), b = 2 * (1 - u) * u, cc = u * u;
-      const next = { x: a * f.x + b * c.x + cc * to.x, y: a * f.y + b * c.y + cc * to.y };
-      line(prev, next, r[i] * 2); prev = next;
-    }
-  }
-  line(mid(p[n - 2], p[n - 1]), p[n - 1], r[n - 2] + r[n - 1]);
-}
 
 // ---- Stage --------------------------------------------------------------------------------------
 const stage = document.getElementById('stage'), slide = document.getElementById('slide'), laser = document.getElementById('laser');
@@ -344,8 +369,9 @@ function resize() {
   const r = stage.getBoundingClientRect();
   dpr = window.devicePixelRatio || 1; W = r.width; H = r.height;
   for (const c of [slide, laser]) { c.width = Math.round(W * dpr); c.height = Math.round(H * dpr); }
-  strokes = [];
+  strokes = []; redoStack = []; clearedStrokes = null; clearingStrokes = []; drawing = false;
   drawSlide();
+  fitPanel();
 }
 function drawSlide() {
   const c = sctx, k = W / 1280;
@@ -373,12 +399,13 @@ stage.addEventListener('pointerdown', e => {
   if (!on) { note(`The laser is off — press ${keyName(keys.toggle)} (or L), or flip the switch in the panel.`); return; }
   stage.setPointerCapture(e.pointerId);
   drawing = true;
+  redoStack = []; clearedStrokes = null;
   const p = local(e);
-  strokes.push([{ x: p.x, y: p.y, t: now() }]);
+  strokes.push({ points: [{ x: p.x, y: p.y, t: now() }], look: effective() });
 });
 stage.addEventListener('pointermove', e => {
   if (!drawing) return;
-  const pts = strokes[strokes.length - 1];
+  const pts = strokes[strokes.length - 1].points;
   // Coalesced events give the full mouse report rate, like the Windows message stream.
   const events = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
   for (const ev of events.length ? events : [e]) {
@@ -388,6 +415,8 @@ stage.addEventListener('pointermove', e => {
   }
 });
 stage.addEventListener('pointerup', () => { drawing = false; });
+stage.addEventListener('pointercancel', () => { drawing = false; });
+stage.addEventListener('lostpointercapture', () => { drawing = false; });
 stage.addEventListener('contextmenu', e => {
   e.preventDefault();
   if (!on) { note('With the laser off (or only kept strokes showing), clicks go straight to the app underneath.'); return; }
@@ -396,7 +425,6 @@ stage.addEventListener('contextmenu', e => {
 });
 stage.addEventListener('wheel', e => {
   if (!on) return;
-  if (version !== 'now') { e.preventDefault(); note('This build swallows the scroll wheel while the laser is on.'); return; }
   if (e.ctrlKey) {
     e.preventDefault();
     look.width = Math.max(2, Math.min(24, look.width + (e.deltaY < 0 ? 1 : -1)));
@@ -404,7 +432,43 @@ stage.addEventListener('wheel', e => {
   }
 }, { passive: false });
 
-function inkVisible() { return effective().ink && strokes.some(p => p.length); }
+function inkVisible() { return strokes.some(stroke => stroke.look.ink && stroke.points.length); }
+
+function restore(stroke) {
+  const elapsed = now() - stroke.points[stroke.points.length - 1].t;
+  return { look: { ...stroke.look }, points: stroke.points.map(point => ({ ...point, t: point.t + elapsed })) };
+}
+function undo() {
+  drawing = false;
+  if (clearedStrokes) {
+    strokes.push(...clearedStrokes.map(restore));
+    redoStack.push({ clear: true });
+    clearedStrokes = null; clearingStrokes = [];
+  } else {
+    const stroke = strokes.pop();
+    if (stroke) redoStack.push({ stroke });
+  }
+  syncStatus();
+}
+function redo() {
+  drawing = false;
+  const action = redoStack.pop();
+  if (!action) return;
+  if (action.clear) clearStrokes(false);
+  else strokes.push(restore(action.stroke));
+  syncStatus();
+}
+function clearStrokes(resetRedo = true) {
+  drawing = false;
+  const visible = strokes.filter(stroke => stroke.points.length);
+  if (!visible.length) return;
+  clearedStrokes = visible;
+  clearingStrokes.push(...visible.map(stroke => ({ stroke, t: now() })));
+  strokes = [];
+  if (resetRedo) redoStack = [];
+  note('Strokes cleared. Ctrl+Z restores them while the laser is on.');
+  syncStatus();
+}
 
 // Shortcuts, scoped like the app: Off and Undo only while on, Clear only while strokes show.
 document.addEventListener('keydown', e => {
@@ -412,15 +476,12 @@ document.addEventListener('keydown', e => {
   if (capturing) return;
   const k = eventKey(e), s = effective();
   const match = id => sameKey(keys[id], k);
-  if (version !== 'now') {
-    if (k.key === 'L' && !k.ctrl) { e.preventDefault(); setOn(!on); }
-    return;
-  }
   const run = (id, fn) => { if (match(id)) { e.preventDefault(); fn(); return true; } return false; };
   if (run('toggle', () => setOn(!on))) return;
   if (on && run('off', () => setOn(false))) return;
-  if (on && run('undo', () => { strokes = strokes.filter(p => p.length); strokes.pop(); syncStatus(); })) return;
-  if ((on || inkVisible()) && run('clear', () => { strokes = []; drawing = false; note('Strokes cleared.'); syncStatus(); })) return;
+  if (on && run('undo', undo)) return;
+  if (on && run('redo', redo)) return;
+  if ((on || inkVisible()) && run('clear', clearStrokes)) return;
   if (run('ink', () => { look.ink = !look.ink; notify(look.ink ? 'Keep strokes on' : 'Keep strokes off'); syncPanel(); })) return;
   if (run('quit', () => { setOn(false); strokes = []; note('Quit closes the app and removes the tray icon.'); })) return;
   if (run('next', () => cyclePreset(1))) return;
@@ -433,7 +494,7 @@ document.addEventListener('keydown', e => {
 
 function setOn(value) {
   on = value; drawing = false; ripples = [];
-  if (!effective().ink) strokes = [];
+  if (!on) strokes = strokes.filter(stroke => stroke.look.ink);
   notify(on ? 'Laser on' : 'Laser off');
   render();
 }
@@ -467,10 +528,17 @@ function frame() {
   const t = now(), s = effective();
   lctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   lctx.clearRect(0, 0, W, H);
-  for (const pts of strokes) version === 'original' ? drawOriginal(lctx, pts, t) : drawStroke(lctx, pts, t, s);
-  strokes = strokes.filter((p, i) => p.length || (drawing && i === strokes.length - 1));
+  for (const stroke of strokes) drawStroke(lctx, stroke.points, t, stroke.look);
+  strokes = strokes.filter((stroke, i) => stroke.points.length || (drawing && i === strokes.length - 1));
+  clearingStrokes = clearingStrokes.filter(item => t - item.t < (reducedMotion.matches ? 0 : 250));
+  for (const item of clearingStrokes) {
+    lctx.save();
+    lctx.globalAlpha = 1 - (t - item.t) / 250;
+    drawStroke(lctx, item.stroke.points.slice(), item.t, item.stroke.look);
+    lctx.restore();
+  }
   ripples = ripples.filter(r => t - r.t < 450);
-  for (const r of ripples) {
+  for (const r of reducedMotion.matches ? [] : ripples) {
     const q = (t - r.t) / 450, [cr, cg, cb] = rgb(s.color);
     lctx.strokeStyle = `rgba(${cr},${cg},${cb},${.9 * Math.pow(1 - q, 1.5)})`; lctx.lineWidth = 3 * (1 - .5 * q);
     lctx.beginPath(); lctx.arc(r.x, r.y, 6 + 30 * (1 - Math.pow(1 - q, 3)), 0, 7); lctx.stroke();
@@ -479,7 +547,7 @@ function frame() {
     const age = (t - toast.t) / 1000;
     if (age > 1.4) toast = null;
     else {
-      const a = Math.max(0, Math.min(1, age / .15, (1.4 - age) / .3));
+      const a = reducedMotion.matches ? 1 : Math.max(0, Math.min(1, age / .15, (1.4 - age) / .3));
       lctx.font = '600 15px "Segoe UI Variable Text", "Segoe UI", sans-serif';
       const tw = lctx.measureText(toast.text).width, h = 38, w = tw + 56, x = W / 2 - w / 2, y = H - 28 - h;
       lctx.fillStyle = `rgba(28,28,34,${.9 * a})`; lctx.beginPath(); lctx.roundRect(x, y, w, h, h / 2); lctx.fill();
@@ -518,14 +586,6 @@ function say(text, error) { status = { text, error, t: now() }; setTimeout(() =>
 
 function render() {
   host.innerHTML = '';
-  if (version !== 'now') {
-    document.getElementById('panelCaption').textContent = version === 'v1' ? 'v1 settings flyout (screenshot)' : 'Original build';
-    host.append(h('div', 'old', '', version === 'v1'
-      ? 'The first tray version had a basic Win32 flyout: colour, thickness, fade, trail length, smoothing and one shortcut.<img src="img/before-flyout.png" alt="v1 flyout">'
-      : 'No settings: <kbd>Alt</kbd>+<kbd>L</kbd> to toggle, <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>L</kbd> to quit. Red, 4 px, with the tail capped at 50 mouse samples, which is why it looked short and choppy with a fast mouse. (Press <kbd>L</kbd> here.)'));
-    syncStatus();
-    return;
-  }
   document.getElementById('panelCaption').textContent = 'Settings panel (left-click the tray icon)';
   const p = h('div', 'panel' + (dark ? ' dark' : ''), '');
   const A = (cls, style, html) => { const e = h('div', 'a ' + cls, style, html); p.append(e); return e; };
@@ -540,6 +600,7 @@ function render() {
   A('rule', '');
   [drawPenTab, drawPresetsTab, drawShortcutsTab, drawOptionsTab][tab](A, p);
   host.append(p);
+  fitPanel();
   syncStatus();
 }
 
@@ -635,7 +696,7 @@ document.addEventListener('keydown', e => {
   const clash = owners.find(([id, , key]) => id !== capture.owner && sameKey(key, k));
   if (clash) { say(`${keyName(k)} is already used by ${clash[1]}`, true); render(); return; }
   capture.set(k); capturing = null;
-  const always = !['off', 'undo', 'clear'].includes(capture.owner);
+  const always = !['off', 'undo', 'redo', 'clear'].includes(capture.owner);
   say(always && !k.ctrl && !k.alt && !k.shift && !/^F\d+$/.test(k.key) ? `Saved. ${keyName(k)} on its own won't type in other apps any more` : `Saved ${keyName(k)}`);
   render();
 }, true);
@@ -657,18 +718,16 @@ function syncStatus() {
   document.documentElement.style.setProperty('--laser', look.color);
   const st = document.getElementById('status');
   st.classList.toggle('on', on);
-  const tk = version === 'now' ? keyName(keys.toggle) : 'L';
+  const tk = keyName(keys.toggle);
   st.querySelector('span').textContent = on ? 'Laser on — drag to draw' : inkVisible() ? 'Laser off — kept strokes stay up' : `Laser off — press ${tk}`;
   const kk = document.getElementById('keys');
-  kk.innerHTML = version === 'now'
-    ? [['toggle', 'on/off'], ['off', 'off'], ['undo', 'undo'], ['clear', 'clear'], ['next', 'next preset']].filter(([id]) => keys[id]).map(([id, what]) => `<span><kbd>${esc(keyName(keys[id]))}</kbd> ${what}</span>`).join('') + '<span>right-click clicks through</span><span><kbd>Ctrl</kbd>+wheel thickness</span>'
-    : '<span><kbd>L</kbd> on/off</span><span>drag to draw</span>';
+  kk.innerHTML = [['toggle', 'on/off'], ['off', 'off'], ['undo', 'undo'], ['redo', 'redo'], ['clear', 'clear'], ['next', 'next preset']].filter(([id]) => keys[id]).map(([id, what]) => `<span><kbd>${esc(keyName(keys[id]))}</kbd> ${what}</span>`).join('') + '<span>right-click clicks through</span><span><kbd>Ctrl</kbd>+wheel thickness</span>';
 }
 // Light refresh used while dragging sliders; the full panel re-renders on discrete changes.
 function syncPanel() {
   syncStatus();
-  if (version === 'now' && tab !== 0 && !capturing && renaming === null) render();
-  else if (version === 'now' && tab === 0) {
+  if (tab !== 0 && !capturing && renaming === null) render();
+  else if (tab === 0) {
     const dot = host.querySelector('.p-dot'); if (dot) dot.classList.toggle('on', on);
   }
 }
@@ -676,12 +735,13 @@ function syncPanel() {
 // The panel's live preview: a pretend hand tracing a figure of eight.
 const preview = { pts: [], t: 0, last: now() };
 function drawPreview(t) {
-  const c = version === 'now' && tab === 0 && host.querySelector('canvas');
+  const c = tab === 0 && host.querySelector('canvas');
   if (!c) return;
   const ctx = c.getContext('2d'), dt = Math.min(.1, (t - preview.last) / 1000);
   preview.last = t;
   const pos = u => ({ x: 190 + 130 * Math.sin(u), y: 56 + 26 * Math.sin(2 * u) });
-  const before = preview.t, after = before + dt * 1.8;
+  const before = reducedMotion.matches ? 0 : preview.t, after = reducedMotion.matches ? Math.PI * 2 : before + dt * 1.8;
+  if (reducedMotion.matches) preview.pts = [];
   preview.t = after;
   if (look.ink && Math.floor(after / (2 * Math.PI)) > Math.floor(before / (2 * Math.PI))) preview.pts = [];
   const a = pos(before), b = pos(after), steps = Math.max(1, Math.ceil(dist(a, b) / 2.5));
@@ -693,7 +753,7 @@ function drawPreview(t) {
   const bar = (x, y, w, hh) => { ctx.beginPath(); ctx.roundRect(x, y, w, hh, 3); ctx.fill(); };
   bar(16, 14, 140, 10); [0, 1, 2].forEach(i => bar(16, 38 + i * 15, 170 - i * 30, 6));
   [24, 36, 30, 48].forEach((hh, i) => bar(280 + i * 20, 86 - hh, 12, hh));
-  drawStroke(ctx, preview.pts, t, { ...look });
+  drawStroke(ctx, preview.pts, t, { ...look, ink: reducedMotion.matches || look.ink });
   if (opts.dot) {
     const head = pos(after), [r, g, bb] = rgb(look.color);
     [[9, .18], [6, .35], [3.5, 1]].forEach(([rad, al]) => { ctx.fillStyle = `rgba(${r},${g},${bb},${al})`; ctx.beginPath(); ctx.arc(head.x, head.y, rad, 0, 7); ctx.fill(); });
@@ -701,45 +761,38 @@ function drawPreview(t) {
   }
 }
 
-function setVersion(v) {
-  version = v;
-  document.querySelectorAll('#versions button').forEach(b => b.classList.toggle('on', b.dataset.v === v));
-  strokes = []; ripples = []; toast = null; capturing = null; renaming = null;
-  render();
-}
-document.querySelectorAll('#versions button').forEach(b => b.onclick = () => setVersion(b.dataset.v));
 const themeButton = document.getElementById('theme');
 function applyTheme() { themeButton.textContent = dark ? 'Light theme' : 'Dark theme'; render(); }
 themeButton.onclick = () => { dark = !dark; applyTheme(); };
 
 const FEATURES = [
   { title: 'Tabbed Windows 11 settings', text: 'Pen, Presets, Shortcuts and Options tabs, in your accent colour, light or dark, with a live preview of the pen.',
-    before: 'One stock grey flyout', after: 'Four tabs, live preview', hint: 'Click through the panel tabs; try the Dark theme button.', go: () => { tab = 0; } },
+    hint: 'Click through the panel tabs; try the Dark theme button.', go: () => { tab = 0; } },
   { title: 'Your own presets', text: 'Save the current pen as a preset, rename it, overwrite it with new settings, or delete it. Up to eight.',
-    before: 'Three fixed presets', after: 'Create, rename, update, delete', hint: 'Presets tab → "New preset from the current pen", then type a name.', go: () => { tab = 1; } },
-  { title: 'Shortcuts for everything', text: 'Every action — on/off, off, undo, clear, keep strokes, quit — takes any combination you like, single keys included. Clashes are caught.',
-    before: 'One shortcut; Esc hard-wired', after: 'Rebind or remove any of them', hint: 'Shortcuts tab → click a box and press keys. The demo obeys your new keys.', go: () => { tab = 2; } },
+    hint: 'Presets tab → "New preset from the current pen", then type a name.', go: () => { tab = 1; } },
+  { title: 'Shortcuts for everything', text: 'Every action — on/off, off, undo, redo, clear, keep strokes, quit — takes any combination you like, single keys included. Clashes are caught.',
+    hint: 'Shortcuts tab → click a box and press keys. The demo obeys your new keys.', go: () => { tab = 2; } },
   { title: 'Switch presets from the keyboard', text: 'Next and previous preset shortcuts, plus an optional shortcut on each preset. The indicator names the preset you switched to.',
-    before: 'Open the panel to change pen', after: 'Alt+] / Alt+[ or your own keys', hint: `Press ${'Alt+]'} a few times while drawing.`, go: () => { setOn(true); } },
+    hint: `Press ${'Alt+]'} a few times while drawing.`, go: () => { setOn(true); } },
   { title: 'Kept strokes survive laser-off', text: 'With Keep strokes on, turning the laser off leaves your annotations up while clicks pass through to the app. Clear them with their own shortcut.',
-    before: 'Esc turned it off and wiped everything', after: 'Esc stops drawing; Alt+X clears', hint: 'Draw, press Esc (strokes stay), then Alt+X to clear.', set: { ...DEFAULT_PRESETS[2].look } },
+    hint: 'Draw, press Esc (strokes stay), then Alt+X to clear.', set: { ...DEFAULT_PRESETS[2].look } },
   { title: 'Glow and Neon styles', text: 'A soft halo (the default) or a white-hot core, so the trail stands out on busy slides.',
-    before: 'Flat line only', after: 'Solid, Glow or Neon', hint: 'Neon is on — draw a quick loop.', set: { ...LOOK, style: 'neon' } },
+    hint: 'Neon is on — draw a quick loop.', set: { ...LOOK, style: 'neon' } },
   { title: 'Laser-dot cursor', text: 'The pointer becomes a glowing dot in your colour. It is the real system cursor, so it never lags.',
-    before: 'Pen-shaped cursor', after: 'Glowing dot', hint: 'Move over the slide: the cursor is a dot.', opt: { dot: true } },
+    hint: 'Move over the slide: the cursor is a dot.', opt: { dot: true } },
   { title: 'Click ripples', text: 'Right-click passes a real click through; a ring shows the audience where it landed.',
-    before: 'Invisible click', after: 'Ripple at the click', hint: 'Right-click anywhere on the slide.', opt: { ripples: true } },
+    hint: 'Right-click anywhere on the slide.', opt: { ripples: true } },
   { title: 'On-screen indicator', text: 'A pill confirms "Laser on", "Laser off", preset changes and thickness, then fades.',
-    before: 'No feedback', after: 'Confirms every change', hint: 'Toggle the laser, or Ctrl+scroll over the slide.', opt: { indicator: true } },
+    hint: 'Toggle the laser, or Ctrl+scroll over the slide.', opt: { indicator: true } },
   { title: 'Opacity', text: 'A true highlighter: text shows through, and a stroke never darkens where it crosses itself.',
-    before: 'Opaque strokes hide text', after: '10–100% opacity', hint: 'Highlight a bullet point.', set: { ...DEFAULT_PRESETS[1].look } },
+    hint: 'Highlight a bullet point.', set: { ...DEFAULT_PRESETS[1].look } },
 ];
+FEATURES.push({ title: 'Undo, redo and a softer Clear', text: 'Kept strokes remember their colour and style. Clear fades them away; undo brings them back. Ctrl+Y redoes your last undo.', hint: 'Choose Pen, draw, clear with Alt+X, then press Ctrl+Z and Ctrl+Y.', set: { ...DEFAULT_PRESETS[2].look } });
 const fl = document.getElementById('features');
 FEATURES.forEach((f, i) => {
-  const card = h('div', 'feature', '', `<span class="n">${String(i + 1).padStart(2, '0')}</span><h3>${f.title}</h3><p>${f.text}</p><dl class="ba"><dt>Before</dt><dd>${f.before}</dd><dt>Now</dt><dd class="after">${f.after}</dd></dl>`);
+  const card = h('div', 'feature', '', `<span class="n">${String(i + 1).padStart(2, '0')}</span><h3>${f.title}</h3><p>${f.text}</p>`);
   const b = h('button', '', '', 'Try it ↑');
   b.onclick = () => {
-    version = 'now'; document.querySelectorAll('#versions button').forEach(x => x.classList.toggle('on', x.dataset.v === 'now'));
     if (f.set) look = { ...f.set };
     if (f.opt) Object.assign(opts, f.opt);
     if (f.go) f.go();
@@ -750,6 +803,14 @@ FEATURES.forEach((f, i) => {
   card.append(b); fl.append(card);
 });
 
+function fitPanel() {
+  const panel = host.querySelector('.panel');
+  if (!panel) return;
+  const scale = Math.min(1, host.parentElement.clientWidth / 420);
+  panel.style.transformOrigin = 'top left';
+  panel.style.transform = 'scale(' + scale + ')';
+  host.style.height = (600 * scale) + 'px';
+}
 new ResizeObserver(resize).observe(stage);
 applyTheme();
 requestAnimationFrame(frame);
