@@ -3,7 +3,10 @@
 //! A tray icon opens the settings panel.
 #![windows_subsystem = "windows"]
 
+mod frame;
+mod motion;
 mod panel;
+mod panel_graphics;
 mod settings;
 mod stroke;
 mod ui;
@@ -56,6 +59,9 @@ use windows::Win32::Graphics::Dxgi::{
 use windows::Win32::Graphics::Gdi::{
     CreateBitmap, CreateDIBSection, DeleteObject, GetMonitorInfoW, MonitorFromPoint, BITMAPINFO,
     BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+};
+use windows::Win32::System::Com::{
+    CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::SystemInformation::GetTickCount;
@@ -188,6 +194,7 @@ struct Graphics {
 struct App {
     hwnd: HWND,
     gfx: Option<Graphics>,
+    frame_slot: bool,
     strokes: Vec<Stroke>,
     redo: Vec<Edit>,
     cleared: Option<Vec<Stroke>>,
@@ -214,6 +221,16 @@ struct App {
     cursors: Vec<((u32, bool, u32), HCURSOR)>,
 }
 
+struct UiApartment;
+
+impl Drop for UiApartment {
+    fn drop(&mut self) {
+        unsafe {
+            CoUninitialize();
+        }
+    }
+}
+
 fn main() -> Result<()> {
     unsafe {
         let _single_instance = CreateMutexW(None, false, w!("Local\\LaserPointer"))?;
@@ -222,7 +239,14 @@ fn main() -> Result<()> {
             return Ok(());
         }
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-        settings::load();
+        let _apartment = match CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE).ok() {
+            Ok(()) => Some(UiApartment),
+            Err(error) => {
+                eprintln!("Could not initialise the UI COM apartment: {error}");
+                None
+            }
+        };
+        let first_run = settings::load();
         let instance = GetModuleHandleW(None)?;
         let class = w!("LaserPointerOverlay");
         RegisterClassW(&WNDCLASSW {
@@ -271,6 +295,14 @@ fn main() -> Result<()> {
         // Shortcuts first: adding the tray icon can take Explorer a few seconds.
         sync_hotkeys();
         ui::init(instance.into())?;
+        if first_run {
+            if let Err(error) = ui::welcome() {
+                eprintln!("Could not open the welcome panel: {error}");
+            }
+            let shortcut = ui::shortcut_name(settings::get().key(Command::Toggle));
+            with_app(|app| app.notify(&format!("Laser Pointer is ready — {shortcut} to draw")));
+            settings::save();
+        }
         run();
         ui::shutdown();
     }
@@ -282,24 +314,53 @@ fn main() -> Result<()> {
 unsafe fn run() {
     let mut msg = MSG::default();
     loop {
-        let (animating, waitable) = APP.with(|app| {
-            let app = app.borrow();
-            app.as_ref().map_or((false, HANDLE::default()), |app| {
-                (
-                    app.needs_frame(),
-                    app.gfx
-                        .as_ref()
-                        .map_or(HANDLE::default(), |gfx| gfx.waitable),
-                )
-            })
-        });
-        let handles: &[HANDLE] = if animating {
-            std::slice::from_ref(&waitable)
+        let overlay_schedule = with_app(|app| frame::schedule(app.needs_frame(), app.frame_slot))
+            .unwrap_or(frame::Schedule::Idle);
+        let overlay_waitable = if overlay_schedule == frame::Schedule::Wait {
+            with_app(|app| app.gfx.as_ref().map(|gfx| gfx.waitable)).flatten()
         } else {
-            &[]
+            None
         };
-        let woke =
-            MsgWaitForMultipleObjectsEx(Some(handles), INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+        let panel_schedule = ui::frame_schedule();
+        let panel_waitable = ui::animation_waitable();
+        let mut handles = [HANDLE::default(); 2];
+        let mut count = 0;
+        let overlay_index = overlay_waitable.map(|handle| {
+            handles[count] = handle;
+            count += 1;
+            0
+        });
+        let panel_index = panel_waitable.map(|handle| {
+            let index = count;
+            handles[index] = handle;
+            count += 1;
+            index
+        });
+        let timeout = if overlay_schedule == frame::Schedule::Render
+            || panel_schedule == frame::Schedule::Render
+        {
+            0
+        } else {
+            INFINITE
+        };
+        let woke = MsgWaitForMultipleObjectsEx(
+            Some(&handles[..count]),
+            timeout,
+            QS_ALLINPUT,
+            MWMO_INPUTAVAILABLE,
+        );
+        for (index, handle) in handles[..count].iter().enumerate() {
+            let signalled = woke.0 == WAIT_OBJECT_0.0 + index as u32
+                || windows::Win32::System::Threading::WaitForSingleObject(*handle, 0)
+                    == WAIT_OBJECT_0;
+            if signalled {
+                if overlay_index == Some(index) {
+                    with_app(|app| app.frame_slot = true);
+                } else if panel_index == Some(index) {
+                    ui::hold_frame_slot();
+                }
+            }
+        }
         while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
             if msg.message == WM_QUIT {
                 return;
@@ -307,8 +368,13 @@ unsafe fn run() {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
-        if animating && woke == WAIT_OBJECT_0 {
-            with_app(App::render);
+        with_app(|app| {
+            if frame::schedule(app.needs_frame(), app.frame_slot) == frame::Schedule::Render {
+                app.render();
+            }
+        });
+        if ui::frame_schedule() == frame::Schedule::Render {
+            ui::render_panel();
         }
     }
 }
@@ -493,18 +559,21 @@ fn cursor_svg() -> String {
     )
 }
 
-/// The cursor pen, heavier so it reads at tray size, with a dot of the laser colour while on.
+/// The taskbar uses its own theme, independently of app windows.
 fn tray_svg(on: bool, color: u32) -> String {
-    let dot = if on {
-        format!(
-            r##"<circle cx="5.5" cy="5.5" r="5" fill="#{color:06x}" stroke="#1b1b1f" stroke-width="1"/>"##
-        )
-    } else {
-        String::new()
-    };
-    format!(
-        r##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke="#1b1b1f" stroke-width="1.6" fill="#fff" d="{PEN_PATH}"/>{dot}</svg>"##
+    let light = panel::read_dword(
+        w!(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"),
+        w!("SystemUsesLightTheme"),
     )
+    .is_some_and(|value| value != 0);
+    let source = if on {
+        include_str!("../assets/brand/tray-on.svg")
+    } else {
+        include_str!("../assets/brand/tray.svg")
+    };
+    source
+        .replace("INK", if light { "#1b1b1b" } else { "#ffffff" })
+        .replace("DOT", &format!("#{color:06x}"))
 }
 
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -687,6 +756,7 @@ impl App {
         Self {
             hwnd,
             gfx,
+            frame_slot: false,
             strokes: Vec::new(),
             redo: Vec::new(),
             cleared: None,
@@ -716,7 +786,10 @@ impl App {
             && self.gfx.is_some()
             && !self.trimmed
             && (self.dirty
-                || self.strokes.iter().any(|stroke| !stroke.look.ink)
+                || self
+                    .strokes
+                    .iter()
+                    .any(|stroke| !stroke.look.ink && !stroke.points.is_empty())
                 || self.fading.is_some()
                 || !self.ripples.is_empty()
                 || self.toast.is_some())
@@ -1248,6 +1321,7 @@ impl App {
     fn graphics_failed(&mut self, error: windows::core::Error) {
         eprintln!("Overlay graphics will be rebuilt: {error}");
         self.gfx = None;
+        self.frame_slot = false;
         self.cursor_key = None;
         self.ink_rebuild = true;
         self.fade_rebuild = true;
@@ -1268,6 +1342,7 @@ impl App {
         match unsafe { Graphics::new(self.hwnd, width, height) } {
             Ok(gfx) => {
                 self.gfx = Some(gfx);
+                self.frame_slot = false;
                 unsafe {
                     let _ = KillTimer(Some(self.hwnd), TIMER_RECOVER);
                 }
@@ -1670,9 +1745,12 @@ impl App {
         };
         if let Some(gfx) = &self.gfx {
             unsafe {
-                gfx.swap_chain
-                    .Present1(1, DXGI_PRESENT(0), &parameters)
-                    .ok()?;
+                frame::acquire(&mut self.frame_slot, || frame::wait(gfx.waitable))?;
+                frame::present(&mut self.frame_slot, || {
+                    gfx.swap_chain
+                        .Present1(1, DXGI_PRESENT(0), &parameters)
+                        .ok()
+                })?;
             }
         }
         self.buffers[self.back] = DirtyRects::default();
@@ -2360,6 +2438,18 @@ mod tests {
         });
         assert_eq!(cursors, [((0xff0000, false, 96), 5)]);
         assert_eq!(released, [3, 4, 1, 2]);
+    }
+
+    #[test]
+    fn skipped_render_keeps_an_acquired_slot() {
+        let mut app = history_app();
+        app.frame_slot = true;
+        app.render();
+        assert!(app.frame_slot);
+        app.trimmed = true;
+        app.render();
+        app.retry_frame();
+        assert!(app.frame_slot);
     }
 
     #[test]

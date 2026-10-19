@@ -4,7 +4,9 @@ use std::cell::{Cell, RefCell};
 use std::time::{Duration, Instant};
 
 use windows::core::{w, Result, HSTRING, PCWSTR};
-use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::Foundation::{
+    COLORREF, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
+};
 use windows::Win32::Graphics::Dwm::{
     DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_USE_IMMERSIVE_DARK_MODE,
     DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DWMWINDOWATTRIBUTE,
@@ -22,20 +24,21 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN, TME_LEAVE, TRACKMOUSEEVENT,
 };
 use windows::Win32::UI::Shell::{
-    Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIM_ADD, NIM_DELETE,
-    NIM_MODIFY, NIM_SETVERSION, NINF_KEY, NIN_SELECT, NOTIFYICONDATAW, NOTIFYICON_VERSION_4,
+    ShellExecuteW, Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIM_ADD,
+    NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NINF_KEY, NIN_SELECT, NOTIFYICONDATAW,
+    NOTIFYICON_VERSION_4,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AllowSetForegroundWindow, AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
-    DestroyIcon, DestroyMenu, DestroyWindow, FindWindowW, GetCursorPos, KillTimer, LoadCursorW,
-    LoadIconW, PostMessageW, RegisterClassW, RegisterWindowMessageW, SetForegroundWindow,
-    SetTimer, SetWindowPos, ShowWindow, TrackPopupMenu, ASFW_ANY, CS_DROPSHADOW, HICON,
-    HWND_TOPMOST, IDC_ARROW, IDI_APPLICATION, MENU_ITEM_FLAGS, MF_CHECKED, MF_GRAYED, MF_POPUP,
-    MF_SEPARATOR, MF_STRING, SM_CXSMICON, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_SHOW,
-    TPM_BOTTOMALIGN, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WA_INACTIVE, WM_ACTIVATE,
-    WM_APP, WM_CHAR, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NULL, WM_PAINT,
-    WM_SETTINGCHANGE, WM_SYSCHAR, WM_SYSKEYDOWN, WM_THEMECHANGED, WM_TIMER, WNDCLASSW,
+    AllowSetForegroundWindow, AppendMenuW, CopyIcon, CreatePopupMenu, CreateWindowExW,
+    DefWindowProcW, DestroyIcon, DestroyMenu, DestroyWindow, FindWindowW, GetCursorPos, KillTimer,
+    LoadCursorW, LoadIconW, PostMessageW, RegisterClassW, RegisterWindowMessageW,
+    SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow, TrackPopupMenu, ASFW_ANY,
+    CS_DROPSHADOW, HICON, HWND_TOPMOST, IDC_ARROW, IDI_APPLICATION, MENU_ITEM_FLAGS, MF_CHECKED,
+    MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, SM_CXSMICON, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOSIZE, SW_SHOW, TPM_BOTTOMALIGN, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+    WA_INACTIVE, WM_ACTIVATE, WM_APP, WM_CHAR, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_DPICHANGED,
+    WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NULL,
+    WM_PAINT, WM_SETTINGCHANGE, WM_SYSCHAR, WM_SYSKEYDOWN, WM_THEMECHANGED, WM_TIMER, WNDCLASSW,
     WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
@@ -47,7 +50,7 @@ const PANEL_CLASS: PCWSTR = w!("LaserPointerFlyout");
 const WM_TRAY: u32 = WM_APP + 1;
 const TRAY_ID: u32 = 1;
 const NIN_KEYSELECT: u32 = NIN_SELECT | NINF_KEY;
-const TIMER_PREVIEW: usize = 1;
+const TIMER_WAKE: usize = 1;
 // Not in the bindings' WindowsAndMessaging module.
 const WM_MOUSELEAVE: u32 = 0x02a3;
 
@@ -155,6 +158,56 @@ pub fn shutdown() {
     }
 }
 
+pub fn welcome() -> Result<()> {
+    unsafe {
+        open_panel()?;
+    }
+    with_panel(Panel::welcome);
+    let hwnd = state(|s| s.flyout.get());
+    unsafe {
+        let _ = InvalidateRect(Some(hwnd), None, false);
+    }
+    Ok(())
+}
+
+pub fn animation_waitable() -> Option<HANDLE> {
+    with_panel(|panel| {
+        if panel.frame_schedule() == crate::frame::Schedule::Wait {
+            panel.waitable()
+        } else {
+            None
+        }
+    })
+    .flatten()
+}
+
+pub fn frame_schedule() -> crate::frame::Schedule {
+    with_panel(|panel| panel.frame_schedule()).unwrap_or(crate::frame::Schedule::Idle)
+}
+
+pub fn hold_frame_slot() {
+    with_panel(Panel::hold_frame_slot);
+}
+
+fn arm_wake(hwnd: HWND) {
+    unsafe {
+        let _ = KillTimer(Some(hwnd), TIMER_WAKE);
+        if let Some(delay) = with_panel(|panel| panel.wake_after()).flatten() {
+            SetTimer(Some(hwnd), TIMER_WAKE, delay, None);
+        }
+    }
+}
+
+pub fn render_panel() {
+    if let Some(Err(error)) = with_panel(|panel| unsafe { panel.draw() }) {
+        eprintln!("Could not draw panel: {error}");
+    }
+    let hwnd = state(|s| s.flyout.get());
+    if !hwnd.is_invalid() {
+        arm_wake(hwnd);
+    }
+}
+
 pub fn panel_open() -> bool {
     !state(|s| s.flyout.get()).is_invalid()
 }
@@ -233,8 +286,15 @@ unsafe fn update_tray(add: bool) {
     let on = crate::laser_on();
     let current = settings::get();
     let size = GetSystemMetricsForDpi(SM_CXSMICON, GetDpiForSystem()) as u32;
-    let icon = crate::tray_icon(on, size)
-        .unwrap_or_else(|| LoadIconW(None, IDI_APPLICATION).unwrap_or_default());
+    let icon = crate::tray_icon(on, size).unwrap_or_else(|| {
+        LoadIconW(
+            Some(state(|s| s.instance.get())),
+            PCWSTR(usize::from(1u16) as *const u16),
+        )
+        .or_else(|_| LoadIconW(None, IDI_APPLICATION))
+        .and_then(|icon| CopyIcon(icon))
+        .unwrap_or_default()
+    });
     let mut data = notify_data();
     data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
     data.uCallbackMessage = WM_TRAY;
@@ -262,6 +322,15 @@ unsafe fn update_tray(add: bool) {
 
 extern "system" fn tray_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     unsafe {
+        if (msg == WM_SETTINGCHANGE
+            && lparam.0 != 0
+            && PCWSTR(lparam.0 as *const u16)
+                .to_string()
+                .is_ok_and(|name| name == "ImmersiveColorSet"))
+            || msg == WM_DPICHANGED
+        {
+            update_tray(false);
+        }
         if msg == WM_TRAY {
             match (lparam.0 & 0xffff) as u32 {
                 NIN_SELECT | NIN_KEYSELECT => toggle_panel(),
@@ -411,7 +480,7 @@ unsafe fn open_panel() -> Result<()> {
         Some(state(|s| s.instance.get())),
         None,
     )?;
-    let panel = match Panel::new(hwnd, dpi, width as u32, height as u32) {
+    let mut panel = match Panel::new(hwnd, dpi, width as u32, height as u32) {
         Ok(panel) => panel,
         Err(error) => {
             let _ = DestroyWindow(hwnd);
@@ -419,11 +488,15 @@ unsafe fn open_panel() -> Result<()> {
         }
     };
     style_window(hwnd, &panel);
+    if let Err(error) = panel.draw() {
+        let _ = DestroyWindow(hwnd);
+        return Err(error);
+    }
     PANEL.with(|slot| *slot.borrow_mut() = Some(panel));
     state(|s| s.flyout.set(hwnd));
     // The panel has the keyboard now; let go of every shortcut so they can be typed into it.
     crate::sync_hotkeys();
-    SetTimer(Some(hwnd), TIMER_PREVIEW, 16, None);
+    arm_wake(hwnd);
     let _ = ShowWindow(hwnd, SW_SHOW);
     let _ = SetForegroundWindow(hwnd);
     Ok(())
@@ -454,15 +527,14 @@ extern "system" fn panel_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
                 DefWindowProcW(hwnd, msg, wparam, lparam)
             }
             WM_PAINT => {
-                with_panel(|panel| panel.draw());
+                render_panel();
                 let _ = ValidateRect(Some(hwnd), None);
                 LRESULT(0)
             }
             WM_ERASEBKGND => LRESULT(1),
-            WM_TIMER if wparam.0 == TIMER_PREVIEW => {
-                if with_panel(Panel::tick).unwrap_or(false) {
-                    let _ = InvalidateRect(Some(hwnd), None, false);
-                }
+            WM_TIMER if wparam.0 == TIMER_WAKE => {
+                let _ = KillTimer(Some(hwnd), TIMER_WAKE);
+                let _ = InvalidateRect(Some(hwnd), None, false);
                 LRESULT(0)
             }
             WM_MOUSEMOVE => {
@@ -510,15 +582,40 @@ extern "system" fn panel_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
                 LRESULT(0)
             }
             WM_SYSCHAR => LRESULT(0),
+            WM_DPICHANGED => {
+                let dpi = (wparam.0 & 0xffff) as u32;
+                let area = &*(lparam.0 as *const RECT);
+                let width = area.right - area.left;
+                let height = area.bottom - area.top;
+                let _ = SetWindowPos(
+                    hwnd,
+                    None,
+                    area.left,
+                    area.top,
+                    width,
+                    height,
+                    SWP_NOACTIVATE,
+                );
+                if let Some(Err(error)) =
+                    with_panel(|panel| panel.resize(dpi, width as u32, height as u32))
+                {
+                    eprintln!("Could not resize panel: {error}");
+                }
+                arm_wake(hwnd);
+                let _ = InvalidateRect(Some(hwnd), None, false);
+                update_tray(false);
+                LRESULT(0)
+            }
             WM_SETTINGCHANGE | WM_THEMECHANGED => {
                 with_panel(|panel| {
                     panel.reload_theme();
                     style_window(hwnd, panel);
                 });
+                let _ = InvalidateRect(Some(hwnd), None, false);
                 DefWindowProcW(hwnd, msg, wparam, lparam)
             }
             WM_DESTROY => {
-                let _ = KillTimer(Some(hwnd), TIMER_PREVIEW);
+                let _ = KillTimer(Some(hwnd), TIMER_WAKE);
                 PANEL.with(|slot| slot.borrow_mut().take());
                 state(|s| {
                     s.flyout.set(HWND::default());
@@ -545,6 +642,29 @@ unsafe fn act(hwnd: HWND, action: Option<Action>) {
         Some(Action::Toggle(on)) => crate::set_laser(on),
         Some(Action::PickColor) => pick_color(hwnd),
         Some(Action::Quit) => crate::quit(),
+        Some(Action::OpenLink(index)) => {
+            let urls = [
+                "https://ayricky.github.io/laser-pointer/",
+                "https://github.com/ayricky/laser-pointer",
+                "https://ayricky.github.io/laser-pointer/privacy.html",
+            ];
+            if let Some(url) = urls.get(index) {
+                state(|s| s.modal.set(true));
+                let result = ShellExecuteW(
+                    Some(hwnd),
+                    w!("open"),
+                    &HSTRING::from(*url),
+                    PCWSTR::null(),
+                    PCWSTR::null(),
+                    SW_SHOW,
+                );
+                state(|s| s.modal.set(false));
+                if result.0 as isize <= 32 {
+                    eprintln!("Could not open {url}");
+                }
+            }
+            let _ = InvalidateRect(Some(hwnd), None, false);
+        }
         Some(Action::Close) => {
             let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
         }

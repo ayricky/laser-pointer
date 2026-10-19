@@ -4,13 +4,17 @@ use std::cell::{Cell, RefCell};
 use std::io::Write;
 use std::path::PathBuf;
 
-use windows::core::{w, HSTRING, PCWSTR};
+use windows::core::{w, Result, HSTRING, PCWSTR};
+use windows::ApplicationModel::{StartupTask, StartupTaskState};
+use windows::Win32::Foundation::APPMODEL_ERROR_NO_PACKAGE;
 use windows::Win32::Storage::FileSystem::{
     MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
 };
+use windows::Win32::Storage::Packaging::Appx::GetCurrentPackageFullName;
 use windows::Win32::System::Registry::{
     RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW, HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_SZ,
 };
+use windows::Win32::System::WinRT::{RoInitialize, RoUninitialize, RO_INIT_MULTITHREADED};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     MOD_ALT, MOD_CONTROL, MOD_SHIFT, VK_ESCAPE, VK_OEM_4, VK_OEM_6,
 };
@@ -278,6 +282,7 @@ pub fn clean_name(name: &str) -> String {
 thread_local! {
     static CURRENT: Cell<Settings> = Cell::new(Settings::default());
     static PRESETS: RefCell<Vec<Preset>> = RefCell::new(default_presets());
+    static PRESET_REVISION: Cell<u64> = const { Cell::new(0) };
 }
 
 pub fn get() -> Settings {
@@ -287,6 +292,14 @@ pub fn get() -> Settings {
 pub fn set(mut settings: Settings) {
     settings.look = settings.look.clamped();
     CURRENT.with(|current| current.set(settings));
+}
+
+pub fn preset_count() -> usize {
+    PRESETS.with(|presets| presets.borrow().len())
+}
+
+pub fn preset_revision() -> u64 {
+    PRESET_REVISION.with(Cell::get)
 }
 
 pub fn presets() -> Vec<Preset> {
@@ -299,6 +312,7 @@ pub fn set_presets(mut list: Vec<Preset>) {
         preset.look = preset.look.clamped();
     }
     PRESETS.with(|presets| *presets.borrow_mut() = list);
+    PRESET_REVISION.with(|revision| revision.set(revision.get().wrapping_add(1)));
 }
 
 /// The preset the current look came from, if it still matches one.
@@ -486,7 +500,8 @@ pub fn parse(text: &str) -> (Settings, Option<Vec<Preset>>) {
     (settings, saw_presets.then_some(list))
 }
 
-pub fn load() {
+pub fn load() -> bool {
+    let first_run = path().is_some_and(|path| !path.exists());
     let text = path()
         .and_then(|path| std::fs::read_to_string(path).ok())
         .unwrap_or_default();
@@ -495,6 +510,7 @@ pub fn load() {
     if let Some(list) = list {
         set_presets(list);
     }
+    first_run
 }
 
 pub fn serialize(settings: &Settings, presets: &[Preset]) -> String {
@@ -564,7 +580,7 @@ pub fn save() {
 const RUN_KEY: PCWSTR = w!(r"Software\Microsoft\Windows\CurrentVersion\Run");
 const RUN_VALUE: PCWSTR = w!("LaserPointer");
 
-pub fn autostart() -> bool {
+fn registry_autostart() -> bool {
     unsafe {
         RegGetValueW(
             HKEY_CURRENT_USER,
@@ -579,32 +595,137 @@ pub fn autostart() -> bool {
     }
 }
 
-pub fn set_autostart(on: bool) {
+fn set_registry_autostart(on: bool) -> Result<()> {
     unsafe {
         if !on {
-            let _ = RegDeleteKeyValueW(HKEY_CURRENT_USER, RUN_KEY, RUN_VALUE);
-            return;
+            let result = RegDeleteKeyValueW(HKEY_CURRENT_USER, RUN_KEY, RUN_VALUE);
+            if result == windows::Win32::Foundation::ERROR_FILE_NOT_FOUND {
+                return Ok(());
+            }
+            return result.ok();
         }
-        let Ok(exe) = std::env::current_exe() else {
-            return;
-        };
+        let exe = std::env::current_exe().map_err(|error| {
+            windows::core::Error::new(windows::Win32::Foundation::E_FAIL, error.to_string())
+        })?;
         let command = HSTRING::from(format!("\"{}\"", exe.display()));
         // REG_SZ data includes the terminating null.
         let bytes = (command.len() + 1) * 2;
-        let _ = RegSetKeyValueW(
+        RegSetKeyValueW(
             HKEY_CURRENT_USER,
             RUN_KEY,
             RUN_VALUE,
             REG_SZ.0,
             Some(command.as_ptr().cast()),
             bytes as u32,
-        );
+        )
+        .ok()
+    }
+}
+
+/// Packaged apps need the manifest startup task because their Run key is virtualised.
+fn packaged() -> bool {
+    let mut length = 0;
+    unsafe { GetCurrentPackageFullName(&mut length, None) != APPMODEL_ERROR_NO_PACKAGE }
+}
+
+pub struct Autostart {
+    pub enabled: bool,
+    pub blocked: bool,
+}
+
+fn startup_state(state: StartupTaskState) -> Autostart {
+    Autostart {
+        enabled: matches!(
+            state,
+            StartupTaskState::Enabled | StartupTaskState::EnabledByPolicy
+        ),
+        blocked: matches!(
+            state,
+            StartupTaskState::DisabledByUser | StartupTaskState::DisabledByPolicy
+        ),
+    }
+}
+
+pub fn autostart() -> Result<Autostart> {
+    if packaged() {
+        return packaged_autostart(None);
+    }
+    Ok(Autostart {
+        enabled: registry_autostart(),
+        blocked: false,
+    })
+}
+
+pub fn set_autostart(on: bool) -> Result<Autostart> {
+    if packaged() {
+        return packaged_autostart(Some(on));
+    }
+    set_registry_autostart(on)?;
+    autostart()
+}
+
+/// Blocking WinRT completions must stay off the UI thread's STA.
+fn packaged_autostart(on: Option<bool>) -> Result<Autostart> {
+    std::thread::Builder::new()
+        .name("Startup task".into())
+        .spawn(move || {
+            unsafe {
+                RoInitialize(RO_INIT_MULTITHREADED)?;
+            }
+            let result = startup_task(on);
+            unsafe {
+                RoUninitialize();
+            }
+            result
+        })
+        .map_err(|error| {
+            windows::core::Error::new(windows::Win32::Foundation::E_FAIL, error.to_string())
+        })?
+        .join()
+        .map_err(|_| {
+            windows::core::Error::new(
+                windows::Win32::Foundation::E_FAIL,
+                "Startup task worker stopped unexpectedly",
+            )
+        })?
+}
+
+fn startup_task(on: Option<bool>) -> Result<Autostart> {
+    let task = StartupTask::GetAsync(&HSTRING::from("LaserPointerStartup"))?.join()?;
+    let state = task.State()?;
+    if matches!(
+        state,
+        StartupTaskState::DisabledByUser | StartupTaskState::DisabledByPolicy
+    ) {
+        return Ok(startup_state(state));
+    }
+    match on {
+        Some(true) => Ok(startup_state(task.RequestEnableAsync()?.join()?)),
+        Some(false) => {
+            task.Disable()?;
+            Ok(startup_state(task.State()?))
+        }
+        None => Ok(startup_state(state)),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_states_follow_user_and_policy_choices() {
+        for (state, enabled, blocked) in [
+            (StartupTaskState::Disabled, false, false),
+            (StartupTaskState::Enabled, true, false),
+            (StartupTaskState::DisabledByUser, false, true),
+            (StartupTaskState::DisabledByPolicy, false, true),
+            (StartupTaskState::EnabledByPolicy, true, false),
+        ] {
+            let actual = startup_state(state);
+            assert_eq!((actual.enabled, actual.blocked), (enabled, blocked));
+        }
+    }
 
     #[test]
     fn settings_round_trip() {
