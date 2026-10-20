@@ -143,6 +143,7 @@ struct ToggleDef {
     set: fn(&mut Settings, bool),
 }
 
+const KEEP_STROKES: usize = 0;
 const AUTOSTART: usize = 4;
 
 const TOGGLES: [ToggleDef; 5] = [
@@ -209,6 +210,8 @@ pub enum Action {
     Redraw,
     SettingsChanged,
     Toggle(bool),
+    /// Something the tray menu and shortcuts do too, done the same way.
+    Run(Command),
     PickColor,
     Quit,
     Close,
@@ -902,6 +905,8 @@ impl Panel {
                 self.capturing = None;
                 return Action::SettingsChanged;
             }
+            // Turning it off also lets go of what is kept on screen, as the shortcut does.
+            Widget::Toggle(KEEP_STROKES) => return Action::Run(Command::ToggleInk),
             Widget::Toggle(AUTOSTART) => {
                 settings::set_autostart(!self.autostart);
                 self.autostart = settings::autostart();

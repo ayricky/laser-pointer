@@ -45,7 +45,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP, MOD_NOREPEAT, MOUSEEVENTF_HWHEEL,
     MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
     MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT, MOUSEMOVEPOINT,
-    MOUSE_EVENT_FLAGS, VIRTUAL_KEY, VK_CONTROL, VK_MENU, VK_SHIFT,
+    MOUSE_EVENT_FLAGS, VIRTUAL_KEY, VK_MENU, VK_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyCursor, DispatchMessageW, GetCursorPos,
@@ -53,7 +53,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     MsgWaitForMultipleObjectsEx, PeekMessageW, PostQuitMessage, RegisterClassW, SetCursor,
     SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
     SystemParametersInfoW, TranslateMessage, GWL_EXSTYLE, HCURSOR, HICON, HWND_TOPMOST,
-    IDC_CROSS, LWA_ALPHA, MA_NOACTIVATE, MSG, MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT,
+    IDC_ARROW, IDC_CROSS, LWA_ALPHA, MA_NOACTIVATE, MSG, MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT,
     SC_CLOSE, SC_KEYMENU, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
     SM_YVIRTUALSCREEN, SPI_GETCLIENTAREAANIMATION, SWP_NOACTIVATE, SWP_NOMOVE,
     SWP_NOOWNERZORDER, SWP_NOSIZE, SW_HIDE, SW_SHOWNOACTIVATE, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
@@ -118,6 +118,7 @@ struct Ripple {
 
 /// A finished stroke settling onto the shape it was recognised as.
 struct Morph {
+    /// For each point of the shape, the point of the drawn path it slides from.
     from: Vec<(f32, f32)>,
     to: Correction,
     at: Instant,
@@ -148,12 +149,23 @@ impl Drawn {
             return false;
         };
         let k = (now.duration_since(morph.at).as_secs_f32() / MORPH_SECS).min(1.0);
-        let parts = shapes::morph(&morph.from, &morph.to, ease_out(k));
-        set_parts(&mut self.stroke, &parts, morph.at);
+        let t = ease_out(k);
+        let targets = morph.to.parts.iter().flatten();
+        for ((point, &(fx, fy)), &(tx, ty)) in self.stroke.points.iter_mut().zip(&morph.from).zip(targets) {
+            point.x = fx + (tx - fx) * t;
+            point.y = fy + (ty - fy) * t;
+        }
         if k >= 1.0 {
             self.morph = None;
         }
         k < 1.0
+    }
+
+    /// Jumps a snapping stroke to its final shape, before it is put aside for undo or redo.
+    fn settle(&mut self) {
+        if let Some(morph) = self.morph.take() {
+            set_parts(&mut self.stroke, &morph.to.parts, morph.at);
+        }
     }
 }
 
@@ -216,6 +228,9 @@ struct Pointer {
     ignited: Option<Instant>,
     /// Button state and when it last changed.
     pressed: Option<(bool, Instant)>,
+    /// The cursor last handed to SetCursor, which may still be showing and so mustn't be
+    /// destroyed, even once the laser is off.
+    installed: Option<HCURSOR>,
 }
 
 fn ease_out(k: f32) -> f32 {
@@ -264,22 +279,40 @@ impl Pointer {
         (zoom, animating)
     }
 
-    /// Drops cursors for looks no longer in use, and caps how many are kept.
-    fn evict(&mut self, keep: CursorKey) {
-        self.cursors.retain(|(key, cursor)| {
-            let current = key.style == keep.style && key.color == keep.color;
-            if !current {
-                unsafe {
-                    let _ = DestroyCursor(*cursor);
-                }
-            }
-            current
-        });
-        while self.cursors.len() > 48 {
-            let (_, cursor) = self.cursors.remove(0);
+    /// Shows a cursor now if the laser is on, and hands it to WM_SETCURSOR for later.
+    fn publish(&mut self, cursor: HCURSOR) {
+        CURSOR.store(cursor.0 as isize, Ordering::Relaxed);
+        if laser_on() {
             unsafe {
-                let _ = DestroyCursor(cursor);
+                SetCursor(Some(cursor));
             }
+            self.installed = Some(cursor);
+        }
+    }
+
+    /// Drops cursors for looks no longer in use, and caps how many are kept. The one most
+    /// recently installed survives until something else replaces it.
+    fn evict(&mut self, keep: CursorKey) {
+        let installed = self.installed;
+        let destroy = |cursor: HCURSOR| unsafe {
+            let _ = DestroyCursor(cursor);
+        };
+        self.cursors.retain(|&(key, cursor)| {
+            let same_look = key.style == keep.style && key.color == keep.color;
+            if same_look || Some(cursor) == installed {
+                return true;
+            }
+            destroy(cursor);
+            false
+        });
+        // Oldest first, but never the frame in use or the one on screen.
+        while self.cursors.len() > 48 {
+            let spare = self
+                .cursors
+                .iter()
+                .position(|&(key, cursor)| key != keep && Some(cursor) != installed);
+            let Some(index) = spare else { break };
+            destroy(self.cursors.remove(index).1);
         }
     }
 }
@@ -678,9 +711,11 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 LRESULT(0)
             }
             WM_LBUTTONUP => {
+                // Ctrl as it was at the release, not whenever this message gets handled.
+                let freehand = wparam.0 & MK_CONTROL != 0;
                 with_app(|app| {
                     app.extend(client_point(lparam));
-                    app.finish();
+                    app.finish_stroke(freehand);
                 });
                 let _ = ReleaseCapture();
                 LRESULT(0)
@@ -827,16 +862,6 @@ unsafe fn pass_through(hwnd: HWND, inputs: &[INPUT]) {
     SetTimer(Some(hwnd), TIMER_PASSTHROUGH, PASSTHROUGH_MS, None);
 }
 
-/// Shows a cursor now if the laser is on, and hands it to WM_SETCURSOR for later.
-fn publish_cursor(cursor: HCURSOR) {
-    CURSOR.store(cursor.0 as isize, Ordering::Relaxed);
-    if laser_on() {
-        unsafe {
-            SetCursor(Some(cursor));
-        }
-    }
-}
-
 fn key_held(key: VIRTUAL_KEY) -> bool {
     unsafe { GetAsyncKeyState(i32::from(key.0)) < 0 }
 }
@@ -954,6 +979,13 @@ impl App {
 
     fn shutdown(&mut self) {
         games::remove_hook(self.foreground_hook);
+        // Put a stock cursor up first: a cursor in use mustn't be destroyed.
+        if let Ok(arrow) = unsafe { LoadCursorW(None, IDC_ARROW) } {
+            unsafe {
+                SetCursor(Some(arrow));
+            }
+            self.pointer.installed = None;
+        }
         self.pointer.evict(CursorKey {
             style: usize::MAX,
             color: 0,
@@ -981,8 +1013,9 @@ impl App {
 
     /// Something on screen changes by itself, without new input.
     fn animating(&self) -> bool {
+        let now = Instant::now();
         self.strokes.iter().any(|drawn| {
-            drawn.morph.is_some() || (!drawn.stroke.look.ink && !drawn.stroke.points.is_empty())
+            drawn.morph.is_some() || (!drawn.stroke.look.ink && !drawn.stroke.expired(now))
         })
             || !self.ripples.is_empty()
             || self.toast.is_some()
@@ -1371,36 +1404,54 @@ impl App {
         }
         let at = sample_instant(sample.time, ticks, now);
         let at = stroke.points.last().map_or(at, |last| at.max(last.at));
+        let snappable = stroke.look.snap > 0 && !self.locked;
         stroke.points.push(Point { x, y, at });
-        self.path.push((x, y));
+        if snappable {
+            // Long holds thin out rather than grow without end; shapes don't need every point.
+            if self.path.len() >= 4096 {
+                let mut keep = false;
+                self.path.retain(|_| {
+                    keep = !keep;
+                    keep
+                });
+            }
+            self.path.push((x, y));
+        }
         self.dirty = true;
     }
 
     fn finish(&mut self) {
+        self.finish_stroke(false);
+    }
+
+    /// Ends the stroke being drawn, snapping it to a shape unless `freehand`.
+    fn finish_stroke(&mut self, freehand: bool) {
         if !self.drawing {
             return;
         }
         self.drawing = false;
         self.sample = None;
         self.lock = Lock::None;
-        self.snap_finished();
+        if !freehand {
+            self.snap_finished();
+        }
+        self.path.clear();
         self.dirty = true;
         self.pointer.pressed = Some((false, Instant::now()));
         self.refresh_cursor();
     }
 
     /// Pulls the stroke just finished onto the line, arrow or shape it looks like, unless it was
-    /// a straight line already or the user is holding Ctrl to keep it freehand.
+    /// a straight line already.
     fn snap_finished(&mut self) {
-        let path = std::mem::take(&mut self.path);
         let Some(drawn) = self.strokes.last_mut() else {
             return;
         };
         let snap = drawn.stroke.look.snap;
-        if self.locked || snap == 0 || key_held(VK_CONTROL) {
+        if self.locked || snap == 0 {
             return;
         }
-        let Some(correction) = shapes::correct(&path, drawn.stroke.scale, snap as f32 / 100.0)
+        let Some(correction) = shapes::correct(&self.path, drawn.stroke.scale, snap as f32 / 100.0)
         else {
             return;
         };
@@ -1408,21 +1459,22 @@ impl App {
         drawn.stroke.whole = true;
         // Corners stay sharp; the shape is already smooth where it should be.
         drawn.stroke.look.smoothing = 0;
+        set_parts(&mut drawn.stroke, &correction.parts, now);
         if animations_enabled() {
+            let from = shapes::correspondence(&self.path, &correction);
             drawn.morph = Some(Morph {
-                from: path,
+                from,
                 to: correction,
                 at: now,
             });
             drawn.advance_morph(now);
-        } else {
-            set_parts(&mut drawn.stroke, &correction.parts, now);
         }
     }
 
     fn remove_stroke(&mut self, id: u64) -> Option<Drawn> {
         let index = self.strokes.iter().position(|drawn| drawn.id == id)?;
-        let drawn = self.strokes.remove(index);
+        let mut drawn = self.strokes.remove(index);
+        drawn.settle();
         if drawn.baked {
             self.rebake();
         }
@@ -1503,6 +1555,10 @@ impl App {
         self.strokes = kept;
         if gone.is_empty() {
             return;
+        }
+        let mut gone = gone;
+        for drawn in &mut gone {
+            drawn.settle();
         }
         if gone.iter().any(|drawn| drawn.baked) {
             self.rebake();
@@ -1634,14 +1690,14 @@ impl App {
                 None => {
                     self.pointer.current = None;
                     if let Ok(cross) = unsafe { LoadCursorW(None, IDC_CROSS) } {
-                        publish_cursor(cross);
+                        self.pointer.publish(cross);
                     }
                     return;
                 }
             },
         };
         self.pointer.current = Some(key);
-        publish_cursor(cursor);
+        self.pointer.publish(cursor);
         // Only once the replacement is showing can the old ones go.
         self.pointer.evict(key);
     }
@@ -1664,8 +1720,12 @@ impl App {
         let mut lost = false;
         for (index, drawn) in self.strokes.iter_mut().enumerate() {
             let in_progress = self.drawing && index == last;
-            if drawn.baked || !drawn.stroke.look.ink || in_progress || drawn.morph.is_some() {
+            if drawn.baked || !drawn.stroke.look.ink {
                 continue;
+            }
+            // Later strokes wait too, so the ink keeps the order they were drawn in.
+            if in_progress || drawn.morph.is_some() {
+                break;
             }
             let (scratch, stroke) = (&mut self.scratch, &mut drawn.stroke);
             let baked = unsafe {
@@ -1713,6 +1773,7 @@ impl App {
         });
         for drawn in &mut self.strokes {
             drawn.advance_morph(now);
+            drawn.stroke.prune(now);
         }
         self.bake_finished();
         let Some(gfx) = &self.gfx else { return };

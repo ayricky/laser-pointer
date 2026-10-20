@@ -65,6 +65,8 @@ struct State {
     tray: Cell<HWND>,
     flyout: Cell<HWND>,
     icon: Cell<HICON>,
+    /// Rendered by the app, so ours to destroy; the stock fallback is shared and must not be.
+    icon_owned: Cell<bool>,
     closed_at: Cell<Option<Instant>>,
     modal: Cell<bool>,
     tracking: Cell<bool>,
@@ -254,8 +256,10 @@ unsafe fn update_tray(add: bool) {
     let on = crate::laser_on();
     let current = settings::get();
     let size = GetSystemMetricsForDpi(SM_CXSMICON, GetDpiForSystem()) as u32;
-    let icon = crate::tray_icon(on, size)
-        .unwrap_or_else(|| LoadIconW(None, IDI_APPLICATION).unwrap_or_default());
+    let (icon, owned) = match crate::tray_icon(on, size) {
+        Some(icon) => (icon, true),
+        None => (LoadIconW(None, IDI_APPLICATION).unwrap_or_default(), false),
+    };
     let mut data = notify_data();
     data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
     data.uCallbackMessage = WM_TRAY;
@@ -274,7 +278,8 @@ unsafe fn update_tray(add: bool) {
         let _ = Shell_NotifyIconW(NIM_MODIFY, &data);
     }
     let old = state(|s| s.icon.replace(icon));
-    if !old.is_invalid() && old != icon {
+    let old_owned = state(|s| s.icon_owned.replace(owned));
+    if old_owned && !old.is_invalid() && old != icon {
         let _ = DestroyIcon(old);
     }
 }
@@ -562,6 +567,7 @@ unsafe fn act(hwnd: HWND, action: Option<Action>) {
             let _ = InvalidateRect(Some(hwnd), None, false);
         }
         Some(Action::Toggle(on)) => crate::set_laser(on),
+        Some(Action::Run(command)) => crate::run_command(command),
         Some(Action::PickColor) => pick_color(hwnd),
         Some(Action::Quit) => crate::quit(),
         Some(Action::Close) => {

@@ -68,6 +68,22 @@ impl Stroke {
             })
     }
 
+    /// Drops points that have aged out, keeping the newest faded one so the tail still tapers.
+    /// Painting does this too, but a stroke can be off screen and never painted.
+    pub fn prune(&mut self, now: Instant) {
+        if self.look.ink || self.whole {
+            return;
+        }
+        let fade = u128::from(self.look.fade_ms);
+        let aged = self
+            .points
+            .iter()
+            .take_while(|point| now.duration_since(point.at).as_millis() >= fade)
+            .count();
+        let drop = if aged == self.points.len() { aged } else { aged.saturating_sub(1) };
+        self.points.drain(..drop);
+    }
+
     pub fn translate(&mut self, dx: f32, dy: f32) {
         for point in &mut self.points {
             point.x += dx;

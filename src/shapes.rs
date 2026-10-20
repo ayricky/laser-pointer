@@ -69,6 +69,19 @@ fn resample(points: &[P], count: usize) -> Vec<P> {
     out
 }
 
+/// Turns a closed polyline (last point repeating the first) so it begins at the point nearest
+/// `start`, keeping its direction, so it lines up point for point with the stroke as drawn.
+fn begin_near(closed: Vec<P>, start: P) -> Vec<P> {
+    let mut ring = closed;
+    ring.pop();
+    let first = (0..ring.len())
+        .min_by(|&i, &j| distance(ring[i], start).total_cmp(&distance(ring[j], start)))
+        .unwrap_or(0);
+    ring.rotate_left(first);
+    ring.push(ring[0]);
+    ring
+}
+
 /// Densely samples straight segments between corners.
 fn polyline(corners: &[P], scale: f32) -> Vec<P> {
     let mut out = vec![corners[0]];
@@ -275,24 +288,11 @@ fn pull(drawn: &[P], ideal: Correction, strength: f32) -> Correction {
     }
 }
 
-/// For the morph animation: the drawn path, spread over the corrected shape's points, moved
-/// `t` of the way there.
-pub fn morph(drawn: &[P], to: &Correction, t: f32) -> Vec<Vec<P>> {
+/// For the morph animation: a point on the drawn path for each point of the shape, in order, so
+/// the stroke can slide onto it point for point.
+pub fn correspondence(drawn: &[P], to: &Correction) -> Vec<P> {
     let total: usize = to.parts.iter().map(Vec::len).sum();
-    let from = resample(drawn, total.max(2));
-    let mut offset = 0;
-    to.parts
-        .iter()
-        .map(|part| {
-            let mapped = part
-                .iter()
-                .zip(&from[offset..])
-                .map(|(to, from)| (lerp(from.0, to.0, t), lerp(from.1, to.1, t)))
-                .collect();
-            offset += part.len();
-            mapped
-        })
-        .collect()
+    resample(drawn, total.max(2))
 }
 
 /// If the end comes back to the start (or past it), the loop up to that point.
@@ -308,6 +308,11 @@ fn closed_part(path: &[P], tolerance: &Tolerances) -> Option<Vec<P>> {
         .map(|(i, p)| (from + i, distance(*p, start)))
         .min_by(|a, b| a.1.total_cmp(&b.1))?;
     if gap > tolerance.close * size {
+        return None;
+    }
+    // Overshooting the start a little is how people circle things; a real tail beyond it is
+    // something else, and mustn't be thrown away.
+    if length(&path[index..]) > 0.12 * length(path) {
         return None;
     }
     let mut loop_ = path[..=index].to_vec();
@@ -373,6 +378,15 @@ fn arrow(path: &[P], tolerance: &Tolerances, strength: f32, scale: f32) -> Optio
         .map(|&p| (p, distance(p, tip)))
         .max_by(|a, b| a.1.total_cmp(&b.1))?;
     if turn_at(start, tip, wing) < 110f32.to_radians() {
+        return None;
+    }
+    // A wing sits off to the side of the shaft; running straight back along it is a retrace.
+    let (ux, uy) = ((tip.0 - start.0) / shaft, (tip.1 - start.1) / shaft);
+    let sideways = head
+        .iter()
+        .map(|p| ((p.0 - tip.0) * uy - (p.1 - tip.1) * ux).abs())
+        .fold(0.0, f32::max);
+    if sideways < 0.35 * reach || length(head) > 4.5 * reach {
         return None;
     }
     let straight = line(&path[..=tip_index], tolerance, strength, scale)?;
@@ -486,10 +500,13 @@ fn polygon(loop_: &[P], tolerance: &Tolerances, scale: f32) -> Option<Correction
             closed.push(corner_points[0]);
             Some(Correction {
                 shape: Shape::Triangle,
-                parts: vec![polyline(&closed, scale)],
+                parts: vec![begin_near(polyline(&closed, scale), loop_[0])],
             })
         }
-        4 => rectangle(&corner_points, tolerance, scale),
+        4 => rectangle(&corner_points, tolerance, scale).map(|rectangle| Correction {
+            parts: vec![begin_near(rectangle.parts[0].clone(), loop_[0])],
+            ..rectangle
+        }),
         _ => None,
     }
 }
@@ -857,16 +874,35 @@ mod tests {
     }
 
     #[test]
-    fn morph_runs_from_the_drawn_path_to_the_shape() {
+    fn morph_pairs_each_shape_point_with_the_drawn_path_in_order() {
         let mut random = Random(11);
         let drawn = sloppy_ellipse(&mut random, 2.0, true);
         let shape = correct(&drawn, 1.0, 0.8).unwrap();
-        let end = morph(&drawn, &shape, 1.0);
-        for (morphed, part) in end.iter().zip(&shape.parts) {
-            assert!(morphed.iter().zip(part).all(|(a, b)| distance(*a, *b) < 1e-3));
-        }
-        let start = morph(&drawn, &shape, 0.0);
-        assert!(distance(start[0][0], drawn[0]) < 1e-3);
+        let from = correspondence(&drawn, &shape);
+        assert_eq!(from.len(), shape.parts[0].len());
+        assert!(distance(from[0], drawn[0]) < 1e-3);
+        // The shape begins where the stroke began, so the morph doesn't sweep round.
+        assert!(distance(shape.parts[0][0], drawn[0]) < 30.0);
+    }
+
+    #[test]
+    fn a_rectangle_started_mid_side_begins_there() {
+        let mut random = Random(4);
+        let mid = sloppy_polygon(&mut random, &[(200.0, 100.0), (300.0, 100.0), (300.0, 250.0), (100.0, 250.0), (100.0, 100.0)], 1.0);
+        let shape = correct(&mid, 1.0, 0.8).unwrap();
+        assert_eq!(shape.shape, Shape::Rectangle);
+        assert!(distance(shape.parts[0][0], mid[0]) < 20.0);
+    }
+
+    #[test]
+    fn a_retrace_is_not_an_arrow_and_a_tail_is_not_a_circle() {
+        let retrace = polyline(&[(0.0, 0.0), (100.0, 0.0), (200.0, 0.0), (160.0, 0.0)], 1.0);
+        assert_ne!(correct(&retrace, 1.0, 0.9).map(|c| c.shape), Some(Shape::Arrow));
+        let mut random = Random(9);
+        let mut tailed = sloppy_ellipse(&mut random, 1.0, true);
+        let end = tailed[tailed.len() - 1];
+        tailed.extend((1..=30).map(|i| (end.0 + i as f32 * 8.0, end.1 + i as f32 * 3.0)));
+        assert_ne!(correct(&tailed, 1.0, 0.9).map(|c| c.shape), Some(Shape::Ellipse));
     }
 
     #[test]

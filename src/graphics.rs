@@ -41,7 +41,7 @@ use windows::Win32::Graphics::Dxgi::{
 };
 use windows::Win32::Graphics::Gdi::{
     CreateBitmap, CreateDIBSection, DeleteObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
-    DIB_RGB_COLORS,
+    DIB_RGB_COLORS, HBITMAP,
 };
 use windows::Win32::UI::Shell::SHCreateMemStream;
 use windows::Win32::UI::WindowsAndMessaging::{CreateIconIndirect, HICON, ICONINFO};
@@ -67,6 +67,17 @@ pub struct Toast {
     pub centre: f32,
     pub bottom: f32,
     pub scale: f32,
+}
+
+/// A GDI bitmap deleted however the function using it returns.
+struct OwnedBitmap(HBITMAP);
+
+impl Drop for OwnedBitmap {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = DeleteObject(self.0.into());
+        }
+    }
 }
 
 /// The swap chain's frame-latency waitable, closed with the swap chain.
@@ -477,7 +488,7 @@ impl Graphics {
             ..Default::default()
         };
         let mut bits = std::ptr::null_mut();
-        let color = CreateDIBSection(
+        let color = OwnedBitmap(CreateDIBSection(
             None,
             &BITMAPINFO {
                 bmiHeader: header,
@@ -487,7 +498,7 @@ impl Graphics {
             &mut bits,
             None,
             0,
-        )?;
+        )?);
         let mapped = readback.Map(D2D1_MAP_OPTIONS_READ)?;
         let row_bytes = size as usize * 4;
         for row in 0..size as usize {
@@ -510,17 +521,15 @@ impl Graphics {
         }
         readback.Unmap()?;
 
-        let mask = CreateBitmap(size as i32, size as i32, 1, 1, None);
+        let mask = OwnedBitmap(CreateBitmap(size as i32, size as i32, 1, 1, None));
         let (x, y) = hotspot.unwrap_or_default();
-        let icon = CreateIconIndirect(&ICONINFO {
+        // The icon keeps its own copies of both bitmaps.
+        CreateIconIndirect(&ICONINFO {
             fIcon: hotspot.is_none().into(),
             xHotspot: x.round() as u32,
             yHotspot: y.round() as u32,
-            hbmMask: mask,
-            hbmColor: color,
-        });
-        let _ = DeleteObject(color.into());
-        let _ = DeleteObject(mask.into());
-        icon
+            hbmMask: mask.0,
+            hbmColor: color.0,
+        })
     }
 }
