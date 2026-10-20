@@ -1487,6 +1487,19 @@ impl App {
         Some(drawn)
     }
 
+    /// Puts strokes back where they were in drawing order (ids grow as strokes are drawn), so
+    /// overlaps come back the way they were. Anything baked above them is baked again.
+    fn restore(&mut self, strokes: Vec<Drawn>) {
+        let Some(oldest) = strokes.iter().map(|drawn| drawn.id).min() else {
+            return;
+        };
+        self.strokes.extend(strokes);
+        self.strokes.sort_by_key(|drawn| drawn.id);
+        if self.strokes.iter().any(|drawn| drawn.baked && drawn.id > oldest) {
+            self.rebake();
+        }
+    }
+
     fn undo(&mut self) {
         if self.drawing {
             return;
@@ -1515,7 +1528,7 @@ impl App {
                     }
                     self.clearing.clear();
                     self.redo.push(Redo::Clear(restored.iter().map(|drawn| drawn.id).collect()));
-                    self.strokes.extend(restored);
+                    self.restore(restored);
                     break;
                 }
             }
@@ -1539,7 +1552,7 @@ impl App {
                 }
                 drawn.baked = false;
                 self.undo.push(Edit::Added(drawn.id));
-                self.strokes.push(drawn);
+                self.restore(vec![drawn]);
             }
             Some(Redo::Clear(ids)) => {
                 let redo = std::mem::take(&mut self.redo);
