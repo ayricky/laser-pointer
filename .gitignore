@@ -2,3 +2,6 @@
 /target-*
 /dist
 node_modules/
+/gamebar/bin/
+/gamebar/obj/
+/gamebar/AppPackages/
