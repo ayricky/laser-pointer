@@ -1,0 +1,9 @@
+{
+  "name": "laser-pointer-design",
+  "private": true,
+  "type": "module",
+  "description": "Design candidates for the picker",
+  "devDependencies": {
+    "@resvg/resvg-js": "^2.6.2"
+  }
+}
