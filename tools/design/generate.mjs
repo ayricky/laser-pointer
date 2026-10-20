@@ -1,5 +1,5 @@
 // Writes the design candidates and the picker's data:  node tools/design/generate.mjs
-//   assets/candidates/cursors/NN-slug.svg (+ hotspots.json)
+//   assets/candidates/cursors/NN-slug.svg (+ manifest.json: hotspot and motion for each)
 //   assets/candidates/logos/NN-slug.svg
 //   assets/candidates/tray/NN-slug.svg and NN-slug-on.svg
 //   docs/picker/assets.js — every source inlined, so the picker also works opened from disk
@@ -23,13 +23,13 @@ for (const set of [cursors, logos, tray]) {
 }
 rmSync(join(root, 'assets', 'candidates'), { recursive: true, force: true });
 
-const hotspots = {};
+const manifest = {};
 cursors.forEach((cursor, i) => {
   const name = `${number(i)}-${cursor.slug}`;
   out(`assets/candidates/cursors/${name}.svg`, cursor.svg + '\n');
-  hotspots[name] = cursorHotspot(cursor);
+  manifest[name] = { hotspot: cursorHotspot(cursor), motion: cursor.motion };
 });
-out('assets/candidates/cursors/hotspots.json', JSON.stringify(hotspots, null, 2) + '\n');
+out('assets/candidates/cursors/manifest.json', JSON.stringify(manifest, null, 2) + '\n');
 logos.forEach((logo, i) => out(`assets/candidates/logos/${number(i)}-${logo.slug}.svg`, logo.svg + '\n'));
 tray.forEach((icon, i) => {
   out(`assets/candidates/tray/${number(i)}-${icon.slug}.svg`, icon.off + '\n');
@@ -37,7 +37,7 @@ tray.forEach((icon, i) => {
 });
 
 const data = {
-  cursors: cursors.map((c, i) => ({ id: number(i), slug: c.slug, name: c.name, svg: c.svg, hotspot: cursorHotspot(c) })),
+  cursors: cursors.map((c, i) => ({ id: number(i), slug: c.slug, name: c.name, svg: c.svg, hotspot: cursorHotspot(c), motion: c.motion })),
   logos: logos.map((l, i) => ({ id: number(i), slug: l.slug, name: l.name, svg: l.svg })),
   tray: tray.map((t, i) => ({ id: number(i), slug: t.slug, name: t.name, off: t.off, on: t.on })),
 };

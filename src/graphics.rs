@@ -412,14 +412,16 @@ impl Graphics {
         );
     }
 
-    /// Rasterises an SVG, scaled by `zoom` about `hotspot` (in output pixels), so the cursor and
-    /// tray icon stay sharp at any display scale and the cursor can animate.
+    /// Rasterises an SVG, scaled by `zoom` and turned by `degrees` about `hotspot` (in output
+    /// pixels), so the cursor and tray icon stay sharp at any display scale and the cursor can
+    /// animate.
     pub unsafe fn svg_icon(
         &self,
         svg: &str,
         size: u32,
         hotspot: Option<(f32, f32)>,
         zoom: f32,
+        degrees: f32,
     ) -> Result<HICON> {
         let stream = SHCreateMemStream(Some(svg.as_bytes())).ok_or_else(|| windows::core::Error::from(E_FAIL))?;
         let dc5: ID2D1DeviceContext5 = self.dc.cast()?;
@@ -431,13 +433,16 @@ impl Graphics {
             },
         )?;
         let (x, y) = hotspot.unwrap_or((size as f32 / 2.0, size as f32 / 2.0));
+        let (sin, cos) = degrees.to_radians().sin_cos();
+        let (m11, m12, m21, m22) = (zoom * cos, zoom * sin, -zoom * sin, zoom * cos);
         self.render_icon(size, hotspot, |dc| unsafe {
             dc.SetTransform(&Matrix3x2 {
-                M11: zoom,
-                M22: zoom,
-                M31: x * (1.0 - zoom),
-                M32: y * (1.0 - zoom),
-                ..Default::default()
+                M11: m11,
+                M12: m12,
+                M21: m21,
+                M22: m22,
+                M31: x - (m11 * x + m21 * y),
+                M32: y - (m12 * x + m22 * y),
             });
             dc5.DrawSvgDocument(&document);
             dc.SetTransform(&Matrix3x2::identity());

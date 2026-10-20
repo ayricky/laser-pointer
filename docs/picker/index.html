@@ -5,65 +5,120 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
 <title>Laser Pointer — pick the look</title>
+<link rel="icon" href="data:,">
 <style>
   :root {
     color-scheme: dark;
     --bg: #0e0f12; --panel: #16181d; --raised: #1d2026; --line: #ffffff14; --line-strong: #ffffff29;
-    --text: #f1f2f4; --dim: #9aa0aa; --accent: #ff2a2a;
+    --text: #f1f2f4; --dim: #9aa0aa;
     --ui: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
     --display: "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
+    --mono: ui-monospace, "Cascadia Code", Consolas, monospace;
   }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 var(--ui); }
-  header { position: sticky; top: 0; z-index: 5; background: #0e0f12ee; backdrop-filter: blur(12px); border-bottom: 1px solid var(--line); }
-  .bar { max-width: 1320px; margin: 0 auto; padding: 14px 24px; display: flex; gap: 20px; align-items: center; flex-wrap: wrap; }
+  header { position: sticky; top: 0; z-index: 20; background: #0e0f12ee; backdrop-filter: blur(12px); border-bottom: 1px solid var(--line); }
+  .bar { max-width: 1320px; margin: 0 auto; padding: 12px 24px; display: flex; gap: 20px; align-items: center; flex-wrap: wrap; }
   h1 { font: 600 18px/1 var(--display); margin: 0 12px 0 0; letter-spacing: -.01em; }
+  h2 { font: 600 22px/1.2 var(--display); margin: 0 0 4px; letter-spacing: -.01em; }
   nav { display: flex; gap: 4px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 3px; }
-  nav button { all: unset; cursor: pointer; padding: 6px 14px; border-radius: 7px; color: var(--dim); font-weight: 500; }
-  nav button[aria-selected="true"] { background: var(--raised); color: var(--text); box-shadow: inset 0 0 0 1px var(--line-strong); }
+  nav button, .segmented button { all: unset; cursor: pointer; padding: 6px 14px; border-radius: 7px; color: var(--dim); font-weight: 500; }
+  nav button[aria-selected="true"], .segmented button[aria-pressed="true"] { background: var(--raised); color: var(--text); box-shadow: inset 0 0 0 1px var(--line-strong); }
   .swatches { display: flex; gap: 8px; align-items: center; color: var(--dim); }
   .swatches button { all: unset; cursor: pointer; width: 20px; height: 20px; border-radius: 50%; box-shadow: inset 0 0 0 1px #0006; }
   .swatches button[aria-pressed="true"] { outline: 2px solid var(--text); outline-offset: 2px; }
   .picks { margin-left: auto; display: flex; gap: 10px; align-items: center; color: var(--dim); font-size: 13px; }
-  .picks output { color: var(--text); font: 500 13px ui-monospace, "Cascadia Code", Consolas, monospace; }
-  .button { all: unset; cursor: pointer; padding: 7px 14px; border-radius: 8px; background: var(--text); color: #111; font-weight: 600; font-size: 13px; }
+  .picks output { color: var(--text); font: 500 13px var(--mono); }
+  .button { all: unset; cursor: pointer; padding: 7px 14px; border-radius: 8px; background: var(--text); color: #111; font-weight: 600; font-size: 13px; text-align: center; }
+  .button.quiet { background: var(--raised); color: var(--text); box-shadow: inset 0 0 0 1px var(--line-strong); font-weight: 500; }
   main { max-width: 1320px; margin: 0 auto; padding: 24px; }
   .intro { color: var(--dim); max-width: 760px; margin: 0 0 20px; }
+  kbd { font: 600 11px var(--mono); padding: 2px 6px; border-radius: 5px; background: var(--raised); box-shadow: inset 0 -1px 0 #0008, inset 0 0 0 1px var(--line-strong); color: var(--text); }
+
+  /* ---- Playground ---- */
+  .playground { display: grid; grid-template-columns: 1fr 320px; gap: 16px; margin-bottom: 36px; }
+  .desk { position: relative; aspect-ratio: 16 / 9.4; border-radius: 12px; overflow: hidden; border: 1px solid var(--line-strong);
+          background: radial-gradient(120% 90% at 20% 10%, #3a4f7a 0%, #1b2440 45%, #0c1022 100%); user-select: none; }
+  .desk .slide { position: absolute; left: 7%; top: 7%; width: 86%; height: 74%; background: #fbfbfd; border-radius: 6px; box-shadow: 0 18px 50px #0008; color: #121418; padding: 4.2% 5%; display: grid; grid-template-columns: 1.1fr 1fr; gap: 4%; }
+  .slide .kicker { font: 600 11px var(--mono); letter-spacing: .14em; color: #6b7280; }
+  .slide h3 { font: 600 clamp(18px, 2.6vw, 34px)/1.08 var(--display); margin: 10px 0 14px; letter-spacing: -.02em; }
+  .slide .big { font: 600 clamp(28px, 4.6vw, 64px)/1 var(--display); letter-spacing: -.03em; }
+  .slide .big small { font-size: .45em; color: #6b7280; }
+  .slide ul { padding-left: 18px; margin: 14px 0 0; color: #374151; font-size: clamp(11px, 1.05vw, 14px); line-height: 1.7; }
+  .slide .chart { display: flex; align-items: end; gap: 7%; padding: 6% 2% 0; border-bottom: 1px solid #e5e7eb; height: 78%; }
+  .slide .chart div { flex: 1; background: #c7cdd6; border-radius: 4px 4px 0 0; position: relative; }
+  .slide .chart div:last-child { background: #111827; }
+  .slide .chart span { position: absolute; top: -20px; left: 0; right: 0; text-align: center; font: 600 11px var(--mono); color: #374151; }
+  .desk .taskbar { position: absolute; left: 0; right: 0; bottom: 0; height: 9.5%; min-height: 34px; background: #1c1d22ee; backdrop-filter: blur(10px); display: flex; align-items: center; justify-content: center; gap: 10px; border-top: 1px solid #ffffff14; }
+  .taskbar .app { width: 34px; height: 34px; border-radius: 6px; display: grid; place-items: center; }
+  .taskbar .app.active { background: #ffffff18; box-shadow: inset 0 -3px 0 -1px #6cb6ff; }
+  .taskbar .app img { width: 24px; height: 24px; }
+  .taskbar .app.launch img { animation: launch .5s cubic-bezier(.3,1.6,.5,1); }
+  .taskbar .tray { position: absolute; right: 12px; display: flex; gap: 12px; align-items: center; color: #fff; font-size: 12px; }
+  .taskbar .tray img { width: 16px; height: 16px; cursor: pointer; }
+  .taskbar .tray .pop { animation: pop .32s cubic-bezier(.3,1.8,.5,1); }
+  .controls { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; display: flex; flex-direction: column; gap: 14px; }
+  .controls .row { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+  .controls label, .controls .caption { color: var(--dim); font-size: 12px; }
+  .controls input[type=range] { width: 150px; accent-color: #ff2a2a; }
+  .switch { all: unset; cursor: pointer; width: 44px; height: 22px; border-radius: 11px; background: var(--raised); box-shadow: inset 0 0 0 1px var(--line-strong); position: relative; transition: background .15s; }
+  .switch::after { content: ""; position: absolute; top: 4px; left: 4px; width: 14px; height: 14px; border-radius: 50%; background: var(--dim); transition: left .18s cubic-bezier(.3,1.4,.5,1), background .15s; }
+  .switch[aria-pressed="true"] { background: #ff2a2a; }
+  .switch[aria-pressed="true"]::after { left: 26px; background: #fff; }
+  .segmented { display: flex; gap: 2px; background: var(--bg); border-radius: 9px; padding: 2px; border: 1px solid var(--line); }
+  .segmented button { padding: 4px 10px; font-size: 12px; }
+  .chosen { display: flex; gap: 10px; align-items: center; font-size: 12px; color: var(--dim); }
+  .chosen img { width: 24px; height: 24px; }
+  .tips { margin: 0; padding: 0; list-style: none; display: grid; gap: 6px; font-size: 12px; color: var(--dim); }
+  .readout { font: 500 12px var(--mono); color: var(--text); min-height: 18px; }
+  .readout.flash { animation: flash .6s; }
+
+  /* ---- Cards ---- */
   .grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
-  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; display: flex; flex-direction: column; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; display: flex; flex-direction: column; transition: border-color .15s, transform .15s; }
   .card.picked { border-color: #ffffff55; box-shadow: 0 0 0 1px #ffffff22; }
+  .card.in-use { border-color: #ff2a2a88; }
   .head { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-bottom: 1px solid var(--line); }
-  .head .number { font: 600 12px ui-monospace, Consolas, monospace; color: var(--dim); }
+  .head .number { font: 600 12px var(--mono); color: var(--dim); }
   .head .name { font-weight: 600; }
-  .star { all: unset; cursor: pointer; margin-left: auto; font-size: 18px; line-height: 1; color: #ffffff40; padding: 2px 4px; }
+  .head .motion { font: 500 11px var(--mono); color: var(--dim); background: var(--raised); padding: 1px 6px; border-radius: 4px; }
+  .head .use { all: unset; cursor: pointer; margin-left: auto; font-size: 12px; color: var(--dim); padding: 2px 8px; border-radius: 6px; box-shadow: inset 0 0 0 1px var(--line-strong); }
+  .card.in-use .use { color: #fff; background: #ff2a2a33; box-shadow: inset 0 0 0 1px #ff2a2a88; }
+  .star { all: unset; cursor: pointer; font-size: 18px; line-height: 1; color: #ffffff40; padding: 2px 4px; }
   .star[aria-pressed="true"] { color: #ffd400; }
   .backdrops { display: grid; grid-template-columns: repeat(3, 1fr); height: 96px; }
-  .backdrop { position: relative; display: grid; place-items: center; }
+  .backdrop { position: relative; display: grid; place-items: center; cursor: none; }
   .slide-light { background: #ffffff; }
   .slide-dark { background: #121418; }
   .game { background: linear-gradient(135deg, #3c5a2e 0 40%, #8a5a33 40% 62%, #2b3f52 62%); }
   .game::after { content: ""; position: absolute; inset: 0; background: repeating-linear-gradient(90deg, #0000 0 18px, #ffffff0d 18px 19px); }
-  .backdrop img { position: relative; z-index: 1; image-rendering: auto; }
-  .zoom { display: flex; gap: 14px; align-items: center; justify-content: center; padding: 14px; background: #0b0c0f; min-height: 120px; }
+  .backdrop img { position: relative; z-index: 1; }
+  .loop { display: block; width: 100%; height: 128px; background: #0b0c0f; }
   .logo-stage { display: grid; grid-template-columns: 1fr 1fr; }
   .logo-stage > div { display: grid; place-items: center; padding: 18px; }
+  .logo-stage img { transition: transform .25s cubic-bezier(.3,1.5,.5,1), filter .25s; }
+  .card:hover .logo-stage img { transform: translateY(-4px) scale(1.04); filter: drop-shadow(0 10px 18px #0006); }
+  .logo-stage img.launch { animation: launch .5s cubic-bezier(.3,1.6,.5,1); }
   .logo-stage .light { background: #f3f3f3; } .logo-stage .dark { background: #0b0c0f; }
   .sizes { display: flex; gap: 14px; align-items: end; justify-content: center; padding: 12px; border-top: 1px solid var(--line); }
-  .context { display: grid; grid-template-columns: 1fr 1fr; border-top: 1px solid var(--line); }
-  .taskbar { display: flex; gap: 10px; align-items: center; justify-content: center; height: 48px; }
-  .taskbar.light { background: #eef1f5; } .taskbar.dark { background: #1c1d22; }
-  .taskbar .slot { width: 40px; height: 40px; border-radius: 6px; display: grid; place-items: center; }
-  .taskbar .slot.active { background: #ffffff1c; box-shadow: inset 0 -3px 0 -1px #6cb6ff; }
-  .taskbar.light .slot.active { background: #00000010; }
-  .tile { display: grid; place-items: center; height: 120px; background: linear-gradient(135deg, #0f6cbd, #0b4a8a); }
-  .tray-strip { display: flex; gap: 14px; align-items: center; justify-content: flex-end; height: 40px; padding: 0 16px; font-size: 12px; }
+  .tile { display: grid; place-items: center; height: 104px; background: linear-gradient(135deg, #0f6cbd, #0b4a8a); }
+  .tray-strip { display: flex; gap: 14px; align-items: center; justify-content: flex-end; height: 40px; padding: 0 16px; font-size: 12px; cursor: pointer; }
   .tray-strip.dark { background: #1c1d22; color: #fff; } .tray-strip.light { background: #eef1f5; color: #1b1b1b; }
-  .tray-strip .muted { opacity: .55; }
+  .tray-strip .toggle { position: relative; width: 16px; height: 16px; }
+  .tray-strip .toggle img { position: absolute; inset: 0; transition: opacity .18s, transform .3s cubic-bezier(.3,1.8,.5,1); }
+  .tray-strip .toggle .lit { opacity: 0; transform: scale(.6); }
+  .card.lit .tray-strip .toggle .lit { opacity: 1; transform: scale(1); }
+  .card.lit .tray-strip .toggle .unlit { opacity: 0; }
   .pixels { display: flex; gap: 12px; justify-content: center; padding: 12px; background: #0b0c0f; }
   .pixels img { width: 64px; height: 64px; image-rendering: pixelated; }
   .label { font-size: 11px; color: var(--dim); text-align: center; margin-top: 4px; }
+  #follower { position: fixed; inset: 0; pointer-events: none; z-index: 30; }
   footer { color: var(--dim); text-align: center; padding: 40px 0 60px; font-size: 13px; }
-  [hidden] { display: none !important; }
+  @keyframes launch { 0% { transform: translateY(0) } 35% { transform: translateY(-8px) scale(.92) } 100% { transform: translateY(0) } }
+  @keyframes pop { 0% { transform: scale(.5) } 100% { transform: scale(1) } }
+  @keyframes flash { 0% { color: #ff2a2a } 100% { color: var(--text) } }
+  @media (max-width: 980px) { .playground { grid-template-columns: 1fr; } }
+  @media (prefers-reduced-motion: reduce) { *, *::after { animation: none !important; transition: none !important; } }
 </style>
 </head>
 <body>
@@ -83,60 +138,209 @@
   </div>
 </header>
 <main>
+  <section class="playground" aria-label="Playground">
+    <div class="desk" id="desk">
+      <div class="slide">
+        <div>
+          <div class="kicker">NORTHSTAR · Q3 REVIEW</div>
+          <h3>Less friction.<br>More shipped.</h3>
+          <div class="big">+38<small>%</small></div>
+          <ul><li>Build times down to 2.4 minutes</li><li>99.98% platform availability</li><li>One release. Every team. Every day.</li></ul>
+        </div>
+        <div class="chart"><div style="height:42%"><span>92</span></div><div style="height:58%"><span>121</span></div><div style="height:52%"><span>110</span></div><div style="height:78%"><span>157</span></div></div>
+      </div>
+      <div class="taskbar">
+        <div class="app"><img alt="" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='2' y='2' width='9' height='9' rx='1.5' fill='%2360a5fa'/%3E%3Crect x='13' y='2' width='9' height='9' rx='1.5' fill='%2360a5fa'/%3E%3Crect x='2' y='13' width='9' height='9' rx='1.5' fill='%2360a5fa'/%3E%3Crect x='13' y='13' width='9' height='9' rx='1.5' fill='%2360a5fa'/%3E%3C/svg%3E"></div>
+        <div class="app"><img alt="" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='2' y='4' width='20' height='16' rx='3' fill='%23f97316'/%3E%3Crect x='6' y='8' width='9' height='2' rx='1' fill='%23fff'/%3E%3C/svg%3E"></div>
+        <div class="app active" id="taskbar-app"><img alt="Laser Pointer" id="taskbar-logo"></div>
+        <div class="app"><img alt="" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Ccircle cx='12' cy='12' r='9' fill='%2322c55e'/%3E%3Cpath d='M7 12h10M12 7v10' stroke='%23fff' stroke-width='2'/%3E%3C/svg%3E"></div>
+        <div class="tray"><span style="opacity:.6">^</span><img id="tray-icon" alt="Laser Pointer tray icon" title="Click to toggle the laser"><span>10:24</span></div>
+      </div>
+    </div>
+    <aside class="controls">
+      <div class="row"><strong>Laser</strong><button class="switch" id="power" aria-pressed="false" aria-label="Laser on"></button></div>
+      <div class="caption">Press <kbd>L</kbd> or click the switch or the tray icon, then hold the left button and draw on the slide.</div>
+      <div class="row"><label>Preset</label><div class="segmented" id="presets"><button data-preset="Laser" aria-pressed="true">Laser</button><button data-preset="Highlighter">Highlighter</button><button data-preset="Pen">Pen</button></div></div>
+      <div class="row"><label>Style</label><div class="segmented" id="styles"><button data-style="solid">Solid</button><button data-style="glow" aria-pressed="true">Glow</button><button data-style="neon">Neon</button></div></div>
+      <div class="row"><label for="width">Thickness</label><input type="range" id="width" min="2" max="24" value="4"></div>
+      <div class="row"><label for="snap">Shape snap <span id="snap-name">Gentle</span></label><input type="range" id="snap" min="0" max="10" value="4"></div>
+      <div class="row"><span class="caption">Last snapped</span><span class="readout" id="readout">—</span></div>
+      <div class="row" style="gap:8px"><button class="button quiet" id="undo" style="flex:1">Undo</button><button class="button quiet" id="redo" style="flex:1">Redo</button><button class="button quiet" id="clear" style="flex:1">Clear</button></div>
+      <div class="chosen"><img id="chosen-cursor" alt=""><span id="chosen-text"></span></div>
+      <ul class="tips">
+        <li><kbd>Alt</kbd> while drawing — straight horizontal line</li>
+        <li><kbd>Shift</kbd>+<kbd>Alt</kbd> — straight vertical line</li>
+        <li>Rough circle, box, triangle or arrow — let go and it snaps</li>
+        <li><kbd>Ctrl</kbd> as you let go — keep it freehand</li>
+        <li>Right-click — clicks through, with a ripple · <kbd>Esc</kbd> — off</li>
+      </ul>
+    </aside>
+  </section>
+
   <p class="intro" id="intro"></p>
   <div class="grid" id="grid"></div>
 </main>
-<footer>Star as many as you like. Everything here is generated by tools/design; cursors and tray icons are in the exact format the app loads.</footer>
+<canvas id="follower" aria-hidden="true"></canvas>
+<footer>Star as many as you like. "Use" puts one in the playground above. Everything here is generated by tools/design; cursors and tray icons are in the exact format the app loads, and the playground runs the app's own stroke, shape and cursor code, ported.</footer>
 
 <script src="assets.js"></script>
+<script src="engine.js"></script>
 <script>
 'use strict';
 const data = window.CANDIDATES;
 const COLOURS = ['#ff2a2a', '#ff8a00', '#ffd400', '#2ecc40', '#1e90ff', '#d62aff'];
+const SNAP_NAMES = v => v === 0 ? 'Off' : v <= 3 ? 'Gentle' : v <= 6 ? 'Medium' : 'Strong';
 const INTRO = {
-  cursors: 'Each cursor at its real size over a white slide, a dark slide and busy game footage, then enlarged. Move your mouse over any of the three backdrops to try it as your actual cursor.',
-  logos: 'Each app icon large on light and dark, at the sizes Windows shows it (taskbar, Start, title bar), and as a Microsoft Store tile.',
-  tray: 'Each tray icon at its true 16-pixel size in dark and light taskbars, off and while the laser is on, then enlarged pixel for pixel.',
+  cursors: 'Each cursor at its real size over a white slide, a dark slide and busy game footage. Hover a backdrop and your cursor becomes it, moving as it would in the app; hold the button to see it squeeze. Below, it loops through switching on and drawing.',
+  logos: 'Each app icon on light and dark, at the sizes Windows shows it, and as a Microsoft Store tile. Click one to see it launch from the taskbar.',
+  tray: 'Each tray icon at its true 16-pixel size in dark and light taskbars. Hover a card to switch the laser on, then enlarged pixel for pixel.',
 };
+const stored = (key, fallback) => { try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; } };
 const state = {
   tab: location.hash.slice(1) in INTRO ? location.hash.slice(1) : 'cursors',
   colour: localStorage.getItem('picker.colour') || COLOURS[0],
-  picks: JSON.parse(localStorage.getItem('picker.picks') || '{"cursors":[],"logos":[],"tray":[]}'),
+  picks: stored('picker.picks', { cursors: [], logos: [], tray: [] }),
+  use: stored('picker.use', { cursors: '01', logos: '01', tray: '01' }),
 };
+const byId = (set, id) => data[set].find(item => item.id === id) || data[set][0];
 const uri = svg => 'data:image/svg+xml,' + encodeURIComponent(svg);
 const tinted = svg => svg.replaceAll('COLOR', state.colour);
 const trayInk = (svg, ink) => svg.replaceAll('INK', ink).replaceAll('DOT', state.colour);
-const image = (src, size, alt = '') => `<img src="${src}" width="${size}" height="${size}" alt="${alt}">`;
+const image = (src, size, extra = '') => `<img src="${src}" width="${size}" height="${size}" alt="" ${extra}>`;
+const save = () => { localStorage.setItem('picker.picks', JSON.stringify(state.picks)); localStorage.setItem('picker.use', JSON.stringify(state.use)); };
 
-function card(set, item, body) {
-  const picked = state.picks[set].includes(item.id);
-  return `<article class="card${picked ? ' picked' : ''}" data-id="${item.id}">
-    <div class="head"><span class="number">${item.id}</span><span class="name">${item.name}</span>
+// ---- Playground -------------------------------------------------------------------------------
+const stage = new Laser.Stage(document.getElementById('desk'), {
+  cursor: byId('cursors', state.use.cursors),
+  onChange: syncControls,
+});
+stage.setLook({ color: state.colour });
+
+function syncControls() {
+  document.getElementById('power').setAttribute('aria-pressed', stage.on);
+  for (const b of document.querySelectorAll('#styles button')) b.setAttribute('aria-pressed', b.dataset.style === stage.look.style);
+  document.getElementById('width').value = stage.look.width;
+  document.getElementById('snap').value = Math.round(stage.look.snap / 10);
+  document.getElementById('snap-name').textContent = SNAP_NAMES(Math.round(stage.look.snap / 10));
+  const tray = byId('tray', state.use.tray), icon = document.getElementById('tray-icon');
+  const src = uri(trayInk(stage.on ? tray.on : tray.off, '#ffffff'));
+  if (icon.getAttribute('src') !== src) {
+    icon.src = src;
+    icon.classList.remove('pop'); void icon.offsetWidth; icon.classList.add('pop');
+  }
+  if (stage.lastShape) {
+    const readout = document.getElementById('readout');
+    if (readout.textContent !== stage.lastShape) {
+      readout.textContent = stage.lastShape;
+    }
+    readout.classList.remove('flash'); void readout.offsetWidth; readout.classList.add('flash');
+    stage.lastShape = null;
+  }
+}
+
+function syncChosen() {
+  const cursor = byId('cursors', state.use.cursors), logo = byId('logos', state.use.logos), tray = byId('tray', state.use.tray);
+  stage.setCursor(cursor);
+  document.getElementById('taskbar-logo').src = uri(logo.svg);
+  document.getElementById('chosen-cursor').src = uri(tinted(cursor.svg));
+  document.getElementById('chosen-text').textContent = `In use: cursor ${cursor.id} ${cursor.name} · icon ${logo.id} · tray ${tray.id}`;
+  syncControls();
+}
+
+document.getElementById('power').addEventListener('click', () => stage.setOn(!stage.on));
+document.getElementById('tray-icon').addEventListener('click', () => stage.setOn(!stage.on));
+document.getElementById('presets').addEventListener('click', e => {
+  const name = e.target.dataset.preset; if (!name) return;
+  for (const b of document.querySelectorAll('#presets button')) b.setAttribute('aria-pressed', b === e.target);
+  stage.usePreset(name);
+  if (name === 'Laser') stage.setLook({ color: state.colour });
+});
+document.getElementById('styles').addEventListener('click', e => { if (e.target.dataset.style) stage.setLook({ style: e.target.dataset.style }); });
+document.getElementById('width').addEventListener('input', e => stage.setLook({ width: +e.target.value }));
+document.getElementById('snap').addEventListener('input', e => stage.setLook({ snap: +e.target.value * 10 }));
+document.getElementById('undo').addEventListener('click', () => stage.undo());
+document.getElementById('redo').addEventListener('click', () => stage.redo());
+document.getElementById('clear').addEventListener('click', () => stage.clear(() => true));
+
+// ---- The cursor that follows the mouse over card backdrops ----------------------------------------
+const follower = document.getElementById('follower'), fctx = follower.getContext('2d');
+const hover = { cursor: null, x: 0, y: 0, pose: new Laser.CursorPose(), frame: 0 };
+function sizeFollower() { const dpr = devicePixelRatio || 1; follower.width = innerWidth * dpr; follower.height = innerHeight * dpr; fctx.setTransform(dpr, 0, 0, dpr, 0, 0); }
+addEventListener('resize', sizeFollower); sizeFollower();
+function drawFollower() {
+  hover.frame = 0;
+  fctx.clearRect(0, 0, innerWidth, innerHeight);
+  if (!hover.cursor) return;
+  const pose = hover.pose.pose(hover.cursor.motion, performance.now());
+  Laser.drawCursor(fctx, hover.cursor, state.colour, hover.x, hover.y, pose);
+  if (pose.animating) hover.frame = requestAnimationFrame(drawFollower);
+}
+const wakeFollower = () => { if (!hover.frame) hover.frame = requestAnimationFrame(drawFollower); };
+Laser.onImageLoad(wakeFollower);
+document.addEventListener('pointermove', e => {
+  const backdrop = e.target.closest && e.target.closest('.backdrop');
+  const cursor = backdrop ? byId('cursors', backdrop.closest('.card').dataset.id) : null;
+  if (cursor !== hover.cursor) { hover.cursor = cursor; if (cursor) hover.pose.ignite(performance.now()); }
+  hover.x = e.clientX; hover.y = e.clientY;
+  wakeFollower();
+});
+document.addEventListener('pointerdown', e => { if (hover.cursor) { hover.pose.press(true, performance.now()); wakeFollower(); } });
+document.addEventListener('pointerup', () => { hover.pose.press(false, performance.now()); wakeFollower(); });
+
+// ---- Looping previews of each cursor's motion -----------------------------------------------------
+const loops = new Set();
+const watcher = new IntersectionObserver(entries => {
+  for (const entry of entries) entry.isIntersecting ? loops.add(entry.target) : loops.delete(entry.target);
+});
+function drawLoops(now) {
+  for (const canvas of loops) {
+    const cursor = byId('cursors', canvas.closest('.card').dataset.id);
+    const dpr = devicePixelRatio || 1, w = canvas.clientWidth, h = canvas.clientHeight;
+    if (canvas.width !== Math.round(w * dpr)) { canvas.width = Math.round(w * dpr); canvas.height = Math.round(h * dpr); }
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, w, h);
+    // A 2.4 s cycle: switch on, rest, press, release.
+    const t = (now + canvas.dataset.offset * 1) % 2400;
+    const pose = new Laser.CursorPose();
+    pose.ignitedAt = now - t;
+    if (t > 1000 && t < 1700) { pose.down = true; pose.pressAt = now - (t - 1000); }
+    else if (t >= 1700) { pose.down = false; pose.pressAt = now - (t - 1700); }
+    const p = pose.pose(cursor.motion, now);
+    ctx.save(); ctx.translate(w / 2 - 24 * 1.6, h / 2 - 24 * 1.6); ctx.scale(1.6, 1.6);
+    Laser.drawCursor(ctx, cursor, state.colour, cursor.hotspot[0], cursor.hotspot[1], p);
+    ctx.restore();
+  }
+  requestAnimationFrame(drawLoops);
+}
+requestAnimationFrame(drawLoops);
+
+// ---- Cards ------------------------------------------------------------------------------------------
+function card(set, item, body, motion = '') {
+  const picked = state.picks[set].includes(item.id), used = state.use[set] === item.id;
+  return `<article class="card${picked ? ' picked' : ''}${used ? ' in-use' : ''}" data-id="${item.id}" data-set="${set}">
+    <div class="head"><span class="number">${item.id}</span><span class="name">${item.name}</span>${motion}
+      <button class="use" data-set="${set}" data-id="${item.id}">${used ? 'In use' : 'Use'}</button>
       <button class="star" aria-label="Pick ${item.name}" aria-pressed="${picked}" data-set="${set}" data-id="${item.id}">★</button></div>
     ${body}</article>`;
 }
 
-function cursorCard(item) {
+function cursorCard(item, index) {
   const src = uri(tinted(item.svg));
-  const [hx, hy] = item.hotspot;
-  const cursor = `url("${src}") ${hx} ${hy}, crosshair`;
-  const backdrop = kind => `<div class="backdrop ${kind} try" style="cursor:${cursor.replaceAll('"', '&quot;')}">${image(src, 48)}</div>`;
+  const backdrop = kind => `<div class="backdrop ${kind}">${image(src, 48)}</div>`;
   return card('cursors', item, `<div class="backdrops">${backdrop('slide-light')}${backdrop('slide-dark')}${backdrop('game')}</div>
-    <div class="zoom">${image(src, 96)}${image(uri(item.svg.replaceAll('COLOR', '#1e90ff')), 96)}${image(uri(item.svg.replaceAll('COLOR', '#ffd400')), 48)}</div>`);
+    <canvas class="loop" data-offset="${index * 137}"></canvas>`, `<span class="motion">${item.motion}</span>`);
 }
 
 function logoCard(item) {
   const src = uri(item.svg);
-  const slot = (size, active) => `<div class="slot${active ? ' active' : ''}">${image(src, size)}</div>`;
-  const filler = `<div class="slot" style="opacity:.35">${image(uri('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><rect x="2" y="2" width="20" height="20" rx="5" fill="#8a94a6"/></svg>'), 24)}</div>`;
-  return card('logos', item, `<div class="logo-stage"><div class="light">${image(src, 112)}</div><div class="dark">${image(src, 112)}</div></div>
+  return card('logos', item, `<div class="logo-stage"><div class="light">${image(src, 112, 'class="launchable"')}</div><div class="dark">${image(src, 112, 'class="launchable"')}</div></div>
     <div class="sizes">${[64, 48, 32, 24, 16].map(size => `<div>${image(src, size)}<div class="label">${size}</div></div>`).join('')}</div>
-    <div class="context"><div class="taskbar dark">${filler}${slot(24, true)}${filler}</div><div class="taskbar light">${filler}${slot(24, true)}${filler}</div></div>
-    <div class="tile">${image(src, 72)}</div>`);
+    <div class="tile">${image(src, 64)}</div>`);
 }
 
 function trayCard(item) {
-  const strip = (theme, ink) => `<div class="tray-strip ${theme}"><span class="muted">^</span>${image(uri(trayInk(item.off, ink)), 16)}${image(uri(trayInk(item.on, ink)), 16)}<span>10:24</span></div>`;
+  const toggle = ink => `<span class="toggle">${image(uri(trayInk(item.off, ink)), 16, 'class="unlit"')}${image(uri(trayInk(item.on, ink)), 16, 'class="lit"')}</span>`;
+  const strip = (theme, ink) => `<div class="tray-strip ${theme}"><span style="opacity:.55">^</span>${toggle(ink)}<span>10:24</span></div>`;
   return card('tray', item, `${strip('dark', '#ffffff')}${strip('light', '#1b1b1b')}
     <div class="pixels"><div>${image(uri(trayInk(item.off, '#ffffff')), 16)}<div class="label">off</div></div><div>${image(uri(trayInk(item.on, '#ffffff')), 16)}<div class="label">on</div></div></div>`);
 }
@@ -145,7 +349,9 @@ function render() {
   document.querySelectorAll('nav button').forEach(button => button.setAttribute('aria-selected', button.dataset.tab === state.tab));
   document.getElementById('intro').textContent = INTRO[state.tab];
   const make = { cursors: cursorCard, logos: logoCard, tray: trayCard }[state.tab];
+  loops.clear(); watcher.disconnect();
   document.getElementById('grid').innerHTML = data[state.tab].map(make).join('');
+  document.querySelectorAll('.loop').forEach(canvas => watcher.observe(canvas));
   renderSummary();
 }
 
@@ -165,6 +371,8 @@ for (const colour of COLOURS) {
     state.colour = colour;
     localStorage.setItem('picker.colour', colour);
     swatches.querySelectorAll('button').forEach(other => other.setAttribute('aria-pressed', other === button));
+    stage.setLook({ color: colour });
+    syncChosen();
     render();
   });
   swatches.append(button);
@@ -178,16 +386,45 @@ document.querySelector('nav').addEventListener('click', event => {
   render();
 });
 
-document.getElementById('grid').addEventListener('click', event => {
+const grid = document.getElementById('grid');
+grid.addEventListener('click', event => {
   const star = event.target.closest('.star');
-  if (!star) return;
-  const list = state.picks[star.dataset.set];
-  const index = list.indexOf(star.dataset.id);
-  if (index >= 0) list.splice(index, 1); else list.push(star.dataset.id);
-  localStorage.setItem('picker.picks', JSON.stringify(state.picks));
-  star.setAttribute('aria-pressed', index < 0);
-  star.closest('.card').classList.toggle('picked', index < 0);
-  renderSummary();
+  if (star) {
+    const list = state.picks[star.dataset.set];
+    const index = list.indexOf(star.dataset.id);
+    if (index >= 0) list.splice(index, 1); else list.push(star.dataset.id);
+    save();
+    star.setAttribute('aria-pressed', index < 0);
+    star.closest('.card').classList.toggle('picked', index < 0);
+    renderSummary();
+    return;
+  }
+  const use = event.target.closest('.use');
+  if (use) {
+    state.use[use.dataset.set] = use.dataset.id;
+    save();
+    grid.querySelectorAll('.card').forEach(c => {
+      const mine = c.dataset.id === use.dataset.id;
+      c.classList.toggle('in-use', mine);
+      c.querySelector('.use').textContent = mine ? 'In use' : 'Use';
+    });
+    syncChosen();
+    if (use.dataset.set === 'logos') {
+      const app = document.getElementById('taskbar-app');
+      app.classList.remove('launch'); void app.offsetWidth; app.classList.add('launch');
+    }
+    return;
+  }
+  const logo = event.target.closest('.launchable');
+  if (logo) { logo.classList.remove('launch'); void logo.offsetWidth; logo.classList.add('launch'); }
+});
+grid.addEventListener('pointerover', event => {
+  const card = event.target.closest('.card');
+  if (card && card.dataset.set === 'tray') card.classList.add('lit');
+});
+grid.addEventListener('pointerout', event => {
+  const card = event.target.closest('.card');
+  if (card && card.dataset.set === 'tray' && !card.contains(event.relatedTarget)) card.classList.remove('lit');
 });
 
 document.getElementById('copy').addEventListener('click', async () => {
@@ -198,6 +435,7 @@ document.getElementById('copy').addEventListener('click', async () => {
   setTimeout(() => (button.textContent = 'Copy my picks'), 1500);
 });
 
+syncChosen();
 render();
 </script>
 </body>

@@ -1,0 +1,212 @@
+{
+  "01-laser-dot": {
+    "hotspot": [
+      24,
+      24
+    ],
+    "motion": "grow"
+  },
+  "02-tight-dot": {
+    "hotspot": [
+      24,
+      24
+    ],
+    "motion": "grow"
+  },
+  "03-hot-core": {
+    "hotspot": [
+      24,
+      24
+    ],
+    "motion": "grow"
+  },
+  "04-soft-glow": {
+    "hotspot": [
+      24,
+      24
+    ],
+    "motion": "grow"
+  },
+  "05-double-bloom": {
+    "hotspot": [
+      24,
+      24
+    ],
+    "motion": "pulse"
+  },
+  "06-thin-ring": {
+    "hotspot": [
+      24,
+      24
+    ],
+    "motion": "pulse"
+  },
+  "07-bold-ring": {
+    "hotspot": [
+      24,
+      24
+    ],
+    "motion": "pulse"
+  },
+  "08-white-halo": {
+    "hotspot": [
+      24,
+      24
+    ],
+    "motion": "grow"
+  },
+  "09-segment-ring": {
+    "hotspot": [
+      24,
+      24
+    ],
+    "motion": "spin"
+  },
+  "10-glow-ring": {
+    "hotspot": [
+      24,
+      24
+    ],
+    "motion": "pulse"
+  },
+  "11-classic-cross": {
+    "hotspot": [
+      24,
+      24
+    ],
+    "motion": "spin"
+  },
+  "12-cross-dot": {
+    "hotspot": [
+      24,
+      24
+    ],
+    "motion": "spin"
+  },
+  "13-circle-dot": {
+    "hotspot": [
+      24,
+      24
+    ],
+    "motion": "pulse"
+  },
+  "14-t-cross": {
+    "hotspot": [
+      24,
+      24
+    ],
+    "motion": "spin"
+  },
+  "15-chevron": {
+    "hotspot": [
+      24,
+      24
+    ],
+    "motion": "tilt"
+  },
+  "16-brackets": {
+    "hotspot": [
+      24,
+      24
+    ],
+    "motion": "spin"
+  },
+  "17-x-cross": {
+    "hotspot": [
+      24,
+      24
+    ],
+    "motion": "spin"
+  },
+  "18-micro-dot": {
+    "hotspot": [
+      24,
+      24
+    ],
+    "motion": "grow"
+  },
+  "19-classic-arrow": {
+    "hotspot": [
+      7,
+      5.5
+    ],
+    "motion": "tilt"
+  },
+  "20-colour-arrow": {
+    "hotspot": [
+      7,
+      5.5
+    ],
+    "motion": "tilt"
+  },
+  "21-slim-arrow": {
+    "hotspot": [
+      8,
+      6
+    ],
+    "motion": "tilt"
+  },
+  "22-soft-pointer": {
+    "hotspot": [
+      9,
+      8
+    ],
+    "motion": "tilt"
+  },
+  "23-stylus": {
+    "hotspot": [
+      7,
+      7
+    ],
+    "motion": "tilt"
+  },
+  "24-marker": {
+    "hotspot": [
+      8,
+      8
+    ],
+    "motion": "tilt"
+  },
+  "25-nib": {
+    "hotspot": [
+      7,
+      7
+    ],
+    "motion": "tilt"
+  },
+  "26-comet": {
+    "hotspot": [
+      24,
+      24
+    ],
+    "motion": "grow"
+  },
+  "27-spark": {
+    "hotspot": [
+      24,
+      24
+    ],
+    "motion": "spin"
+  },
+  "28-spotlight": {
+    "hotspot": [
+      24,
+      24
+    ],
+    "motion": "pulse"
+  },
+  "29-focus-corners": {
+    "hotspot": [
+      24,
+      24
+    ],
+    "motion": "spin"
+  },
+  "30-magnifier": {
+    "hotspot": [
+      24,
+      24
+    ],
+    "motion": "pulse"
+  }
+}

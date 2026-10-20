@@ -212,15 +212,21 @@ struct CursorKey {
     style: usize,
     color: u32,
     dpi: u32,
-    /// Quantised zoom, so animation frames are rendered once and reused.
+    /// Quantised zoom and rotation, so animation frames are rendered once and reused.
     step: u8,
+    turn: i8,
 }
 
 const ZOOM_MIN: f32 = 0.3;
 const ZOOM_STEP: f32 = 0.05;
+const TURN_STEP: f32 = 5.0;
 
 fn zoom_step(zoom: f32) -> u8 {
-    ((zoom - ZOOM_MIN) / ZOOM_STEP).round().clamp(0.0, 20.0) as u8
+    ((zoom - ZOOM_MIN) / ZOOM_STEP).round().clamp(0.0, 26.0) as u8
+}
+
+fn turn_step(degrees: f32) -> i8 {
+    (degrees / TURN_STEP).round().clamp(-18.0, 18.0) as i8
 }
 
 /// The cursor grows in when the laser turns on and squeezes while the button is held.
@@ -246,46 +252,35 @@ fn ease_out(k: f32) -> f32 {
     1.0 - (1.0 - k).powi(3)
 }
 
-/// Overshoots a little before settling, like something switched on.
-fn back_out(k: f32) -> f32 {
-    let (c1, c3) = (1.4, 2.4);
-    1.0 + c3 * (k - 1.0).powi(3) + c1 * (k - 1.0).powi(2)
-}
-
 impl Pointer {
-    /// The current zoom, and whether it is still changing.
-    fn zoom(&mut self, now: Instant) -> (f32, bool) {
+    /// The current scale and rotation for a style's motion, and whether they're still changing.
+    fn pose(&mut self, motion: cursors::Motion, now: Instant) -> (f32, f32, bool) {
         if !animations_enabled() {
-            return (1.0, false);
+            return (1.0, 0.0, false);
         }
         let mut animating = false;
-        let mut zoom = 1.0;
+        let mut ignite = 1.0;
         if let Some(at) = self.ignited {
-            let k = now.duration_since(at).as_secs_f32() / 0.2;
-            if k < 1.0 {
-                zoom *= 0.35 + 0.65 * back_out(k);
+            ignite = now.duration_since(at).as_secs_f32() / motion.ignite_secs();
+            if ignite < 1.0 {
                 animating = true;
             } else {
                 self.ignited = None;
             }
         }
+        let mut press = 0.0;
         if let Some((down, at)) = self.pressed {
             let elapsed = now.duration_since(at).as_secs_f32();
-            let (k, squeeze) = if down {
-                let k = (elapsed / 0.09).min(1.0);
-                (k, ease_out(k))
-            } else {
-                let k = (elapsed / 0.14).min(1.0);
-                (k, 1.0 - ease_out(k))
-            };
-            zoom *= 1.0 - 0.14 * squeeze;
+            let k = (elapsed / if down { 0.09 } else { 0.14 }).min(1.0);
+            press = if down { ease_out(k) } else { 1.0 - ease_out(k) };
             if k < 1.0 {
                 animating = true;
             } else if !down {
                 self.pressed = None;
             }
         }
-        (zoom, animating)
+        let (scale, turn) = motion.pose(ignite, press);
+        (scale, turn, animating)
     }
 
     /// Shows a cursor now if the laser is on, and hands it to WM_SETCURSOR for later.
@@ -640,7 +635,7 @@ pub fn shortcut_free(binding: Binding) -> bool {
 
 pub fn tray_icon(on: bool, size: u32) -> Option<HICON> {
     let svg = tray_svg(on, settings::get().look.color);
-    with_app(|app| unsafe { app.gfx.as_ref()?.svg_icon(&svg, size, None, 1.0).ok() })?
+    with_app(|app| unsafe { app.gfx.as_ref()?.svg_icon(&svg, size, None, 1.0, 0.0).ok() })?
 }
 
 /// Renders a cursor style for the settings panel's picker.
@@ -649,7 +644,7 @@ pub fn cursor_preview(style: usize, color: u32, size: u32) -> Option<HICON> {
     with_app(|app| unsafe {
         app.gfx
             .as_ref()?
-            .svg_icon(&style.svg(color), size, None, 1.0)
+            .svg_icon(&style.svg(color), size, None, 1.0, 0.0)
             .ok()
     })?
 }
@@ -997,6 +992,7 @@ impl App {
             color: 0,
             dpi: 0,
             step: 0,
+            turn: 0,
         });
     }
 
@@ -1674,7 +1670,8 @@ impl App {
     /// the first time it's needed. Keeps a timer running only while the cursor is animating.
     fn refresh_cursor(&mut self) {
         let settings = settings::get();
-        let (zoom, animating) = self.pointer.zoom(Instant::now());
+        let motion = cursors::STYLES[settings.cursor].motion;
+        let (zoom, turn, animating) = self.pointer.pose(motion, Instant::now());
         let mut position = POINT::default();
         let located = unsafe { GetCursorPos(&mut position) }.is_ok();
         unsafe {
@@ -1692,6 +1689,7 @@ impl App {
             color: settings.look.color,
             dpi: monitor_dpi(position),
             step: zoom_step(zoom),
+            turn: turn_step(turn),
         };
         if self.pointer.current == Some(key) {
             return;
@@ -1726,8 +1724,10 @@ impl App {
         let size = (cursors::SIZE * scale).round() as u32;
         let hotspot = (style.hotspot.0 * scale, style.hotspot.1 * scale);
         let zoom = ZOOM_MIN + f32::from(key.step) * ZOOM_STEP;
+        let degrees = f32::from(key.turn) * TURN_STEP;
         let gfx = self.gfx.as_ref()?;
-        let icon = unsafe { gfx.svg_icon(&style.svg(key.color), size, Some(hotspot), zoom) }.ok()?;
+        let icon =
+            unsafe { gfx.svg_icon(&style.svg(key.color), size, Some(hotspot), zoom, degrees) }.ok()?;
         Some(HCURSOR(icon.0))
     }
     /// Bakes finished kept strokes into the ink layer, so they cost nothing to keep on screen.
@@ -1960,14 +1960,22 @@ mod tests {
     fn idle_cursor_zoom_is_exactly_one() {
         assert_eq!(ZOOM_MIN + f32::from(zoom_step(1.0)) * ZOOM_STEP, 1.0);
         assert_eq!(zoom_step(0.0), 0);
-        assert_eq!(zoom_step(5.0), 20);
+        assert_eq!(zoom_step(5.0), 26);
     }
 
     #[test]
     fn ignition_overshoots_then_settles() {
+        use cursors::back_out;
         assert!((back_out(0.0)).abs() < 1e-6);
         assert!((back_out(1.0) - 1.0).abs() < 1e-6);
         assert!((0..20).map(|i| back_out(i as f32 / 20.0)).fold(0.0, f32::max) > 1.0);
+    }
+
+    #[test]
+    fn resting_turn_is_exactly_zero() {
+        assert_eq!(turn_step(0.0), 0);
+        assert_eq!(turn_step(45.0), 9);
+        assert_eq!(turn_step(-400.0), -18);
     }
 
     #[test]
