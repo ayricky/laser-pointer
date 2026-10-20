@@ -81,6 +81,9 @@ const TIMER_PASSTHROUGH: usize = 1;
 const TIMER_RECOVER: usize = 2;
 const TIMER_TRIM: usize = 3;
 const TIMER_CURSOR: usize = 4;
+const TIMER_GAME: usize = 5;
+/// How soon after taking the foreground to check the game didn't minimise itself.
+const GAME_CHECK_MS: u32 = 300;
 const PASSTHROUGH_MS: u32 = 80;
 const RECOVER_MS: u32 = 1000;
 const TRIM_MS: u32 = 3000;
@@ -377,6 +380,8 @@ struct App {
     pointer: Pointer,
     /// The game the overlay took the mouse from while the laser is on.
     game: Option<HWND>,
+    /// Games that minimised when the laser took the foreground; never taken from again.
+    restless_games: Vec<HWND>,
     warned_exclusive: bool,
     foreground_hook: HWINEVENTHOOK,
 }
@@ -782,6 +787,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                         let _ = KillTimer(Some(hwnd), TIMER_TRIM);
                         with_app(App::trim);
                     }
+                    TIMER_GAME => {
+                        let _ = KillTimer(Some(hwnd), TIMER_GAME);
+                        with_app(App::check_game);
+                    }
                     TIMER_CURSOR => {
                         with_app(App::refresh_cursor);
                     }
@@ -974,6 +983,7 @@ impl App {
             scratch: Scratch::default(),
             pointer: Pointer::default(),
             game: None,
+            restless_games: Vec::new(),
             warned_exclusive: false,
             foreground_hook,
         }
@@ -1106,14 +1116,24 @@ impl App {
         self.update_ink_visible();
     }
 
-    fn take_mouse_from_game(&mut self) {
-        if games::exclusive_fullscreen() && !self.warned_exclusive {
+    fn warn_fullscreen(&mut self) {
+        if !self.warned_exclusive {
             self.warned_exclusive = true;
             ui::balloon(
-                "Can't draw over this game",
-                "It's running in exclusive fullscreen. Switch it to Fullscreen Windowed \
+                "Use Fullscreen Windowed to draw over games",
+                "This game is in exclusive fullscreen, which nothing can draw over and which \
+                 leaves fullscreen if it loses focus. Switch it to Fullscreen Windowed \
                  (borderless) in its video settings.",
             );
+        }
+    }
+
+    /// Never takes the foreground from a game in exclusive fullscreen: it would drop out of
+    /// fullscreen, as if Alt+Tabbed.
+    fn take_mouse_from_game(&mut self) {
+        if games::exclusive_fullscreen() {
+            self.warn_fullscreen();
+            return;
         }
         if !settings::get().game_focus {
             return;
@@ -1125,10 +1145,28 @@ impl App {
             right: x + width,
             bottom: y + height,
         };
-        if let Some(game) = games::mouse_capturing_window(self.hwnd, screen) {
-            if games::take_focus(self.hwnd) {
-                self.game = Some(game);
+        let Some(game) = games::mouse_capturing_window(self.hwnd, screen) else {
+            return;
+        };
+        if self.restless_games.contains(&game) {
+            return;
+        }
+        if games::take_focus(self.hwnd) {
+            self.game = Some(game);
+            unsafe {
+                SetTimer(Some(self.hwnd), TIMER_GAME, GAME_CHECK_MS, None);
             }
+        }
+    }
+
+    /// Some fullscreen games minimise when they lose focus anyway: put such a game straight
+    /// back, leave its focus alone from now on, and say how to draw over it.
+    fn check_game(&mut self) {
+        let Some(game) = self.game else { return };
+        if games::restore_if_minimised(self.hwnd, game) {
+            self.game = None;
+            self.restless_games.push(game);
+            self.warn_fullscreen();
         }
     }
 

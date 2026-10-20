@@ -13,9 +13,9 @@ use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORI
 use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
 use windows::Win32::UI::Shell::{SHQueryUserNotificationState, QUNS_RUNNING_D3D_FULL_SCREEN};
 use windows::Win32::UI::WindowsAndMessaging::{
-    ClipCursor, GetClipCursor, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect, IsWindow,
-    SetForegroundWindow, SetWindowLongPtrW, EVENT_SYSTEM_FOREGROUND, GWL_EXSTYLE,
-    WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WS_EX_NOACTIVATE,
+    ClipCursor, GetClipCursor, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect, IsIconic,
+    IsWindow, SetForegroundWindow, SetWindowLongPtrW, ShowWindow, EVENT_SYSTEM_FOREGROUND,
+    GWL_EXSTYLE, SW_RESTORE, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WS_EX_NOACTIVATE,
 };
 
 fn contains(outer: RECT, inner: RECT) -> bool {
@@ -107,6 +107,20 @@ pub fn give_back(overlay: HWND, game: HWND) {
         if GetForegroundWindow() == overlay && IsWindow(Some(game)).as_bool() {
             let _ = SetForegroundWindow(game);
         }
+    }
+}
+
+/// Some games in fullscreen minimise the moment they lose focus. If this one did, puts it back
+/// and returns true.
+pub fn restore_if_minimised(overlay: HWND, game: HWND) -> bool {
+    unsafe {
+        if !IsWindow(Some(game)).as_bool() || !IsIconic(game).as_bool() {
+            return false;
+        }
+        set_activatable(overlay, false);
+        let _ = ShowWindow(game, SW_RESTORE);
+        let _ = SetForegroundWindow(game);
+        true
     }
 }
 
