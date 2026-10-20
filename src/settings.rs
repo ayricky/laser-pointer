@@ -2,8 +2,12 @@
 
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use windows::core::{w, HSTRING, PCWSTR};
+use windows::ApplicationModel::{StartupTask, StartupTaskState};
+use windows::Win32::Foundation::APPMODEL_ERROR_NO_PACKAGE;
+use windows::Win32::Storage::Packaging::Appx::GetCurrentPackageFullName;
 use windows::Win32::System::Registry::{
     RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW, HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_SZ,
 };
@@ -528,11 +532,32 @@ pub fn save() {
 }
 
 // ---- Start with Windows --------------------------------------------------------------------------
+// The plain exe adds itself to the Run key. The Store build is packaged, where that key would be
+// virtualised away; it starts through the StartupTask its manifest declares (packaging/), which
+// the user can also turn off in Task Manager or Settings, so its state is always read back.
 
 const RUN_KEY: PCWSTR = w!(r"Software\Microsoft\Windows\CurrentVersion\Run");
 const RUN_VALUE: PCWSTR = w!("LaserPointer");
+/// Must match the TaskId in packaging/AppxManifest.xml.
+const STARTUP_TASK: &str = "LaserPointerStartup";
+
+fn packaged() -> bool {
+    static PACKAGED: OnceLock<bool> = OnceLock::new();
+    *PACKAGED.get_or_init(|| {
+        let mut length = 0;
+        unsafe { GetCurrentPackageFullName(&mut length, None) != APPMODEL_ERROR_NO_PACKAGE }
+    })
+}
+
+fn startup_task() -> Option<StartupTask> {
+    StartupTask::GetAsync(&HSTRING::from(STARTUP_TASK)).ok()?.join().ok()
+}
 
 pub fn autostart() -> bool {
+    if packaged() {
+        let state = startup_task().and_then(|task| task.State().ok());
+        return matches!(state, Some(StartupTaskState::Enabled | StartupTaskState::EnabledByPolicy));
+    }
     unsafe {
         RegGetValueW(
             HKEY_CURRENT_USER,
@@ -548,6 +573,13 @@ pub fn autostart() -> bool {
 }
 
 pub fn set_autostart(on: bool) {
+    if packaged() {
+        if let Some(task) = startup_task() {
+            // Turned off by the user in Task Manager, this stays off: only they can undo that.
+            let _ = if on { task.RequestEnableAsync().and_then(|request| request.join()).map(drop) } else { task.Disable() };
+        }
+        return;
+    }
     unsafe {
         if !on {
             let _ = RegDeleteKeyValueW(HKEY_CURRENT_USER, RUN_KEY, RUN_VALUE);

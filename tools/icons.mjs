@@ -1,6 +1,7 @@
 // Regenerates every raster icon from assets/brand/logo.svg:  cd tools && npm install && npm run icons
 //   assets/brand/app.ico                         the exe's icon, at every size Windows asks for
 //   docs/img/favicon.png, apple-touch-icon.png   the website's icons
+//   packaging/Assets/*.png                       the Store package's logos and tiles
 //   docs/cursors.js                              the app's cursor styles, for the website's demo
 // The tray glyphs (assets/brand/tray.svg, tray-on.svg) are drawn by the app itself at runtime.
 import { Resvg } from '@resvg/resvg-js';
@@ -41,10 +42,45 @@ out('assets/brand/app.ico', ico([16, 20, 24, 32, 40, 48, 64, 256].map(size => ({
 out('docs/img/logo.svg', logo);
 out('docs/img/favicon.png', png(logo, 64));
 out('docs/img/apple-touch-icon.png', png(logo, 180));
+
+// The Store package's images (packaging/Assets): the logo centred on a transparent canvas, at
+// every scale Windows picks from. `fill` is the logo's share of the canvas's shorter side.
+const inner = logo.replace(/^<svg[^>]*>/, '').replace(/<\/svg>\s*$/, '');
+const placed = (width, height, fill) => {
+  const size = Math.min(width, height) * fill;
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">` +
+    `<svg x="${(width - size) / 2}" y="${(height - size) / 2}" width="${size}" height="${size}" viewBox="0 0 256 256">${inner}</svg></svg>`;
+};
+const scales = [100, 125, 150, 200, 400];
+const images = [
+  ['StoreLogo', 50, 50, 1],
+  ['Square44x44Logo', 44, 44, 1],
+  ['SmallTile', 71, 71, 0.6],
+  ['Square150x150Logo', 150, 150, 0.5],
+  ['Wide310x150Logo', 310, 150, 0.5],
+  ['LargeTile', 310, 310, 0.5],
+];
+for (const [name, width, height, fill] of images) {
+  for (const scale of scales) {
+    const w = Math.round(width * scale / 100), h = Math.round(height * scale / 100);
+    out(`packaging/Assets/${name}.scale-${scale}.png`, png(placed(w, h, fill), w));
+  }
+}
+// The taskbar, Start's app list and Explorer use exact sizes, drawn without a coloured plate.
+for (const size of [16, 20, 24, 30, 32, 36, 40, 48, 60, 64, 72, 80, 96, 256]) {
+  const image = png(logo, size);
+  for (const form of ['', '_altform-unplated', '_altform-lightunplated']) {
+    out(`packaging/Assets/Square44x44Logo.targetsize-${size}${form}.png`, image);
+  }
+}
 // The cursor table in src/cursors.rs is the source of truth: id, name, motion and SVG file.
 const table = readFileSync(join(root, 'src', 'cursors.rs'), 'utf8');
 const entries = [...table.matchAll(/id: "([^"]+)",\s*name: "([^"]+)",\s*hotspot: (CENTRE|\(([\d.]+), ([\d.]+)\)),\s*motion: Motion::(\w+),\s*source: include_str!\("\.\.\/([^"]+)"\)/g)];
-if (!entries.length) throw new Error('no cursor styles found in src/cursors.rs');
+// Every style must parse: one that didn't would quietly vanish from the site.
+const declared = [...table.matchAll(/\bid: "/g)].length;
+if (!entries.length || entries.length !== declared) {
+  throw new Error(`parsed ${entries.length} of ${declared} cursor styles in src/cursors.rs; update the pattern in tools/icons.mjs`);
+}
 const cursors = entries.map(([, id, name, centre, x, y, motion, file]) => ({
   id,
   name,
