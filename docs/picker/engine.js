@@ -489,18 +489,20 @@
       this.element.addEventListener('pointermove', e => { this.pointer = this.local(e); this.wake(); });
       this.element.addEventListener('pointerenter', () => { if (this.on) this.pose.ignite(performance.now()); this.inside = true; });
       this.element.addEventListener('pointerleave', () => { this.inside = false; this.wake(); });
+      // One pointer owns a gesture; a second finger is ignored until it ends.
+      const mine = e => this.drawing && e.pointerId === this.pointerId;
       c.addEventListener('pointerdown', e => {
-        if (e.button === 2) return;
-        if (e.button !== 0) return;
+        if (e.button !== 0 || this.drawing) return;
         c.setPointerCapture(e.pointerId);
+        this.pointerId = e.pointerId;
         this.begin(this.local(e), e);
       });
       c.addEventListener('pointermove', e => {
-        if (!this.drawing) return;
+        if (!mine(e)) return;
         for (const sample of e.getCoalescedEvents ? e.getCoalescedEvents() : [e]) this.extend(this.local(sample), e);
       });
-      c.addEventListener('pointerup', e => { if (this.drawing) { this.extend(this.local(e), e); this.finish(!e.ctrlKey); } });
-      c.addEventListener('pointercancel', () => this.finish(true));
+      c.addEventListener('pointerup', e => { if (mine(e)) { this.extend(this.local(e), e); this.finish(!e.ctrlKey); } });
+      c.addEventListener('pointercancel', e => { if (mine(e)) this.finish(false); });
       c.addEventListener('contextmenu', e => {
         e.preventDefault();
         this.ripples.push({ ...this.local(e), at: performance.now() });
@@ -509,7 +511,7 @@
       window.addEventListener('keydown', e => {
         if (e.target.closest && e.target.closest('input, textarea, select')) return;
         const key = e.key.toLowerCase();
-        if (key === 'l' && !e.ctrlKey) { e.preventDefault(); this.setOn(!this.on); return; }
+        if (key === 'l' && !e.ctrlKey) { e.preventDefault(); if (!e.repeat) this.setOn(!this.on); return; }
         if (!this.on) return;
         if (e.key === 'Alt') e.preventDefault();
         if (key === 'escape') this.setOn(false);
@@ -554,7 +556,11 @@
       const last = stroke.points[stroke.points.length - 1];
       if (last && Math.hypot(p.x - last.x, p.y - last.y) < MIN_STEP) return;
       stroke.points.push({ ...p, t: performance.now() });
-      if (stroke.look.snap > 0 && !this.locked) this.path.push([p.x, p.y]);
+      if (stroke.look.snap > 0 && !this.locked) {
+        // Long holds thin out rather than grow without end, as in the app.
+        if (this.path.length >= 4096) this.path = this.path.filter((_, i) => i % 2 === 0);
+        this.path.push([p.x, p.y]);
+      }
       this.wake();
     }
 
@@ -583,6 +589,7 @@
     }
 
     undo() {
+      if (this.drawing) return;
       while (this.undoStack.length) {
         const edit = this.undoStack.pop();
         if (edit.added) {
@@ -592,8 +599,11 @@
           this.redoStack.push({ stroke });
           break;
         }
-        const restored = edit.cleared.filter(s => s.look.ink || s.whole);
+        const now = performance.now();
+        const alive = s => s.look.ink || (s.points.length && now - Math.max(...s.points.map(p => p.t)) < s.look.fade);
+        const restored = edit.cleared.filter(alive);
         if (!restored.length) continue;
+        this.clearing = [];
         this.strokes.push(...restored);
         this.strokes.sort((a, b) => a.id - b.id);
         this.redoStack.push({ clear: restored.map(s => s.id) });
@@ -603,6 +613,7 @@
     }
 
     redo() {
+      if (this.drawing) return;
       const item = this.redoStack.pop();
       if (!item) return;
       if (item.stroke) {
