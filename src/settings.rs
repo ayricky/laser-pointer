@@ -550,8 +550,10 @@ pub enum Autostart {
     OffByUser,
     /// Decided by the organisation's policy, on or off.
     Policy(bool),
-    /// Not known yet, or Windows couldn't say.
+    /// Not known yet: Windows is still answering.
     Unknown,
+    /// Windows couldn't read or change it.
+    Failed,
 }
 
 fn packaged() -> bool {
@@ -592,7 +594,7 @@ fn startup_task(change: Option<bool>) -> Autostart {
         Ok(StartupTaskState::EnabledByPolicy) => Autostart::Policy(true),
         Ok(StartupTaskState::DisabledByPolicy) => Autostart::Policy(false),
         Ok(_) => Autostart::Off,
-        Err(_) => Autostart::Unknown,
+        Err(_) => Autostart::Failed,
     }
 }
 

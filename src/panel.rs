@@ -2,6 +2,7 @@
 //! light/dark theme and accent colour. Tabs for the pen, presets, shortcuts and options.
 
 use std::f32::consts::TAU;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -511,6 +512,8 @@ fn modifiers_held() -> u32 {
 /// Where "Start with Windows" stands, as last reported; the Store build hears back on another
 /// thread.
 static AUTOSTART_STATE: Mutex<Autostart> = Mutex::new(Autostart::Unknown);
+/// Set while Windows is answering, so requests run one at a time and in the order made.
+static AUTOSTART_BUSY: AtomicBool = AtomicBool::new(false);
 
 fn autostart_state() -> Autostart {
     *AUTOSTART_STATE.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -518,10 +521,15 @@ fn autostart_state() -> Autostart {
 
 impl Panel {
     /// Reads, or changes and then reads, "Start with Windows", and repaints when the answer comes.
+    /// Ignored while an earlier request is still out; its answer is on the way.
     fn ask_autostart(&self, change: Option<bool>) {
+        if AUTOSTART_BUSY.swap(true, Ordering::AcqRel) {
+            return;
+        }
         let window = self.window.map(|(hwnd, ..)| hwnd.0 as isize);
         settings::autostart(change, move |state| {
             *AUTOSTART_STATE.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = state;
+            AUTOSTART_BUSY.store(false, Ordering::Release);
             if let Some(window) = window {
                 // Safe from any thread; a window closed in the meantime just ignores it.
                 unsafe {
@@ -961,7 +969,7 @@ impl Panel {
             Widget::Toggle(KEEP_STROKES) => return Action::Run(Command::ToggleInk),
             Widget::Toggle(AUTOSTART) => {
                 match autostart_state() {
-                    Autostart::Policy(_) => {}
+                    Autostart::Policy(_) | Autostart::Unknown => {}
                     state => self.ask_autostart(Some(state != Autostart::On)),
                 }
                 return Action::Redraw;
@@ -1739,6 +1747,8 @@ impl Panel {
             let detail = match state {
                 Autostart::OffByUser => "Turned off in Task Manager; turn it back on there",
                 Autostart::Policy(_) => "Set by your organisation",
+                Autostart::Unknown => "Checking with Windows\u{2026}",
+                Autostart::Failed => "Windows couldn't change this; try again",
                 _ => toggle.detail,
             };
             (matches!(state, Autostart::On | Autostart::Policy(true)), detail)

@@ -701,7 +701,7 @@
         const away = now - g.pausedAt;
         g.at += away;
         g.started += away;
-        for (const s of this.strokes) {
+        for (const s of new Set([...this.strokes, ...this.clearing])) {
           for (const p of s.points) p.t += away;
           if (s.morph) s.morph.at += away;
         }
