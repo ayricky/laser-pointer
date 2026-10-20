@@ -221,7 +221,9 @@
     if (!path.slice(index).every(nearLoop)) return null;
     if (d2(loop[loop.length - 1], start) < 0.03 * size) loop.pop();
     loop.push(start);
-    const [signed, absolute] = loopTurning(loop);
+    // The doubling back of a scribble is counted on the loop's outline, so a hand's tremor along
+    // a box's sides doesn't add up to look like it.
+    const [signed] = loopTurning(loop), [, absolute] = loopTurning(simplify(loop, 0.03 * size));
     return Math.round(Math.abs(signed) / TAU) === 1 && absolute < 3.4 * Math.PI ? loop : null;
   }
 

@@ -326,8 +326,11 @@ fn closed_part(path: &[P], tolerance: &Tolerances) -> Option<Vec<P>> {
         loop_.pop();
     }
     loop_.push(start);
-    // Once round, without the doubling back of a scribble.
-    let (signed, absolute) = loop_turning(&loop_);
+    // Once round, without the doubling back of a scribble. The doubling back is counted on the
+    // loop's outline: a hand's tremor turns a little at every sample, and along the sides of a
+    // box that adds up to more than a scribble's worth, though the box never doubles back.
+    let (signed, _) = loop_turning(&loop_);
+    let (_, absolute) = loop_turning(&simplify(&loop_, 0.03 * size));
     let winds_once = (signed.abs() / TAU).round() == 1.0;
     (winds_once && absolute < 3.4 * PI).then_some(loop_)
 }
@@ -613,6 +616,9 @@ mod tests {
     use super::*;
 
     /// A tiny deterministic generator, so the tests need no crates.
+    /// The Laser preset's snap (35 of 100).
+    const LASER_DEFAULT: f32 = 0.35;
+
     struct Random(u64);
 
     impl Random {
@@ -818,6 +824,50 @@ mod tests {
         ] {
             let hit = rate(40, make, 0.6, shape);
             assert!(hit >= 0.9, "{name}: only {:.0}% recognised", hit * 100.0);
+        }
+    }
+
+    /// A stroke as the mouse reports it: a sample every few pixels, each a little off the line.
+    fn trembling(random: &mut Random, outline: &[P], tremor: f32) -> Vec<P> {
+        let samples = (length(outline) / 5.0) as usize;
+        resample(outline, samples.max(8))
+            .into_iter()
+            .map(|(x, y)| (x + random.signed() * tremor, y + random.signed() * tremor))
+            .collect()
+    }
+
+    #[test]
+    fn a_trembling_hand_still_snaps_at_the_laser_default() {
+        let strength = LASER_DEFAULT;
+        let corners = |random: &mut Random, corners: &[P]| {
+            let mut ring: Vec<P> = corners.iter().map(|&(x, y)| (x + random.signed() * 6.0, y + random.signed() * 6.0)).collect();
+            ring.push((ring[0].0 + random.signed() * 8.0, ring[0].1 + random.signed() * 8.0));
+            polyline(&ring, 1.0)
+        };
+        for (name, make, shape) in [
+            ("rectangle", Box::new(move |r: &mut Random| {
+                let (w, h) = (150.0 + r.next() * 250.0, 100.0 + r.next() * 150.0);
+                let outline = corners(r, &[(100.0, 100.0), (100.0 + w, 100.0), (100.0 + w, 100.0 + h), (100.0, 100.0 + h)]);
+                trembling(r, &outline, 2.5)
+            }) as Box<dyn FnMut(&mut Random) -> Vec<P>>, Shape::Rectangle),
+            ("triangle", Box::new(move |r: &mut Random| {
+                let s = 150.0 + r.next() * 200.0;
+                let outline = corners(r, &[(100.0, 100.0 + s), (100.0 + s / 2.0, 100.0), (100.0 + s, 100.0 + s)]);
+                trembling(r, &outline, 2.5)
+            }), Shape::Triangle),
+            ("circle", Box::new(|r: &mut Random| {
+                let outline = sloppy_ellipse(r, 1.0, true);
+                trembling(r, &outline, 2.5)
+            }), Shape::Ellipse),
+        ] {
+            let hit = rate(40, make, strength, shape);
+            assert!(hit >= 0.85, "{name}: only {:.0}% recognised", hit * 100.0);
+        }
+        // And trembling doesn't turn freehand into shapes.
+        let mut random = Random(11);
+        for (name, points) in negatives(&mut random) {
+            let shaky = trembling(&mut random, &points, 2.5);
+            assert!(correct(&shaky, 1.0, strength).is_none(), "a trembling {name} snapped");
         }
     }
 
