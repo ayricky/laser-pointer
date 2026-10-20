@@ -1,6 +1,7 @@
 // The laser, in the browser: strokes, shape snapping and cursor motion ported from the app
 // (src/stroke.rs, src/shapes.rs, and the cursor animation in src/main.rs), and a stage that
-// behaves like the overlay. Classic script, so it also works opened straight from disk.
+// behaves like the overlay, with a scripted "ghost" that demonstrates it until a visitor takes
+// over. Classic script, so it also works opened straight from disk.
 (function () {
   'use strict';
 
@@ -495,8 +496,8 @@
 
     listen() {
       const c = this.canvas;
-      this.element.addEventListener('pointermove', e => { this.pointer = this.local(e); this.wake(); });
-      this.element.addEventListener('pointerenter', () => { if (this.on) this.pose.ignite(performance.now()); this.inside = true; });
+      this.element.addEventListener('pointermove', e => { this.takeOver(); this.pointer = this.local(e); this.wake(); });
+      this.element.addEventListener('pointerenter', () => { this.takeOver(); if (this.on) this.pose.ignite(performance.now()); this.inside = true; });
       this.element.addEventListener('pointerleave', () => { this.inside = false; this.wake(); });
       // One pointer owns a gesture; a second finger is ignored until it ends.
       const mine = e => this.drawing && e.pointerId === this.pointerId;
@@ -652,9 +653,78 @@
 
     wake() { if (!this.frame) this.frame = requestAnimationFrame(t => this.render(t)); }
 
+    // ---- The ghost: a scripted hand that shows the laser off before anyone touches it ----------
+    // A script is a list of gestures, each a list of [x, y] points in fractions of the stage, drawn
+    // at a human pace through the same input path as the mouse, so they snap like real strokes.
+
+    play(script, { pause = 900, again = 2600 } = {}) {
+      if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+      this.ghost = { script, pause, again, index: 0, at: performance.now() + 500, path: null };
+      this.setOn(true);
+      this.toast = null;
+      this.wake();
+    }
+
+    /** The visitor moved: the ghost lets go, mid-stroke if need be. */
+    takeOver() {
+      if (!this.ghost) return;
+      this.ghost = null;
+      if (this.drawing) this.finish(false);
+      this.onChange(this);
+    }
+
+    advanceGhost(now) {
+      const g = this.ghost;
+      if (!g || now < g.at) return;
+      if (!g.path) {
+        if (g.index >= g.script.length) {
+          // Rest, clear what's left, and start again.
+          this.clear(() => true);
+          g.index = 0;
+          g.at = now + g.again;
+          return;
+        }
+        g.path = this.ghostPath(g.script[g.index++]);
+        g.started = now;
+        this.begin(g.path.points[0], {});
+      }
+      const elapsed = now - g.started, points = g.path.points;
+      const target = Math.min(points.length - 1, Math.floor(elapsed / g.path.step));
+      for (let i = g.path.done + 1; i <= target; i++) {
+        this.pointer = points[i];
+        this.extend(points[i], {});
+      }
+      g.path.done = target;
+      this.pointer = points[target];
+      this.inside = true;
+      if (target >= points.length - 1) {
+        this.finish(true);
+        g.path = null;
+        g.at = now + g.pause;
+      }
+    }
+
+    /** A gesture as pointer positions about every 4 ms, Catmull-Rom smooth, at about 0.9 px/ms. */
+    ghostPath(gesture) {
+      const px = gesture.map(([x, y]) => ({ x: x * this.width, y: y * this.height }));
+      const points = [];
+      for (let i = 0; i < px.length - 1; i++) {
+        const a = px[Math.max(0, i - 1)], b = px[i], c = px[i + 1], d = px[Math.min(px.length - 1, i + 2)];
+        const steps = Math.max(2, Math.ceil(Math.hypot(c.x - b.x, c.y - b.y) / 3.6));
+        for (let k = 0; k < steps; k++) {
+          const u = k / steps, u2 = u * u, u3 = u2 * u;
+          const at = v => 0.5 * (2 * b[v] + (-a[v] + c[v]) * u + (2 * a[v] - 5 * b[v] + 4 * c[v] - d[v]) * u2 + (-a[v] + 3 * b[v] - 3 * c[v] + d[v]) * u3);
+          points.push({ x: at('x'), y: at('y') });
+        }
+      }
+      points.push(px[px.length - 1]);
+      return { points, step: 4, done: 0 };
+    }
+
     render() {
       this.frame = 0;
       const now = performance.now(), ctx = this.ctx;
+      this.advanceGhost(now);
       ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
       ctx.clearRect(0, 0, this.width, this.height);
       let animating = false;
@@ -694,7 +764,7 @@
         drawCursor(ctx, this.cursor, this.look.color, this.pointer.x, this.pointer.y, pose);
         if (pose.animating) animating = true;
       }
-      if (animating) this.wake();
+      if (animating || this.ghost) this.wake();
     }
 
     drawToast(age) {
