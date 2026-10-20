@@ -1729,7 +1729,7 @@ mod tests {
     use super::*;
     use crate::snapshot;
 
-    /// Writes every tab, light and dark, at 100 % and 150 %, to target-v2/snapshots for review.
+    /// Writes every tab, light and dark, at 100 % and 150 %, to target/snapshots for review.
     #[test]
     #[ignore = "writes PNGs to look at"]
     fn snapshot_panel() {

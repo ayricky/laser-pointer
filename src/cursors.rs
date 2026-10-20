@@ -202,59 +202,6 @@ mod tests {
         }
     }
 
-    /// Renders every candidate cursor and tray icon with Direct2D's own SVG renderer, as the app
-    /// will, failing on any it rejects, and saves them as one sheet to look at.
-    #[test]
-    #[ignore = "renders the design candidates; writes a PNG"]
-    fn candidates_render_in_direct2d() {
-        use crate::snapshot;
-        use windows::core::Interface;
-        use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D_SIZE_F};
-        use windows::Win32::Graphics::Direct2D::ID2D1DeviceContext5;
-        use windows::Win32::UI::Shell::SHCreateMemStream;
-        use windows_numerics::Matrix3x2;
-
-        snapshot::init();
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/candidates");
-        let mut sources: Vec<(String, f32)> = Vec::new();
-        for (folder, size) in [("cursors", 48.0), ("tray", 16.0)] {
-            let mut names: Vec<_> = std::fs::read_dir(root.join(folder))
-                .unwrap()
-                .map(|entry| entry.unwrap().path())
-                .filter(|path| path.extension().is_some_and(|ext| ext == "svg"))
-                .collect();
-            names.sort();
-            for path in names {
-                let text = std::fs::read_to_string(&path).unwrap();
-                let text = text.replace("COLOR", "#ff2a2a").replace("INK", "#ffffff").replace("DOT", "#ff2a2a");
-                sources.push((text, size));
-            }
-        }
-        assert_eq!(sources.len(), 30 + 60);
-        let cell = 64.0;
-        let columns = 15;
-        let rows = sources.len().div_ceil(columns);
-        let canvas = snapshot::Canvas::new((cell * columns as f32) as u32, (cell * rows as f32) as u32, 96);
-        let context: ID2D1DeviceContext5 = canvas.target.cast().expect("SVG needs Windows 10 1703");
-        unsafe {
-            context.BeginDraw();
-            context.Clear(Some(&D2D1_COLOR_F { r: 0.12, g: 0.12, b: 0.13, a: 1.0 }));
-            for (index, (source, size)) in sources.iter().enumerate() {
-                let stream = SHCreateMemStream(Some(source.as_bytes())).unwrap();
-                let document = context
-                    .CreateSvgDocument(&stream, D2D_SIZE_F { width: *size, height: *size })
-                    .unwrap_or_else(|error| panic!("candidate {index} rejected: {error}"));
-                let zoom = 48.0 / size;
-                let (x, y) = ((index % columns) as f32 * cell + 8.0, (index / columns) as f32 * cell + 8.0);
-                context.SetTransform(&Matrix3x2 { M11: zoom, M22: zoom, M31: x, M32: y, ..Default::default() });
-                context.DrawSvgDocument(&document);
-            }
-            context.SetTransform(&Matrix3x2::identity());
-            context.EndDraw(None, None).unwrap();
-        }
-        canvas.save("candidates-direct2d.png");
-    }
-
     /// Each style through its motion: switching on, settled, half pressed, pressed. Drawn with
     /// the transform the app uses for cursor frames, to check pivots and directions by eye.
     #[test]

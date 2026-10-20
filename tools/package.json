@@ -1,0 +1,10 @@
+{
+  "name": "laser-pointer-tools",
+  "private": true,
+  "type": "module",
+  "description": "Regenerates icons from assets/brand",
+  "scripts": { "icons": "node icons.mjs" },
+  "devDependencies": {
+    "@resvg/resvg-js": "^2.6.2"
+  }
+}

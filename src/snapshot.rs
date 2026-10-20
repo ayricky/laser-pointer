@@ -65,9 +65,9 @@ impl Canvas {
         }
     }
 
-    /// Saves to target-v2/snapshots/<name>.
+    /// Saves to target/snapshots/<name>.
     pub fn save(&self, name: &str) {
-        let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target-v2").join("snapshots");
+        let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target").join("snapshots");
         std::fs::create_dir_all(&directory).unwrap();
         let path = HSTRING::from(directory.join(name).as_os_str());
         unsafe {
