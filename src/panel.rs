@@ -1173,6 +1173,7 @@ impl Panel {
             look: *look,
             scale: 1.0,
             whole: false,
+            breaks: Vec::new(),
         };
         stroke::draw(
             &self.factory,

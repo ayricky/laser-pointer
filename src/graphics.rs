@@ -2,7 +2,7 @@
 //! layer kept strokes are baked into, and rasterising SVGs into icons and cursors.
 
 use windows::core::{w, Interface, Result, HRESULT};
-use windows::Win32::Foundation::{E_FAIL, HANDLE, HWND, RECT};
+use windows::Win32::Foundation::{CloseHandle, E_FAIL, HANDLE, HWND, RECT};
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_F,
     D2D_SIZE_U,
@@ -69,9 +69,20 @@ pub struct Toast {
     pub scale: f32,
 }
 
+/// The swap chain's frame-latency waitable, closed with the swap chain.
+struct Waitable(HANDLE);
+
+impl Drop for Waitable {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CloseHandle(self.0);
+        }
+    }
+}
+
 pub struct Graphics {
     swap_chain: IDXGISwapChain1,
-    pub waitable: HANDLE,
+    waitable: Waitable,
     pub factory: ID2D1Factory1,
     pub dc: ID2D1DeviceContext,
     target: Option<ID2D1Bitmap1>,
@@ -156,7 +167,7 @@ impl Graphics {
         )?;
         let latency: IDXGISwapChain2 = swap_chain.cast()?;
         latency.SetMaximumFrameLatency(1)?;
-        let waitable = latency.GetFrameLatencyWaitableObject();
+        let waitable = Waitable(latency.GetFrameLatencyWaitableObject());
 
         let d2d: ID2D1Factory1 = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
         let dc = d2d
@@ -188,6 +199,10 @@ impl Graphics {
         };
         gfx.bind_target()?;
         Ok(gfx)
+    }
+
+    pub fn waitable(&self) -> HANDLE {
+        self.waitable.0
     }
 
     pub fn size(&self) -> (u32, u32) {

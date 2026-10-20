@@ -53,10 +53,10 @@ impl Region {
             return;
         }
         // Full: merge the pair that wastes the least area, then try again.
+        let all = self.rects.map(|rect| rect.unwrap_or(bounds));
         let mut best = (0, 1, f32::MAX);
-        let all: Vec<Bounds> = self.rects().collect();
-        for i in 0..all.len() {
-            for j in i + 1..all.len() {
+        for i in 0..CAPACITY {
+            for j in i + 1..CAPACITY {
                 let waste = area(all[i].union(all[j])) - area(all[i]) - area(all[j]);
                 if waste < best.2 {
                     best = (i, j, waste);

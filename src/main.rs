@@ -11,6 +11,7 @@ mod graphics;
 mod panel;
 mod region;
 mod settings;
+mod shapes;
 #[cfg(test)]
 mod snapshot;
 mod stroke;
@@ -25,7 +26,7 @@ use windows::Win32::Foundation::{
     GetLastError, COLORREF, ERROR_ALREADY_EXISTS, HANDLE, HWND, LPARAM, LRESULT, POINT, RECT,
     WAIT_OBJECT_0, WPARAM,
 };
-use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
+use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D_RECT_F};
 use windows::Win32::Graphics::Direct2D::{D2D1_ANTIALIAS_MODE_ALIASED, D2D1_ELLIPSE};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
@@ -44,7 +45,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP, MOD_NOREPEAT, MOUSEEVENTF_HWHEEL,
     MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
     MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT, MOUSEMOVEPOINT,
-    MOUSE_EVENT_FLAGS, VIRTUAL_KEY, VK_MENU, VK_SHIFT,
+    MOUSE_EVENT_FLAGS, VIRTUAL_KEY, VK_CONTROL, VK_MENU, VK_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyCursor, DispatchMessageW, GetCursorPos,
@@ -66,8 +67,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows_numerics::Vector2;
 
 use constrain::{Change, Lock};
-use graphics::{device_lost, rect_f, Graphics, Toast};
+use graphics::{device_lost, Graphics, Toast};
 use region::Region;
+use shapes::Correction;
 use settings::{Binding, Command, Slot, COMMANDS, MAX_PRESETS};
 use stroke::{rgba, Bounds, Point, Scratch, Stroke, MIN_STEP};
 
@@ -91,6 +93,7 @@ const MK_CONTROL: usize = 0x8;
 const VK_MASK: VIRTUAL_KEY = VIRTUAL_KEY(0xE8);
 
 const RIPPLE_SECS: f32 = 0.45;
+const MORPH_SECS: f32 = 0.14;
 const TOAST_SECS: f32 = 1.4;
 const CLEAR_SECS: f32 = 0.22;
 
@@ -113,11 +116,59 @@ struct Ripple {
     at: Instant,
 }
 
+/// A finished stroke settling onto the shape it was recognised as.
+struct Morph {
+    from: Vec<(f32, f32)>,
+    to: Correction,
+    at: Instant,
+}
+
 /// A stroke on screen. Kept strokes are baked into the ink layer once finished.
 struct Drawn {
     id: u64,
     stroke: Stroke,
     baked: bool,
+    morph: Option<Morph>,
+}
+
+impl Drawn {
+    fn translate(&mut self, dx: f32, dy: f32) {
+        self.stroke.translate(dx, dy);
+        if let Some(morph) = &mut self.morph {
+            for point in morph.from.iter_mut().chain(morph.to.parts.iter_mut().flatten()) {
+                point.0 += dx;
+                point.1 += dy;
+            }
+        }
+    }
+
+    /// Moves a snapping stroke along its morph; returns whether it is still moving.
+    fn advance_morph(&mut self, now: Instant) -> bool {
+        let Some(morph) = &self.morph else {
+            return false;
+        };
+        let k = (now.duration_since(morph.at).as_secs_f32() / MORPH_SECS).min(1.0);
+        let parts = shapes::morph(&morph.from, &morph.to, ease_out(k));
+        set_parts(&mut self.stroke, &parts, morph.at);
+        if k >= 1.0 {
+            self.morph = None;
+        }
+        k < 1.0
+    }
+}
+
+/// Replaces a stroke's points with `parts`, all stamped `at` so a shape fades as one.
+fn set_parts(stroke: &mut Stroke, parts: &[Vec<(f32, f32)>], at: Instant) {
+    stroke.points.clear();
+    stroke.breaks.clear();
+    for part in parts {
+        if !stroke.points.is_empty() {
+            stroke.breaks.push(stroke.points.len());
+        }
+        stroke
+            .points
+            .extend(part.iter().map(|&(x, y)| Point { x, y, at }));
+    }
 }
 
 /// What undo walks back through.
@@ -128,7 +179,8 @@ enum Edit {
 
 enum Redo {
     Stroke(Drawn),
-    Clear,
+    /// Clears exactly the strokes the undone clear had removed.
+    Clear(Vec<u64>),
 }
 
 /// The last mouse sample taken into the stroke, in screen coordinates, so the history Windows
@@ -254,6 +306,13 @@ struct App {
     drawing: bool,
     /// Last mouse sample taken into the stroke being drawn.
     sample: Option<Sample>,
+    /// Reused for the mouse history read on each move.
+    history: Vec<Sample>,
+    /// The whole path of the stroke being drawn, kept for shape snapping even as a fading
+    /// stroke's tail disappears.
+    path: Vec<(f32, f32)>,
+    /// The stroke was pinned to a straight line at some point, so it isn't snapped.
+    locked: bool,
     lock: Lock,
     anchor: (f32, f32),
     /// The menu-mask key was already tapped during this press of Alt.
@@ -436,7 +495,7 @@ pub fn run_command(command: Command) {
             with_app(|app| {
                 // Turning it off lets go of what was kept, as well as what comes next.
                 if !current.look.ink {
-                    app.clear(|stroke| stroke.look.ink);
+                    app.clear(|drawn| drawn.stroke.look.ink);
                 }
                 app.notify(if current.look.ink {
                     "Keep strokes on"
@@ -677,7 +736,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     }
                     TIMER_RECOVER => {
                         let _ = KillTimer(Some(hwnd), TIMER_RECOVER);
-                        with_app(App::recover);
+                        // The tray icon is drawn on the new device, outside the app borrow.
+                        if with_app(App::recover) == Some(true) {
+                            ui::settings_changed();
+                        }
                     }
                     TIMER_TRIM => {
                         let _ = KillTimer(Some(hwnd), TIMER_TRIM);
@@ -763,6 +825,16 @@ unsafe fn pass_through(hwnd: HWND, inputs: &[INPUT]) {
     set_click_through(hwnd, true);
     SendInput(inputs, std::mem::size_of::<INPUT>() as i32);
     SetTimer(Some(hwnd), TIMER_PASSTHROUGH, PASSTHROUGH_MS, None);
+}
+
+/// Shows a cursor now if the laser is on, and hands it to WM_SETCURSOR for later.
+fn publish_cursor(cursor: HCURSOR) {
+    CURSOR.store(cursor.0 as isize, Ordering::Relaxed);
+    if laser_on() {
+        unsafe {
+            SetCursor(Some(cursor));
+        }
+    }
 }
 
 fn key_held(key: VIRTUAL_KEY) -> bool {
@@ -851,6 +923,9 @@ impl App {
             next_id: 0,
             drawing: false,
             sample: None,
+            history: Vec::with_capacity(65),
+            path: Vec::new(),
+            locked: false,
             lock: Lock::None,
             anchor: (0.0, 0.0),
             alt_masked: false,
@@ -888,7 +963,7 @@ impl App {
     }
 
     fn waitable(&self) -> Option<HANDLE> {
-        self.gfx.as_ref().map(|gfx| gfx.waitable)
+        self.gfx.as_ref().map(Graphics::waitable)
     }
 
     fn full(&self) -> Bounds {
@@ -906,7 +981,9 @@ impl App {
 
     /// Something on screen changes by itself, without new input.
     fn animating(&self) -> bool {
-        self.strokes.iter().any(|drawn| !drawn.stroke.look.ink)
+        self.strokes.iter().any(|drawn| {
+            drawn.morph.is_some() || (!drawn.stroke.look.ink && !drawn.stroke.points.is_empty())
+        })
             || !self.ripples.is_empty()
             || self.toast.is_some()
             || !self.clearing.is_empty()
@@ -1072,19 +1149,25 @@ impl App {
         }
     }
 
-    fn recover(&mut self) {
+    /// Returns whether the device is back.
+    fn recover(&mut self) -> bool {
         let (width, height) = self.size;
         match unsafe { Graphics::new(self.hwnd, width, height) } {
             Ok(gfx) => {
                 self.gfx = Some(gfx);
                 self.presented = false;
                 self.stale = Default::default();
+                self.pointer.current = None;
                 self.rebake();
-                ui::settings_changed();
+                self.refresh_cursor();
+                true
             }
-            Err(_) => unsafe {
-                SetTimer(Some(self.hwnd), TIMER_RECOVER, RECOVER_MS, None);
-            },
+            Err(_) => {
+                unsafe {
+                    SetTimer(Some(self.hwnd), TIMER_RECOVER, RECOVER_MS, None);
+                }
+                false
+            }
         }
     }
 
@@ -1159,7 +1242,10 @@ impl App {
             id: self.next_id,
             stroke,
             baked: false,
+            morph: None,
         });
+        self.path.clear();
+        self.path.push(point);
         self.undo.push(Edit::Added(self.next_id));
         self.redo.clear();
         self.sample = Some(Sample {
@@ -1167,9 +1253,12 @@ impl App {
             y: screen.y,
             time,
         });
+        // Each gesture masks Alt afresh; a release between strokes may have gone unseen.
+        self.alt_masked = false;
         self.lock = self.lock_held();
         self.anchor = point;
-        if self.lock != Lock::None {
+        self.locked = self.lock != Lock::None;
+        if self.locked {
             self.mask_alt();
         }
         self.drawing = true;
@@ -1194,6 +1283,7 @@ impl App {
                     .last()
                     .and_then(|drawn| drawn.stroke.points.last())
                     .map_or(point, |last| (last.x, last.y));
+                self.locked = true;
                 self.mask_alt();
             }
             Change::Restart => {
@@ -1211,14 +1301,17 @@ impl App {
             y: screen.y,
             time,
         };
-        for sample in self.history_since(current) {
-            self.append(sample, now, ticks);
+        self.read_history(current);
+        for index in 0..self.history.len() {
+            self.append(self.history[index], now, ticks);
         }
         self.sample = Some(current);
     }
 
-    /// The samples between the last one taken and `current`, oldest first, ending with `current`.
-    fn history_since(&self, current: Sample) -> Vec<Sample> {
+    /// Fills `history` with the samples between the last one taken and `current`, oldest first,
+    /// ending with `current`.
+    fn read_history(&mut self, current: Sample) {
+        self.history.clear();
         let query = MOUSEMOVEPOINT {
             x: current.x & 0xffff,
             y: current.y & 0xffff,
@@ -1234,28 +1327,28 @@ impl App {
                 GMMP_USE_DISPLAY_POINTS,
             )
         };
-        let Ok(count) = usize::try_from(count) else {
-            return vec![current];
-        };
-        // Newest first: walk back until reaching what was already taken.
-        let mut samples: Vec<Sample> = raw[..count]
-            .iter()
-            .map(|point| Sample {
-                x: unwrap_coordinate(point.x),
-                y: unwrap_coordinate(point.y),
-                time: point.time,
-            })
-            .take_while(|sample| {
-                self.sample.is_none_or(|last| {
-                    *sample != last && sample.time.wrapping_sub(last.time) < 0x8000_0000
-                })
-            })
-            .collect();
-        samples.reverse();
-        if samples.last() != Some(&current) {
-            samples.push(current);
+        if let Ok(count) = usize::try_from(count) {
+            // Newest first: walk back until reaching what was already taken.
+            let last = self.sample;
+            self.history.extend(
+                raw[..count]
+                    .iter()
+                    .map(|point| Sample {
+                        x: unwrap_coordinate(point.x),
+                        y: unwrap_coordinate(point.y),
+                        time: point.time,
+                    })
+                    .take_while(|sample| {
+                        last.is_none_or(|last| {
+                            *sample != last && sample.time.wrapping_sub(last.time) < 0x8000_0000
+                        })
+                    }),
+            );
+            self.history.reverse();
         }
-        samples
+        if self.history.last() != Some(&current) {
+            self.history.push(current);
+        }
     }
 
     fn append(&mut self, sample: Sample, now: Instant, ticks: u32) {
@@ -1279,6 +1372,7 @@ impl App {
         let at = sample_instant(sample.time, ticks, now);
         let at = stroke.points.last().map_or(at, |last| at.max(last.at));
         stroke.points.push(Point { x, y, at });
+        self.path.push((x, y));
         self.dirty = true;
     }
 
@@ -1289,9 +1383,41 @@ impl App {
         self.drawing = false;
         self.sample = None;
         self.lock = Lock::None;
+        self.snap_finished();
         self.dirty = true;
         self.pointer.pressed = Some((false, Instant::now()));
         self.refresh_cursor();
+    }
+
+    /// Pulls the stroke just finished onto the line, arrow or shape it looks like, unless it was
+    /// a straight line already or the user is holding Ctrl to keep it freehand.
+    fn snap_finished(&mut self) {
+        let path = std::mem::take(&mut self.path);
+        let Some(drawn) = self.strokes.last_mut() else {
+            return;
+        };
+        let snap = drawn.stroke.look.snap;
+        if self.locked || snap == 0 || key_held(VK_CONTROL) {
+            return;
+        }
+        let Some(correction) = shapes::correct(&path, drawn.stroke.scale, snap as f32 / 100.0)
+        else {
+            return;
+        };
+        let now = Instant::now();
+        drawn.stroke.whole = true;
+        // Corners stay sharp; the shape is already smooth where it should be.
+        drawn.stroke.look.smoothing = 0;
+        if animations_enabled() {
+            drawn.morph = Some(Morph {
+                from: path,
+                to: correction,
+                at: now,
+            });
+            drawn.advance_morph(now);
+        } else {
+            set_parts(&mut drawn.stroke, &correction.parts, now);
+        }
     }
 
     fn remove_stroke(&mut self, id: u64) -> Option<Drawn> {
@@ -1330,8 +1456,8 @@ impl App {
                         continue;
                     }
                     self.clearing.clear();
+                    self.redo.push(Redo::Clear(restored.iter().map(|drawn| drawn.id).collect()));
                     self.strokes.extend(restored);
-                    self.redo.push(Redo::Clear);
                     break;
                 }
             }
@@ -1357,9 +1483,9 @@ impl App {
                 self.undo.push(Edit::Added(drawn.id));
                 self.strokes.push(drawn);
             }
-            Some(Redo::Clear) => {
+            Some(Redo::Clear(ids)) => {
                 let redo = std::mem::take(&mut self.redo);
-                self.clear(|_| true);
+                self.clear(|drawn| ids.contains(&drawn.id));
                 self.redo = redo;
             }
             None => return,
@@ -1369,11 +1495,11 @@ impl App {
     }
 
     /// Fades out the strokes `which` picks, as one undoable step.
-    fn clear(&mut self, which: impl Fn(&Stroke) -> bool) {
+    fn clear(&mut self, which: impl Fn(&Drawn) -> bool) {
         self.finish();
         let (gone, kept): (Vec<Drawn>, Vec<Drawn>) = std::mem::take(&mut self.strokes)
             .into_iter()
-            .partition(|drawn| which(&drawn.stroke));
+            .partition(|drawn| which(drawn));
         self.strokes = kept;
         if gone.is_empty() {
             return;
@@ -1416,8 +1542,26 @@ impl App {
         let (x, y, width, height) = unsafe { virtual_screen() };
         let (dx, dy) = ((self.origin.0 - x) as f32, (self.origin.1 - y) as f32);
         for drawn in &mut self.strokes {
-            drawn.stroke.translate(dx, dy);
+            drawn.translate(dx, dy);
         }
+        // Undo and redo must bring strokes back where they were on screen, too.
+        for edit in &mut self.undo {
+            if let Edit::Cleared(list) = edit {
+                for drawn in list {
+                    drawn.translate(dx, dy);
+                }
+            }
+        }
+        for redo in &mut self.redo {
+            if let Redo::Stroke(drawn) = redo {
+                drawn.translate(dx, dy);
+            }
+        }
+        for point in &mut self.path {
+            point.0 += dx;
+            point.1 += dy;
+        }
+        self.anchor = (self.anchor.0 + dx, self.anchor.1 + dy);
         for stroke in &mut self.clearing {
             stroke.translate(dx, dy);
         }
@@ -1451,20 +1595,22 @@ impl App {
 
     /// Picks the cursor for the current style, colour, monitor and animation frame, rendering it
     /// the first time it's needed. Keeps a timer running only while the cursor is animating.
+    /// Picks the cursor for the current style, colour, monitor and animation frame, rendering it
+    /// the first time it's needed. Keeps a timer running only while the cursor is animating.
     fn refresh_cursor(&mut self) {
         let settings = settings::get();
+        let (zoom, animating) = self.pointer.zoom(Instant::now());
         let mut position = POINT::default();
-        if unsafe { GetCursorPos(&mut position) }.is_err() {
-            return;
-        }
-        let now = Instant::now();
-        let (zoom, animating) = self.pointer.zoom(now);
+        let located = unsafe { GetCursorPos(&mut position) }.is_ok();
         unsafe {
-            if animating && laser_on() {
+            if animating && located && laser_on() {
                 SetTimer(Some(self.hwnd), TIMER_CURSOR, CURSOR_FRAME_MS, None);
             } else {
                 let _ = KillTimer(Some(self.hwnd), TIMER_CURSOR);
             }
+        }
+        if !located {
+            return;
         }
         let key = CursorKey {
             style: settings.cursor,
@@ -1478,49 +1624,47 @@ impl App {
         let cached = self.pointer.cursors.iter().find(|(cached, _)| *cached == key);
         let cursor = match cached {
             Some((_, cursor)) => *cursor,
-            None => {
-                let Some(cursor) = self.render_cursor(key) else {
+            None => match self.render_cursor(key) {
+                Some(cursor) => {
+                    self.pointer.cursors.push((key, cursor));
+                    cursor
+                }
+                // Without a GPU for now: a shared system crosshair, never cached or destroyed,
+                // and the real cursor is tried again next time.
+                None => {
+                    self.pointer.current = None;
+                    if let Ok(cross) = unsafe { LoadCursorW(None, IDC_CROSS) } {
+                        publish_cursor(cross);
+                    }
                     return;
-                };
-                self.pointer.evict(key);
-                self.pointer.cursors.push((key, cursor));
-                cursor
-            }
+                }
+            },
         };
         self.pointer.current = Some(key);
-        CURSOR.store(cursor.0 as isize, Ordering::Relaxed);
-        if laser_on() {
-            unsafe {
-                SetCursor(Some(cursor));
-            }
-        }
+        publish_cursor(cursor);
+        // Only once the replacement is showing can the old ones go.
+        self.pointer.evict(key);
     }
-
     fn render_cursor(&self, key: CursorKey) -> Option<HCURSOR> {
         let style = &cursors::STYLES[key.style];
         let scale = key.dpi as f32 / 96.0;
         let size = (cursors::SIZE * scale).round() as u32;
         let hotspot = (style.hotspot.0 * scale, style.hotspot.1 * scale);
         let zoom = ZOOM_MIN + f32::from(key.step) * ZOOM_STEP;
-        let rendered = self.gfx.as_ref().and_then(|gfx| unsafe {
-            gfx.svg_icon(&style.svg(key.color), size, Some(hotspot), zoom)
-                .ok()
-        });
-        match rendered {
-            Some(icon) => Some(HCURSOR(icon.0)),
-            // Without a GPU for now, a plain crosshair beats no cursor at all.
-            None => unsafe { LoadCursorW(None, IDC_CROSS).ok() },
-        }
+        let gfx = self.gfx.as_ref()?;
+        let icon = unsafe { gfx.svg_icon(&style.svg(key.color), size, Some(hotspot), zoom) }.ok()?;
+        Some(HCURSOR(icon.0))
     }
-
+    /// Bakes finished kept strokes into the ink layer, so they cost nothing to keep on screen.
     /// Bakes finished kept strokes into the ink layer, so they cost nothing to keep on screen.
     fn bake_finished(&mut self) {
         let Some(gfx) = &mut self.gfx else { return };
         let last = self.strokes.len().wrapping_sub(1);
-        let mut damaged = Vec::new();
+        let mut damaged = Region::default();
+        let mut lost = false;
         for (index, drawn) in self.strokes.iter_mut().enumerate() {
             let in_progress = self.drawing && index == last;
-            if drawn.baked || !drawn.stroke.look.ink || in_progress {
+            if drawn.baked || !drawn.stroke.look.ink || in_progress || drawn.morph.is_some() {
                 continue;
             }
             let (scratch, stroke) = (&mut self.scratch, &mut drawn.stroke);
@@ -1529,17 +1673,22 @@ impl App {
                     stroke::draw(&gfx.factory, &gfx.dc, &gfx.brush, stroke, Instant::now(), 1.0, scratch);
                 })
             };
-            if baked.is_err() {
+            if let Err(error) = baked {
+                lost = device_lost(&error);
                 break;
             }
             drawn.baked = true;
-            damaged.extend(drawn.stroke.bounds());
+            if let Some(bounds) = drawn.stroke.bounds() {
+                damaged.add(bounds);
+            }
         }
-        for bounds in damaged {
+        for bounds in damaged.rects() {
             self.damage_ink(bounds);
         }
+        if lost {
+            self.lose_device();
+        }
     }
-
     fn render(&mut self) {
         let now = Instant::now();
         let color = settings::get().look.color;
@@ -1562,6 +1711,9 @@ impl App {
             index += 1;
             !drawn.stroke.expired(now) || (drawing && index - 1 == last)
         });
+        for drawn in &mut self.strokes {
+            drawn.advance_morph(now);
+        }
         self.bake_finished();
         let Some(gfx) = &self.gfx else { return };
         if gfx.trimmed {
@@ -1571,11 +1723,8 @@ impl App {
 
         // What moves this frame, and where.
         let mut moving = Region::default();
-        let live: Vec<usize> = (0..self.strokes.len())
-            .filter(|&i| !self.strokes[i].baked)
-            .collect();
-        for &i in &live {
-            if let Some(bounds) = self.strokes[i].stroke.bounds() {
+        for drawn in self.strokes.iter().filter(|drawn| !drawn.baked) {
+            if let Some(bounds) = drawn.stroke.bounds() {
                 moving.add(bounds);
             }
         }
@@ -1591,27 +1740,66 @@ impl App {
             moving.add(Graphics::toast_bounds(toast));
         }
 
+        // One set of rectangles is both repainted and presented. It covers what this buffer
+        // showed two frames ago, what the frame on screen shows, what moves now, and kept ink
+        // that changed since either buffer last saw it.
         let back = self.back;
-        let mut repaint = Region::default();
+        let mut changed = moving;
+        changed.union(&self.stale[back]);
+        changed.union(&self.stale[1 - back]);
+        changed.union(&self.ink_damage[back]);
+        changed.union(&self.present_damage);
+        let mut rects = [RECT::default(); 8];
+        let mut count = 0;
         if self.presented {
-            repaint.union(&self.stale[back]);
-            repaint.union(&self.ink_damage[back]);
-            repaint.union(&moving);
+            for bounds in changed.rects() {
+                if let Some(rect) = pixel_rect(inflate(bounds, 2.0), size) {
+                    rects[count] = rect;
+                    count += 1;
+                }
+            }
+            // Every frame-latency wait must be paired with a present, so even an unchanged
+            // frame presents one repainted pixel.
+            if count == 0 {
+                rects[0] = RECT {
+                    left: 0,
+                    top: 0,
+                    right: 1,
+                    bottom: 1,
+                };
+                count = 1;
+            }
         } else {
-            repaint.add(self.full());
+            rects[0] = RECT {
+                left: 0,
+                top: 0,
+                right: size.0 as i32,
+                bottom: size.1 as i32,
+            };
+            count = 1;
         }
         let clear_fade = 1.0 - (now.duration_since(self.cleared_at).as_secs_f32() / CLEAR_SECS).min(1.0);
 
         let drawn = unsafe {
             gfx.dc.BeginDraw();
-            for area in repaint.rects() {
-                let area = inflate(area, 2.0);
-                let clip = rect_f(area);
+            for rect in &rects[..count] {
+                let clip = D2D_RECT_F {
+                    left: rect.left as f32,
+                    top: rect.top as f32,
+                    right: rect.right as f32,
+                    bottom: rect.bottom as f32,
+                };
+                let area = Bounds {
+                    left: clip.left,
+                    top: clip.top,
+                    right: clip.right,
+                    bottom: clip.bottom,
+                };
                 gfx.dc.PushAxisAlignedClip(&clip, D2D1_ANTIALIAS_MODE_ALIASED);
                 gfx.dc.Clear(Some(&D2D1_COLOR_F::default()));
                 gfx.draw_ink(clip);
-                for &i in &live {
-                    let stroke = &mut self.strokes[i].stroke;
+                for drawn in self.strokes.iter_mut().filter(|drawn| !drawn.baked) {
+                    let stroke = &mut drawn.stroke;
                     if stroke.bounds().is_some_and(|bounds| intersects(bounds, area)) {
                         stroke::draw(&gfx.factory, &gfx.dc, &gfx.brush, stroke, now, 1.0, &mut self.scratch);
                     }
@@ -1646,28 +1834,10 @@ impl App {
             }
             gfx.dc.EndDraw(None, None)
         };
-
-        // Present only what differs from the frame now on screen.
-        let mut changed = moving;
-        changed.union(&self.stale[1 - back]);
-        changed.union(&self.present_damage);
-        let mut rects: Vec<RECT> = if self.presented {
-            changed
-                .rects()
-                .filter_map(|bounds| pixel_rect(inflate(bounds, 2.0), size))
-                .collect()
-        } else {
-            Vec::new()
-        };
-        if self.presented && rects.is_empty() {
-            rects.push(RECT {
-                left: 0,
-                top: 0,
-                right: 1,
-                bottom: 1,
-            });
-        }
-        let presented = drawn.and_then(|()| unsafe { gfx.present(&mut rects) });
+        let whole = !self.presented;
+        let presented = drawn.and_then(|()| unsafe {
+            gfx.present(if whole { &mut [] } else { &mut rects[..count] })
+        });
 
         self.stale[back] = moving;
         self.ink_damage[back].clear();
@@ -1684,8 +1854,7 @@ impl App {
         if !laser_on() && !self.has_content() && self.shown {
             self.hide();
         }
-    }
-}
+    }}
 
 #[cfg(test)]
 mod tests {

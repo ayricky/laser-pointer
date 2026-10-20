@@ -34,6 +34,8 @@ pub struct Stroke {
     pub scale: f32,
     /// A corrected shape fades out all at once instead of shrinking along its trail.
     pub whole: bool,
+    /// Where each part after the first begins, for shapes drawn in pieces like an arrow.
+    pub breaks: Vec<usize>,
 }
 
 impl Stroke {
@@ -43,6 +45,7 @@ impl Stroke {
             look,
             scale,
             whole: false,
+            breaks: Vec::new(),
         }
     }
 
@@ -159,6 +162,7 @@ pub fn draw(
         look,
         scale,
         whole,
+        breaks,
     } = stroke;
     let (look, scale) = (*look, *scale);
     let base = look.width as f32 / 2.0 * scale;
@@ -177,28 +181,35 @@ pub fn draw(
     if points.is_empty() {
         return None;
     }
-    smooth(points, look.smoothing as usize, &mut scratch.path);
-    curve_through(
-        &scratch.path,
-        &scratch.radii,
-        CURVE_STEP * scale,
-        &mut scratch.centre,
-        &mut scratch.widths,
-    );
-
-    let opacity = look.opacity as f32 / 100.0 * fade;
     let mut bounds = None;
-    for &(width, alpha, white) in layers(look.style) {
-        scratch.layer.clear();
-        scratch.layer.extend(scratch.widths.iter().map(|radius| radius * width));
-        outline(&scratch.centre, &scratch.layer, &mut scratch.outline);
-        bounds = union(bounds, extent(&scratch.outline));
-        let mut color = rgba(look.color, alpha * opacity);
-        color.r += (1.0 - color.r) * white;
-        color.g += (1.0 - color.g) * white;
-        color.b += (1.0 - color.b) * white;
-        unsafe { brush.SetColor(&color) };
-        let _ = fill(factory, target, brush, &scratch.outline);
+    let mut start = 0;
+    for end in breaks.iter().copied().chain([points.len()]) {
+        let part = start..end.min(points.len());
+        start = end;
+        if part.is_empty() {
+            continue;
+        }
+        smooth(&points[part.clone()], look.smoothing as usize, &mut scratch.path);
+        curve_through(
+            &scratch.path,
+            &scratch.radii[part],
+            CURVE_STEP * scale,
+            &mut scratch.centre,
+            &mut scratch.widths,
+        );
+        let opacity = look.opacity as f32 / 100.0 * fade;
+        for &(width, alpha, white) in layers(look.style) {
+            scratch.layer.clear();
+            scratch.layer.extend(scratch.widths.iter().map(|radius| radius * width));
+            outline(&scratch.centre, &scratch.layer, &mut scratch.outline);
+            bounds = union(bounds, extent(&scratch.outline));
+            let mut color = rgba(look.color, alpha * opacity);
+            color.r += (1.0 - color.r) * white;
+            color.g += (1.0 - color.g) * white;
+            color.b += (1.0 - color.b) * white;
+            unsafe { brush.SetColor(&color) };
+            let _ = fill(factory, target, brush, &scratch.outline);
+        }
     }
     bounds
 }
