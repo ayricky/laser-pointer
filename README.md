@@ -15,15 +15,25 @@ presentation.
 - **Presets** — Laser, Highlighter and Pen to start with; create, rename, update and delete your
   own (up to eight).
 - **Keep strokes** — annotations stay on screen, even with the laser off and clicks passing
-  through them, until you clear them. Undo the last one at any time.
+  through them, until you clear them. Undo and redo anything, clearing included.
+- **Straight lines** — hold Alt while drawing for a perfectly horizontal line, Shift+Alt for a
+  vertical one.
+- **Shape snapping** — let go of a rough circle, box, triangle, line or arrow and it settles into
+  a clean one. How readily it snaps is set per preset (Off, Gentle, Medium, Strong); hold Ctrl as
+  you let go to keep a stroke freehand.
 - **Shortcuts for everything** — rebind or remove any action, including single keys. Keys that
   only make sense while drawing (Esc, Undo) are claimed only while the laser is on.
-- **Laser-dot cursor**, **click ripples** where right-clicks land, and an **on-screen indicator**
-  that confirms toggles, preset changes and size changes.
+- **Cursor styles** — a laser dot, halo, ring, focus, neon, crosshair, pen or arrow, in the laser
+  colour, that grows in when the laser turns on and squeezes while you draw.
+- **Click ripples** where right-clicks land, and an **on-screen indicator** that confirms toggles,
+  preset changes and size changes.
+- **Works over fullscreen games** in borderless mode (see below).
 - **Settings panel** in the Windows 11 style, following your light/dark theme and accent colour,
   with a live preview. Left-click the tray icon to open it.
-- Light on resources: the overlay is hidden while there is nothing to show, and only the parts of
-  the screen that change are redrawn.
+- Light on resources: the overlay is hidden while there is nothing to show, only the parts of the
+  screen that change are redrawn, kept strokes are drawn once, idle memory is handed back, and it
+  uses no CPU while nothing moves. It follows each monitor's scaling, keeps your annotations when
+  displays change, and recovers on its own if the graphics driver resets.
 
 ## Default shortcuts
 
@@ -31,14 +41,29 @@ presentation.
 | --- | --- | --- |
 | Turn laser on or off | Alt+L | always |
 | Turn laser off | Esc | while the laser is on |
-| Undo last stroke | Ctrl+Z | while the laser is on |
+| Undo | Ctrl+Z | while the laser is on |
+| Redo | Ctrl+Y | while the laser is on |
 | Clear strokes | Alt+X | while strokes are on screen |
 | Keep strokes on or off | Alt+K | always |
 | Next / previous preset | Alt+] / Alt+[ | always |
 | Quit | Alt+Shift+L | always |
 
-While the laser is on: drag to draw, right-click to click through, scroll to scroll the app
-underneath, Ctrl+scroll to change thickness.
+While the laser is on: drag to draw, right-click to click through, middle and side buttons and
+both scroll wheels reach the app underneath, Ctrl+scroll changes thickness. While drawing, hold
+Alt for a horizontal line, Shift+Alt for a vertical one, and Ctrl as you let go to skip snapping.
+
+## Games
+
+Laser Pointer draws over games running in **borderless** or **fullscreen windowed** mode (in
+Counter-Strike 2: Video → Display Mode → Fullscreen Windowed). A game in true exclusive
+fullscreen owns the display and nothing can appear over it; you'll get a notice saying so.
+
+With **Pause games while drawing** on (Options, on by default), turning the laser on over a game
+that has captured the mouse takes the mouse from it, so drawing doesn't turn the camera, and hands
+it straight back when the laser turns off. Slide shows and other apps that leave the mouse free
+keep the keyboard, so clickers still work.
+
+It is an ordinary always-on-top window: it never injects into or reads another program.
 
 ## Running it
 
@@ -60,5 +85,5 @@ The default MSVC toolchain needs the Visual Studio Build Tools. With the GNU too
 
 ## Licence
 
-[MIT](LICENSE). The cursor artwork comes from [Excalidraw](https://github.com/excalidraw/excalidraw)
+[MIT](LICENSE). The tray icon artwork comes from [Excalidraw](https://github.com/excalidraw/excalidraw)
 under the MIT licence; see [THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt).
