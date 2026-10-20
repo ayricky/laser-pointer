@@ -443,16 +443,25 @@
       this.pointer = null; this.pose = new CursorPose(); this.frame = 0;
       new ResizeObserver(() => this.resize()).observe(element);
       this.resize();
+      this.watchPixelRatio();
       this.listen();
       this.applyInput();
       onImageLoad(() => this.wake());
     }
 
+    /// Sized from the canvas's own box (inside any border), at the current pixel ratio, so a
+    /// CSS pixel on the canvas is exactly a CSS pixel under the pointer.
     resize() {
-      const dpr = window.devicePixelRatio || 1, r = this.element.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1, r = this.canvas.getBoundingClientRect();
       this.width = r.width; this.height = r.height; this.dpr = dpr;
       this.canvas.width = Math.round(r.width * dpr); this.canvas.height = Math.round(r.height * dpr);
       this.wake();
+    }
+
+    /// Moving the window to a monitor with different scaling changes the pixel ratio.
+    watchPixelRatio() {
+      const query = matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`);
+      query.addEventListener('change', () => { this.resize(); this.watchPixelRatio(); }, { once: true });
     }
 
     applyInput() {
