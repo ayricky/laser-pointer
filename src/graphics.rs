@@ -506,7 +506,8 @@ impl Graphics {
                 std::slice::from_raw_parts(mapped.bits.add(row * mapped.pitch as usize), row_bytes);
             let destination =
                 std::slice::from_raw_parts_mut((bits as *mut u8).add(row * row_bytes), row_bytes);
-            // Direct2D hands back premultiplied pixels; icon bitmaps want straight alpha.
+            // Direct2D hands back premultiplied pixels; icon bitmaps want straight alpha, as in
+            // Microsoft's alpha-blended cursor example, which sets alpha without scaling RGB.
             for (from, to) in source.chunks_exact(4).zip(destination.chunks_exact_mut(4)) {
                 let alpha = from[3];
                 for channel in 0..3 {

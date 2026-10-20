@@ -103,6 +103,9 @@ static INK_VISIBLE: AtomicBool = AtomicBool::new(false);
 /// Bit per command (low bits) and per preset (from bit 16) whose shortcut another app holds.
 static HOTKEY_FAILED: AtomicU32 = AtomicU32::new(0);
 static CURSOR: AtomicIsize = AtomicIsize::new(0);
+/// The cursor last handed to SetCursor. It may still be on screen, even with the laser off, so it
+/// is never destroyed until something replaces it.
+static INSTALLED: AtomicIsize = AtomicIsize::new(0);
 static OVERLAY: AtomicIsize = AtomicIsize::new(0);
 
 thread_local! {
@@ -228,9 +231,15 @@ struct Pointer {
     ignited: Option<Instant>,
     /// Button state and when it last changed.
     pressed: Option<(bool, Instant)>,
-    /// The cursor last handed to SetCursor, which may still be showing and so mustn't be
-    /// destroyed, even once the laser is off.
-    installed: Option<HCURSOR>,
+}
+
+/// Puts the laser's current cursor on screen, recording it as in use.
+fn install_cursor() {
+    let cursor = CURSOR.load(Ordering::Relaxed);
+    INSTALLED.store(cursor, Ordering::Relaxed);
+    unsafe {
+        SetCursor(Some(HCURSOR(cursor as _)));
+    }
 }
 
 fn ease_out(k: f32) -> f32 {
@@ -283,17 +292,14 @@ impl Pointer {
     fn publish(&mut self, cursor: HCURSOR) {
         CURSOR.store(cursor.0 as isize, Ordering::Relaxed);
         if laser_on() {
-            unsafe {
-                SetCursor(Some(cursor));
-            }
-            self.installed = Some(cursor);
+            install_cursor();
         }
     }
 
     /// Drops cursors for looks no longer in use, and caps how many are kept. The one most
     /// recently installed survives until something else replaces it.
     fn evict(&mut self, keep: CursorKey) {
-        let installed = self.installed;
+        let installed = Some(HCURSOR(INSTALLED.load(Ordering::Relaxed) as _));
         let destroy = |cursor: HCURSOR| unsafe {
             let _ = DestroyCursor(cursor);
         };
@@ -696,7 +702,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             }
             WM_SETCURSOR if laser_on() => {
                 with_app(App::refresh_cursor);
-                SetCursor(Some(HCURSOR(CURSOR.load(Ordering::Relaxed) as _)));
+                install_cursor();
                 LRESULT(1)
             }
             // Keeps keyboard focus on the app being presented.
@@ -984,7 +990,7 @@ impl App {
             unsafe {
                 SetCursor(Some(arrow));
             }
-            self.pointer.installed = None;
+            INSTALLED.store(0, Ordering::Relaxed);
         }
         self.pointer.evict(CursorKey {
             style: usize::MAX,
@@ -1013,9 +1019,9 @@ impl App {
 
     /// Something on screen changes by itself, without new input.
     fn animating(&self) -> bool {
-        let now = Instant::now();
+        // Expired strokes still count until a frame removes them and erases what they left.
         self.strokes.iter().any(|drawn| {
-            drawn.morph.is_some() || (!drawn.stroke.look.ink && !drawn.stroke.expired(now))
+            drawn.morph.is_some() || (!drawn.stroke.look.ink && !drawn.stroke.points.is_empty())
         })
             || !self.ripples.is_empty()
             || self.toast.is_some()
@@ -1088,7 +1094,7 @@ impl App {
                 self.take_mouse_from_game();
                 self.pointer.ignited = Some(Instant::now());
                 self.refresh_cursor();
-                SetCursor(Some(HCURSOR(CURSOR.load(Ordering::Relaxed) as _)));
+                install_cursor();
             } else {
                 self.notify("Laser off");
                 let _ = ReleaseCapture();
@@ -1720,11 +1726,12 @@ impl App {
         let mut lost = false;
         for (index, drawn) in self.strokes.iter_mut().enumerate() {
             let in_progress = self.drawing && index == last;
-            if drawn.baked || !drawn.stroke.look.ink {
+            if drawn.baked {
                 continue;
             }
-            // Later strokes wait too, so the ink keeps the order they were drawn in.
-            if in_progress || drawn.morph.is_some() {
+            // Baking puts a stroke beneath everything still live, so it waits until every stroke
+            // drawn before it is baked or gone; the ink keeps the order things were drawn in.
+            if !drawn.stroke.look.ink || in_progress || drawn.morph.is_some() {
                 break;
             }
             let (scratch, stroke) = (&mut self.scratch, &mut drawn.stroke);

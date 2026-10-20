@@ -423,6 +423,9 @@ pub struct Panel {
     autostart: bool,
     started: Instant,
     preview: Preview,
+    /// The window drawn into, with its DPI and pixel size, to rebuild the target after a GPU
+    /// reset; None for snapshots.
+    window: Option<(HWND, u32, u32, u32)>,
     /// For drawing cursor styles; None before Windows 10 1703, which lacks SVG support.
     svg: Option<ID2D1DeviceContext5>,
     cursor_documents: std::cell::RefCell<Vec<((usize, u32), ID2D1SvgDocument)>>,
@@ -507,7 +510,20 @@ fn modifiers_held() -> u32 {
 impl Panel {
     pub unsafe fn new(hwnd: HWND, dpi: u32, width: u32, height: u32) -> Result<Self> {
         let factory: ID2D1Factory = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
-        let target = factory.CreateHwndRenderTarget(
+        let target = Self::window_target(&factory, hwnd, dpi, width, height)?;
+        let mut panel = Self::with_target(factory, target, dpi, Theme::current())?;
+        panel.window = Some((hwnd, dpi, width, height));
+        Ok(panel)
+    }
+
+    unsafe fn window_target(
+        factory: &ID2D1Factory,
+        hwnd: HWND,
+        dpi: u32,
+        width: u32,
+        height: u32,
+    ) -> Result<ID2D1RenderTarget> {
+        factory.CreateHwndRenderTarget(
             &D2D1_RENDER_TARGET_PROPERTIES {
                 dpiX: dpi as f32,
                 dpiY: dpi as f32,
@@ -518,8 +534,20 @@ impl Panel {
                 pixelSize: D2D_SIZE_U { width, height },
                 presentOptions: D2D1_PRESENT_OPTIONS_NONE,
             },
-        )?;
-        Self::with_target(factory, target.cast()?, dpi, Theme::current())
+        )?
+        .cast()
+    }
+
+    /// The GPU was reset: draw into a fresh target, keeping everything else about the panel.
+    unsafe fn rebuild_target(&mut self) -> Result<()> {
+        let Some((hwnd, dpi, width, height)) = self.window else {
+            return Ok(());
+        };
+        self.target = Self::window_target(&self.factory, hwnd, dpi, width, height)?;
+        self.brush = self.target.CreateSolidColorBrush(&D2D1_COLOR_F::default(), None)?;
+        self.svg = self.target.cast().ok();
+        self.cursor_documents.borrow_mut().clear();
+        Ok(())
     }
 
     /// Draws onto any render target: the panel's window, or a bitmap in the snapshot tests.
@@ -574,6 +602,7 @@ impl Panel {
                 last: Instant::now(),
                 scratch: Scratch::default(),
             },
+            window: None,
             svg,
             cursor_documents: Default::default(),
         })
@@ -1063,7 +1092,16 @@ impl Panel {
 
     // ---- Drawing --------------------------------------------------------------------------------
 
+    /// Draws the panel. After a GPU reset it rebuilds its target and tries once more.
     pub unsafe fn draw(&mut self) {
+        // D2DERR_RECREATE_TARGET: the device behind the window's target went away.
+        let lost = |error: &windows::core::Error| error.code().0 as u32 == 0x8899_000C;
+        if self.draw_once().is_err_and(|error| lost(&error)) && self.rebuild_target().is_ok() {
+            let _ = self.draw_once();
+        }
+    }
+
+    unsafe fn draw_once(&mut self) -> Result<()> {
         let settings = settings::get();
         self.target.BeginDraw();
         self.target.Clear(Some(&self.theme.background));
@@ -1075,7 +1113,7 @@ impl Panel {
             OPTIONS => self.draw_options(&settings),
             _ => {}
         }
-        let _ = self.target.EndDraw(None, None);
+        self.target.EndDraw(None, None)
     }
 
     unsafe fn draw_header(&self, settings: &Settings) {

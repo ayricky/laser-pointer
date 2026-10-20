@@ -316,6 +316,11 @@ fn closed_part(path: &[P], tolerance: &Tolerances) -> Option<Vec<P>> {
         return None;
     }
     let mut loop_ = path[..=index].to_vec();
+    // ...and stay on the loop: an overshoot retraces it, a tail heads off somewhere else.
+    let near_loop = |p: &P| loop_.iter().map(|q| distance(*p, *q)).fold(f32::MAX, f32::min) < 0.08 * size;
+    if !path[index..].iter().all(near_loop) {
+        return None;
+    }
     // Close it without a sliver of a last side, which would read as a sharp turn.
     if distance(loop_[loop_.len() - 1], start) < 0.03 * size {
         loop_.pop();
@@ -389,6 +394,9 @@ fn arrow(path: &[P], tolerance: &Tolerances, strength: f32, scale: f32) -> Optio
     if sideways < 0.35 * reach || length(head) > 4.5 * reach {
         return None;
     }
+    if !arrowhead_shaped(head, start, tip, reach) {
+        return None;
+    }
     let straight = line(&path[..=tip_index], tolerance, strength, scale)?;
     let shaft_points = &straight.parts[0];
     let (from, to) = (shaft_points[0], shaft_points[shaft_points.len() - 1]);
@@ -406,6 +414,22 @@ fn arrow(path: &[P], tolerance: &Tolerances, strength: f32, scale: f32) -> Optio
             polyline(&[wing_end(1.0), to, wing_end(-1.0)], scale),
         ],
     })
+}
+
+/// The head drawn after the tip is one straight wing back towards the start, or a wing, a
+/// return to the tip and a second wing on the other side of the shaft.
+fn arrowhead_shaped(head: &[P], start: P, tip: P, reach: f32) -> bool {
+    let corners = simplify(head, 0.18 * reach);
+    let side = |p: P| ((tip.0 - start.0) * (p.1 - start.1) - (tip.1 - start.1) * (p.0 - start.0)).signum();
+    let wing = |end: P| distance(tip, end) > 0.4 * reach && turn_at(start, tip, end) > 110f32.to_radians();
+    match corners.len() {
+        2 => wing(corners[1]),
+        4 => {
+            let (first, back, second) = (corners[1], corners[2], corners[3]);
+            wing(first) && wing(second) && distance(back, tip) < 0.35 * reach && side(first) != side(second)
+        }
+        _ => false,
+    }
 }
 
 fn ellipse(loop_: &[P], tolerance: &Tolerances, scale: f32) -> Option<Correction> {
@@ -892,6 +916,25 @@ mod tests {
         let shape = correct(&mid, 1.0, 0.8).unwrap();
         assert_eq!(shape.shape, Shape::Rectangle);
         assert!(distance(shape.parts[0][0], mid[0]) < 20.0);
+    }
+
+    #[test]
+    fn a_box_shaped_hook_is_not_an_arrowhead() {
+        let hook = polyline(&[(0.0, 0.0), (300.0, 0.0), (260.0, 25.0), (240.0, 25.0), (240.0, -25.0), (270.0, -25.0)], 1.0);
+        assert_ne!(correct(&hook, 1.0, 0.9).map(|c| c.shape), Some(Shape::Arrow));
+    }
+
+    #[test]
+    fn a_circle_with_a_short_outward_tail_is_not_a_circle() {
+        let mut points: Vec<P> = (0..=100)
+            .map(|i| {
+                let t = i as f32 / 100.0 * TAU * 1.02;
+                (400.0 + 200.0 * t.cos(), 400.0 + 200.0 * t.sin())
+            })
+            .collect();
+        let end = points[points.len() - 1];
+        points.extend((1..=10).map(|i| (end.0 + i as f32 * 10.0, end.1)));
+        assert_ne!(correct(&points, 1.0, 0.9).map(|c| c.shape), Some(Shape::Ellipse));
     }
 
     #[test]

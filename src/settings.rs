@@ -437,6 +437,10 @@ fn parse(text: &str) -> (Settings, Option<Vec<Preset>>) {
         let (key, value) = (key.trim(), value.trim());
         if key == "preset" {
             presets.get_or_insert_with(Vec::new).extend(parse_preset(value));
+        } else if key == "presets" {
+            // Written before the list, so a list the user emptied loads as empty, not as the
+            // defaults an older file without presets gets.
+            presets.get_or_insert_with(Vec::new);
         } else if key == "cursor" {
             saw_cursor = true;
             settings.cursor = cursors::index_of(value);
@@ -482,6 +486,7 @@ fn serialize(settings: &Settings, presets: &[Preset]) -> String {
         let key = settings.key(command);
         text.push_str(&format!("{}={},{}\n", command.key(), key.mods, key.vk));
     }
+    text.push_str(&format!("presets={}\n", presets.len()));
     for preset in presets {
         let look = preset.look;
         text.push_str(&format!(
@@ -590,6 +595,12 @@ mod tests {
         let (parsed, parsed_presets) = parse(&serialize(&settings, &presets));
         assert_eq!(parsed, settings);
         assert_eq!(parsed_presets, Some(presets));
+    }
+
+    #[test]
+    fn deleting_every_preset_sticks() {
+        let (_, presets) = parse(&serialize(&Settings::default(), &[]));
+        assert_eq!(presets, Some(Vec::new()));
     }
 
     #[test]
