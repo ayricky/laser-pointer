@@ -25,6 +25,8 @@
   a { color: inherit; }
   kbd { font: 600 11.5px var(--mono); padding: 2px 6px; border-radius: 5px; background: var(--raised); box-shadow: inset 0 -1px 0 #0008, inset 0 0 0 1px var(--line-strong); white-space: nowrap; }
   .wrap { max-width: 1240px; margin: 0 auto; padding: 0 24px; }
+  :focus-visible { outline: 2px solid #6cb6ff; outline-offset: 2px; }
+  .plain { all: unset; cursor: pointer; display: grid; place-items: center; }
 
   /* ---- Header ---- */
   .top { position: sticky; top: 0; z-index: 20; background: #0b0c10dd; backdrop-filter: blur(14px); border-bottom: 1px solid var(--line); }
@@ -104,7 +106,7 @@
   .taskbar .app-icon.active { background: #ffffff16; box-shadow: inset 0 -3px 0 -1px #6cb6ff; }
   .taskbar .app-icon img { width: 22px; height: 22px; }
   .taskbar .tray { position: absolute; right: 12px; display: flex; gap: 12px; align-items: center; color: #fff; font-size: 12px; }
-  .taskbar .tray img { width: 16px; height: 16px; cursor: pointer; }
+  .taskbar .tray img { width: 16px; height: 16px; display: block; }
   .taskbar .tray img.pop { animation: pop .32s cubic-bezier(.3,1.8,.5,1); }
 
   .controls { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 18px; display: flex; flex-direction: column; gap: 14px; align-self: start; margin-top: 46px; }
@@ -123,8 +125,9 @@
   .swatches button { all: unset; cursor: pointer; width: 20px; height: 20px; border-radius: 50%; box-shadow: inset 0 0 0 1px #0006; }
   .swatches button[aria-pressed="true"] { outline: 2px solid var(--text); outline-offset: 2px; }
   .cursor-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
-  .cursor-grid canvas { width: 100%; aspect-ratio: 1; border-radius: 8px; background: #0b0c10; box-shadow: inset 0 0 0 1px var(--line); cursor: pointer; }
-  .cursor-grid canvas[aria-pressed="true"] { box-shadow: inset 0 0 0 2px var(--red); }
+  .cursor-grid button { width: 100%; aspect-ratio: 1; border-radius: 8px; background: #0b0c10; box-shadow: inset 0 0 0 1px var(--line); }
+  .cursor-grid button[aria-pressed="true"] { box-shadow: inset 0 0 0 2px var(--red); }
+  .cursor-grid canvas { width: 100%; height: 100%; display: block; }
   .readout { font: 500 12px var(--mono); }
   .tips { margin: 0; padding: 0; list-style: none; display: grid; gap: 7px; font-size: 12.5px; color: var(--dim); }
 
@@ -245,7 +248,7 @@
           <div class="app-icon"><img alt="" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='2' y='2' width='9' height='9' rx='1.5' fill='%2360a5fa'/%3E%3Crect x='13' y='2' width='9' height='9' rx='1.5' fill='%2360a5fa'/%3E%3Crect x='2' y='13' width='9' height='9' rx='1.5' fill='%2360a5fa'/%3E%3Crect x='13' y='13' width='9' height='9' rx='1.5' fill='%2360a5fa'/%3E%3C/svg%3E"></div>
           <div class="app-icon"><img alt="" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='2' y='4' width='20' height='16' rx='3' fill='%23f97316'/%3E%3Crect x='6' y='8' width='9' height='2' rx='1' fill='%23fff'/%3E%3C/svg%3E"></div>
           <div class="app-icon active"><img alt="Laser Pointer" src="img/logo.svg"></div>
-          <div class="tray"><span style="opacity:.6">^</span><img id="tray" alt="Laser Pointer in the tray" title="Click to turn the laser on or off"><span>10:24</span></div>
+          <div class="tray"><span style="opacity:.6">^</span><button class="plain" id="tray-button" title="Turn the laser on or off" aria-label="Laser Pointer tray icon: turn the laser on or off"><img id="tray" alt=""></button><span>10:24</span></div>
         </div>
       </div>
     </div>
@@ -340,7 +343,7 @@
   <section class="block faq">
     <div class="wrap" style="max-width:820px">
       <h2>Questions</h2>
-      <details><summary>Does it work with PowerPoint, Teams, Zoom or my browser?</summary><p>Yes. It draws on top of whatever is on screen, so it works with any app, including in a shared screen. Right-click passes a click through to the app underneath, so you can keep advancing slides.</p></details>
+      <details><summary>Does it work with PowerPoint, Teams, Zoom or my browser?</summary><p>Yes. It draws on top of whatever is on screen, so it works with any app, including in a shared screen. Right-click passes a click through to the app underneath, so you can keep advancing slides. The one exception is a game in exclusive fullscreen, which takes the whole display for itself; in borderless or windowed mode it works.</p></details>
       <details><summary>Does it send anything anywhere?</summary><p>No. It makes no network connections and collects nothing. Settings stay on your PC. See the <a href="privacy.html">privacy policy</a>.</p></details>
       <details><summary>Why pay if it's open source?</summary><p>For the signed, auto-updating Store version, and to support its development. If you'd rather build it yourself, every feature is there for free.</p></details>
       <details><summary>Which Windows versions?</summary><p>Windows 10 (version 1809 or later) and Windows 11, on any number of monitors with any scaling.</p></details>
@@ -356,7 +359,7 @@
 </footer>
 
 <script src="cursors.js?v=1"></script>
-<script src="laser.js?v=5"></script>
+<script src="laser.js?v=6"></script>
 <script>
 'use strict';
 const COLOURS = ['#ff2a2a', '#ff8a00', '#ffd400', '#2ecc40', '#1e90ff', '#d62aff'];
@@ -372,8 +375,14 @@ let colour = COLOURS[0], cursor = window.CURSORS[0];
 const desk = $('desk');
 const stage = new Laser.Stage(desk, { cursor, onChange: sync });
 
+function matchesPreset(name) {
+  const preset = Laser.PRESETS[name], look = stage.look;
+  return ['width', 'opacity', 'fade', 'trail', 'style', 'ink', 'snap'].every(k => look[k] === preset[k]) && (name === 'Laser' || look.color === preset.color);
+}
+
 function sync() {
   $('power').setAttribute('aria-pressed', stage.on);
+  for (const b of document.querySelectorAll('#presets button')) b.setAttribute('aria-pressed', matchesPreset(b.dataset.preset));
   for (const b of document.querySelectorAll('#styles button')) b.setAttribute('aria-pressed', b.dataset.style === stage.look.style);
   $('width').value = stage.look.width;
   $('snap').value = Math.round(stage.look.snap / 10);
@@ -389,7 +398,7 @@ function sync() {
 
 // ---- The ghost: each scene's script aims at its own elements, so it lands right at any size ----
 function box(element) {
-  const d = desk.getBoundingClientRect(), r = element.getBoundingClientRect();
+  const d = stage.canvas.getBoundingClientRect(), r = element.getBoundingClientRect();
   return { x: (r.left - d.left) / d.width, y: (r.top - d.top) / d.height, w: r.width / d.width, h: r.height / d.height };
 }
 function circleAround(b) {
@@ -405,7 +414,7 @@ function underline(b) {
 }
 // Tall things (a bar) get an arrow down onto their top; text gets one from the right, at its middle.
 function arrowTo(b) {
-  const d = desk.getBoundingClientRect(), aspect = d.width / d.height;
+  const d = stage.canvas.getBoundingClientRect(), aspect = d.width / d.height;
   const tall = b.h * aspect > b.w;
   const tip = tall ? [b.x + b.w / 2, b.y - 0.025] : [b.x + b.w + 0.015, b.y + b.h / 2];
   const tail = tall ? [tip[0] - 0.15, tip[1] - 0.15 * aspect] : [tip[0] + 0.16, tip[1] + 0.1 * aspect];
@@ -418,7 +427,7 @@ function arrowTo(b) {
 function scriptFor(scene) {
   const marks = [...scene.querySelectorAll('[data-ghost]')];
   const order = ['circle', 'underline', 'arrow'];
-  return marks.sort((a, b) => order.indexOf(a.dataset.ghost) - order.indexOf(b.dataset.ghost)).map(el => {
+  return marks.sort((a, b) => order.indexOf(a.dataset.ghost) - order.indexOf(b.dataset.ghost)).map(el => () => {
     const b = box(el);
     return el.dataset.ghost === 'circle' ? circleAround(b) : el.dataset.ghost === 'underline' ? underline(b) : arrowTo(b);
   });
@@ -440,11 +449,13 @@ for (const b of document.querySelectorAll('[data-scene]')) {
 }
 
 // ---- Controls ---------------------------------------------------------------------------------
+// Using any control means the visitor has taken over from the demo.
+const controls = $('try').querySelector('.controls');
+for (const type of ['pointerdown', 'keydown', 'input']) controls.addEventListener(type, () => stage.takeOver(), true);
 $('power').addEventListener('click', () => stage.setOn(!stage.on));
-$('tray').addEventListener('click', () => stage.setOn(!stage.on));
+$('tray-button').addEventListener('click', () => { stage.takeOver(); stage.setOn(!stage.on); });
 $('presets').addEventListener('click', e => {
   const name = e.target.dataset.preset; if (!name) return;
-  for (const b of document.querySelectorAll('#presets button')) b.setAttribute('aria-pressed', b === e.target);
   stage.usePreset(name);
   if (name === 'Laser') stage.setLook({ color: colour });
   syncSwatches();
@@ -468,19 +479,23 @@ function syncSwatches() { for (const b of swatches.children) b.setAttribute('ari
 // ---- Cursor picker: each tile shows its cursor switching on and pressing when hovered ------------
 const tiles = $('cursors'), poses = new Map();
 for (const c of window.CURSORS) {
-  const canvas = document.createElement('canvas');
-  canvas.title = c.name; canvas.setAttribute('aria-label', c.name); canvas.setAttribute('role', 'button');
-  canvas.addEventListener('click', () => { cursor = c; stage.setCursor(c); syncTiles(); });
-  canvas.addEventListener('pointerenter', () => { poses.get(canvas).ignite(performance.now()); wakeTiles(); });
-  canvas.addEventListener('pointerdown', () => { poses.get(canvas).press(true, performance.now()); wakeTiles(); });
-  canvas.addEventListener('pointerup', () => { poses.get(canvas).press(false, performance.now()); wakeTiles(); });
-  canvas.addEventListener('pointerleave', () => { poses.get(canvas).press(false, performance.now()); wakeTiles(); });
+  const button = document.createElement('button'), canvas = document.createElement('canvas');
+  button.className = 'plain'; button.title = c.name; button.setAttribute('aria-label', c.name);
+  button.append(canvas);
+  const pose = new Laser.CursorPose(), act = f => () => { f(performance.now()); wakeTiles(); };
+  button.addEventListener('click', () => { stage.takeOver(); cursor = c; stage.setCursor(c); syncTiles(); });
+  button.addEventListener('pointerenter', act(now => pose.ignite(now)));
+  button.addEventListener('focus', act(now => pose.ignite(now)));
+  button.addEventListener('pointerdown', act(now => pose.press(true, now)));
+  button.addEventListener('pointerup', act(now => pose.press(false, now)));
+  button.addEventListener('pointerleave', act(now => pose.press(false, now)));
   canvas.cursor = c;
-  poses.set(canvas, new Laser.CursorPose());
-  tiles.append(canvas);
+  poses.set(canvas, pose);
+  tiles.append(button);
 }
+const tileCanvases = () => [...tiles.querySelectorAll('canvas')];
 function syncTiles() {
-  for (const t of tiles.children) t.setAttribute('aria-pressed', t.cursor === cursor);
+  for (const t of tileCanvases()) t.parentElement.setAttribute('aria-pressed', t.cursor === cursor);
   $('cursor-name').textContent = cursor.name;
 }
 let tileFrame = 0;
@@ -489,7 +504,7 @@ function drawCursorTiles() {
   tileFrame = 0;
   const now = performance.now();
   let animating = false;
-  for (const t of tiles.children) {
+  for (const t of tileCanvases()) {
     const dpr = devicePixelRatio || 1, size = t.clientWidth;
     if (t.width !== Math.round(size * dpr)) { t.width = t.height = Math.round(size * dpr); }
     const ctx = t.getContext('2d');

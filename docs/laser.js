@@ -443,6 +443,9 @@
       this.ripples = []; this.toast = null; this.nextId = 1; this.drawing = null; this.path = [];
       this.pointer = null; this.pose = new CursorPose(); this.frame = 0;
       new ResizeObserver(() => this.resize()).observe(element);
+      this.inView = true;
+      new IntersectionObserver(([entry]) => { this.inView = entry.isIntersecting; this.pauseGhost(); }).observe(element);
+      document.addEventListener('visibilitychange', () => this.pauseGhost());
       this.resize();
       this.watchPixelRatio();
       this.listen();
@@ -456,6 +459,7 @@
       const dpr = window.devicePixelRatio || 1, r = this.canvas.getBoundingClientRect();
       this.width = r.width; this.height = r.height; this.dpr = dpr;
       this.canvas.width = Math.round(r.width * dpr); this.canvas.height = Math.round(r.height * dpr);
+      if (this.ghost && this.ghost.path) { this.finish(false); this.ghost.path = null; }
       this.wake();
     }
 
@@ -521,6 +525,7 @@
       window.addEventListener('keydown', e => {
         if (e.target.closest && e.target.closest('input, textarea, select')) return;
         const key = e.key.toLowerCase();
+        if (key === 'l' || key === 'escape' || e.ctrlKey || e.altKey) this.takeOver();
         if (key === 'l' && !e.ctrlKey) { e.preventDefault(); if (!e.repeat) this.setOn(!this.on); return; }
         if (!this.on) return;
         if (e.key === 'Alt') e.preventDefault();
@@ -654,37 +659,60 @@
     wake() { if (!this.frame) this.frame = requestAnimationFrame(t => this.render(t)); }
 
     // ---- The ghost: a scripted hand that shows the laser off before anyone touches it ----------
-    // A script is a list of gestures, each a list of [x, y] points in fractions of the stage, drawn
-    // at a human pace through the same input path as the mouse, so they snap like real strokes.
+    // A script is a list of gestures, each a list of [x, y] points in fractions of the stage (or a
+    // function giving one, asked just before it's drawn), drawn at a human pace through the same
+    // input path as the mouse, so they snap like real strokes. None of it enters undo history.
 
     play(script, { pause = 900, again = 2600 } = {}) {
       if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
-      this.ghost = { script, pause, again, index: 0, at: performance.now() + 500, path: null };
+      this.ghost = { script, pause, again, index: 0, at: performance.now() + 500, path: null, pausedAt: null };
+      this.forgetHistory();
       this.setOn(true);
       this.toast = null;
+      this.pauseGhost();
       this.wake();
     }
 
-    /** The visitor moved: the ghost lets go, mid-stroke if need be. */
+    /** The visitor moved or used a control: the ghost lets go, mid-stroke if need be. */
     takeOver() {
       if (!this.ghost) return;
       this.ghost = null;
       if (this.drawing) this.finish(false);
+      this.forgetHistory();
       this.onChange(this);
+    }
+
+    forgetHistory() { this.undoStack = []; this.redoStack = []; }
+
+    /** Holds the ghost while the stage is out of view, and resumes it on the same beat. */
+    pauseGhost() {
+      const g = this.ghost;
+      if (!g) return;
+      const paused = !this.inView || document.hidden, now = performance.now();
+      if (paused && g.pausedAt === null) g.pausedAt = now;
+      else if (!paused && g.pausedAt !== null) {
+        const away = now - g.pausedAt;
+        g.at += away;
+        g.started += away;
+        g.pausedAt = null;
+        this.wake();
+      }
     }
 
     advanceGhost(now) {
       const g = this.ghost;
-      if (!g || now < g.at) return;
+      if (!g || g.pausedAt !== null || now < g.at) return;
       if (!g.path) {
         if (g.index >= g.script.length) {
           // Rest, clear what's left, and start again.
           this.clear(() => true);
+          this.forgetHistory();
           g.index = 0;
           g.at = now + g.again;
           return;
         }
-        g.path = this.ghostPath(g.script[g.index++]);
+        const gesture = g.script[g.index++];
+        g.path = this.ghostPath(typeof gesture === 'function' ? gesture() : gesture);
         g.started = now;
         this.begin(g.path.points[0], {});
       }
@@ -764,7 +792,7 @@
         drawCursor(ctx, this.cursor, this.look.color, this.pointer.x, this.pointer.y, pose);
         if (pose.animating) animating = true;
       }
-      if (animating || this.ghost) this.wake();
+      if (animating || (this.ghost && this.ghost.pausedAt === null)) this.wake();
     }
 
     drawToast(age) {
