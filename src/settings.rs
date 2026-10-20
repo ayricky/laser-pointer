@@ -533,13 +533,26 @@ pub fn save() {
 
 // ---- Start with Windows --------------------------------------------------------------------------
 // The plain exe adds itself to the Run key. The Store build is packaged, where that key would be
-// virtualised away; it starts through the StartupTask its manifest declares (packaging/), which
-// the user can also turn off in Task Manager or Settings, so its state is always read back.
+// virtualised away; it starts through the StartupTask its manifest declares (packaging/). The user
+// can turn that off in Task Manager and an organisation can decide it by policy, and Windows won't
+// let the app override either, so its state is always read back rather than assumed.
 
 const RUN_KEY: PCWSTR = w!(r"Software\Microsoft\Windows\CurrentVersion\Run");
 const RUN_VALUE: PCWSTR = w!("LaserPointer");
 /// Must match the TaskId in packaging/AppxManifest.xml.
 const STARTUP_TASK: &str = "LaserPointerStartup";
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Autostart {
+    Off,
+    On,
+    /// Turned off in Task Manager or Settings; only the user can turn it back on, there.
+    OffByUser,
+    /// Decided by the organisation's policy, on or off.
+    Policy(bool),
+    /// Not known yet, or Windows couldn't say.
+    Unknown,
+}
 
 fn packaged() -> bool {
     static PACKAGED: OnceLock<bool> = OnceLock::new();
@@ -549,16 +562,42 @@ fn packaged() -> bool {
     })
 }
 
-fn startup_task() -> Option<StartupTask> {
-    StartupTask::GetAsync(&HSTRING::from(STARTUP_TASK)).ok()?.join().ok()
+/// Asks where start-up stands, changing it first if `change` says so, and gives the answer to
+/// `answer`. The Run key answers at once, on this thread. The StartupTask is asked on a worker
+/// thread, so a slow answer from Windows never holds up the settings panel.
+pub fn autostart(change: Option<bool>, answer: impl FnOnce(Autostart) + Send + 'static) {
+    if packaged() {
+        std::thread::spawn(move || answer(startup_task(change)));
+    } else {
+        if let Some(on) = change {
+            set_run_key(on);
+        }
+        answer(run_key())
+    }
 }
 
-pub fn autostart() -> bool {
-    if packaged() {
-        let state = startup_task().and_then(|task| task.State().ok());
-        return matches!(state, Some(StartupTaskState::Enabled | StartupTaskState::EnabledByPolicy));
+fn startup_task(change: Option<bool>) -> Autostart {
+    let state = (|| {
+        let task = StartupTask::GetAsync(&HSTRING::from(STARTUP_TASK))?.join()?;
+        match change {
+            Some(true) => return task.RequestEnableAsync()?.join(),
+            Some(false) => task.Disable()?,
+            None => {}
+        }
+        task.State()
+    })();
+    match state {
+        Ok(StartupTaskState::Enabled) => Autostart::On,
+        Ok(StartupTaskState::DisabledByUser) => Autostart::OffByUser,
+        Ok(StartupTaskState::EnabledByPolicy) => Autostart::Policy(true),
+        Ok(StartupTaskState::DisabledByPolicy) => Autostart::Policy(false),
+        Ok(_) => Autostart::Off,
+        Err(_) => Autostart::Unknown,
     }
-    unsafe {
+}
+
+fn run_key() -> Autostart {
+    let found = unsafe {
         RegGetValueW(
             HKEY_CURRENT_USER,
             RUN_KEY,
@@ -569,17 +608,15 @@ pub fn autostart() -> bool {
             None,
         )
         .is_ok()
+    };
+    if found {
+        Autostart::On
+    } else {
+        Autostart::Off
     }
 }
 
-pub fn set_autostart(on: bool) {
-    if packaged() {
-        if let Some(task) = startup_task() {
-            // Turned off by the user in Task Manager, this stays off: only they can undo that.
-            let _ = if on { task.RequestEnableAsync().and_then(|request| request.join()).map(drop) } else { task.Disable() };
-        }
-        return;
-    }
+fn set_run_key(on: bool) {
     unsafe {
         if !on {
             let _ = RegDeleteKeyValueW(HKEY_CURRENT_USER, RUN_KEY, RUN_VALUE);

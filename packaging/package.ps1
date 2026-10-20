@@ -78,6 +78,12 @@ foreach ($architecture in $Architectures) {
     # unplated taskbar icons.
     $config = Join-Path $dist "priconfig-$architecture.xml"
     Invoke-Tool $makepri @('createconfig', '/cf', $config, '/dq', 'en-US', '/pv', '10.0.0', '/o')
+    # One resources.pri with every scale in it: the default config would split scales into
+    # resource packages, which only a bundle built from them could deliver.
+    $xml = [xml](Get-Content $config -Raw)
+    $packaging = $xml.SelectSingleNode('/resources/packaging')
+    if ($packaging) { [void]$packaging.ParentNode.RemoveChild($packaging) }
+    $xml.Save($config)
     Invoke-Tool $makepri @('new', '/pr', $layout, '/cf', $config, '/mn', $manifestPath, '/of', (Join-Path $layout 'resources.pri'), '/o')
     Remove-Item $config
 

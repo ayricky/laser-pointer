@@ -2,6 +2,7 @@
 //! light/dark theme and accent colour. Tabs for the pen, presets, shortcuts and options.
 
 use std::f32::consts::TAU;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use windows::core::{w, Interface, Result, BOOL, PCWSTR};
@@ -25,6 +26,7 @@ use windows::Win32::Graphics::DirectWrite::{
     DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_WORD_WRAPPING_NO_WRAP,
     DWRITE_WORD_WRAPPING_WRAP,
 };
+use windows::Win32::Graphics::Gdi::InvalidateRect;
 use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
 use windows::Win32::UI::Shell::SHCreateMemStream;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -35,7 +37,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows_numerics::{Matrix3x2, Vector2};
 
 use crate::settings::{
-    self, Binding, Command, Look, Preset, Settings, Slot, MAX_NAME, MAX_PRESETS, STYLE_GLOW,
+    self, Autostart, Binding, Command, Look, Preset, Settings, Slot, MAX_NAME, MAX_PRESETS, STYLE_GLOW,
     STYLE_NAMES, STYLE_NEON, STYLE_SOLID,
 };
 use crate::cursors::{self, STYLES as CURSOR_STYLES};
@@ -420,7 +422,6 @@ pub struct Panel {
     renaming: Option<Rename>,
     status: Option<(String, Instant, bool)>,
     scroll: f32,
-    autostart: bool,
     started: Instant,
     preview: Preview,
     /// The window drawn into, with its DPI and pixel size, to rebuild the target after a GPU
@@ -507,12 +508,35 @@ fn modifiers_held() -> u32 {
     mods
 }
 
+/// Where "Start with Windows" stands, as last reported; the Store build hears back on another
+/// thread.
+static AUTOSTART_STATE: Mutex<Autostart> = Mutex::new(Autostart::Unknown);
+
+fn autostart_state() -> Autostart {
+    *AUTOSTART_STATE.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 impl Panel {
+    /// Reads, or changes and then reads, "Start with Windows", and repaints when the answer comes.
+    fn ask_autostart(&self, change: Option<bool>) {
+        let window = self.window.map(|(hwnd, ..)| hwnd.0 as isize);
+        settings::autostart(change, move |state| {
+            *AUTOSTART_STATE.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = state;
+            if let Some(window) = window {
+                // Safe from any thread; a window closed in the meantime just ignores it.
+                unsafe {
+                    let _ = InvalidateRect(Some(HWND(window as _)), None, false);
+                }
+            }
+        });
+    }
+
     pub unsafe fn new(hwnd: HWND, dpi: u32, width: u32, height: u32) -> Result<Self> {
         let factory: ID2D1Factory = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
         let target = Self::window_target(&factory, hwnd, dpi, width, height)?;
         let mut panel = Self::with_target(factory, target, dpi, Theme::current())?;
         panel.window = Some((hwnd, dpi, width, height));
+        panel.ask_autostart(None);
         Ok(panel)
     }
 
@@ -594,7 +618,6 @@ impl Panel {
             renaming: None,
             status: None,
             scroll: 0.0,
-            autostart: settings::autostart(),
             started: Instant::now(),
             preview: Preview {
                 points: Vec::new(),
@@ -937,8 +960,10 @@ impl Panel {
             // Turning it off also lets go of what is kept on screen, as the shortcut does.
             Widget::Toggle(KEEP_STROKES) => return Action::Run(Command::ToggleInk),
             Widget::Toggle(AUTOSTART) => {
-                settings::set_autostart(!self.autostart);
-                self.autostart = settings::autostart();
+                match autostart_state() {
+                    Autostart::Policy(_) => {}
+                    state => self.ask_autostart(Some(state != Autostart::On)),
+                }
                 return Action::Redraw;
             }
             Widget::Toggle(index) => {
@@ -1709,17 +1734,23 @@ impl Panel {
     unsafe fn toggle(&self, index: usize, area: D2D_RECT_F, settings: &Settings, hovered: bool) {
         let theme = &self.theme;
         let toggle = &TOGGLES[index];
-        let on = if index == AUTOSTART {
-            self.autostart
+        let (on, detail) = if index == AUTOSTART {
+            let state = autostart_state();
+            let detail = match state {
+                Autostart::OffByUser => "Turned off in Task Manager; turn it back on there",
+                Autostart::Policy(_) => "Set by your organisation",
+                _ => toggle.detail,
+            };
+            (matches!(state, Autostart::On | Autostart::Policy(true)), detail)
         } else {
-            (toggle.get)(settings)
+            ((toggle.get)(settings), toggle.detail)
         };
         if hovered {
             self.fill_round(area, 6.0, theme.control_hover);
         }
         let left = area.left + 8.0;
         self.text(toggle.title, &self.fonts.body, rect(left, area.top + 4.0, 300.0, 22.0), theme.text);
-        self.text(toggle.detail, &self.fonts.small_line, rect(left, area.top + 25.0, 310.0, 18.0), theme.muted);
+        self.text(detail, &self.fonts.small_line, rect(left, area.top + 25.0, 310.0, 18.0), theme.muted);
         self.switch(rect(area.right - 48.0, area.top + 14.0, 40.0, 20.0), on, hovered);
     }
 }

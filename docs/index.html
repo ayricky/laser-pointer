@@ -25,7 +25,6 @@
   a { color: inherit; }
   kbd { font: 600 11.5px var(--mono); padding: 2px 6px; border-radius: 5px; background: var(--raised); box-shadow: inset 0 -1px 0 #0008, inset 0 0 0 1px var(--line-strong); white-space: nowrap; }
   .wrap { max-width: 1240px; margin: 0 auto; padding: 0 24px; }
-  :focus-visible { outline: 2px solid #6cb6ff; outline-offset: 2px; }
   .plain { all: unset; cursor: pointer; display: grid; place-items: center; }
 
   /* ---- Header ---- */
@@ -161,6 +160,8 @@
   footer { border-top: 1px solid var(--line); padding: 32px 0 48px; color: var(--dim); font-size: 13.5px; }
   footer .wrap { display: flex; gap: 20px; align-items: center; flex-wrap: wrap; }
   footer nav { margin-left: auto; display: flex; gap: 18px; }
+  button:focus-visible, a:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px solid #6cb6ff; outline-offset: 2px; }
+  .swatches button:focus-visible { outline-color: #6cb6ff; outline-offset: 4px; }
   @keyframes pop { 0% { transform: scale(.5) } 100% { transform: scale(1) } }
   @media (max-width: 1000px) { .play, .two, .price { grid-template-columns: 1fr; } .controls { margin-top: 0; } .features, .uses { grid-template-columns: 1fr 1fr; } }
   @media (max-width: 640px) { .features, .uses { grid-template-columns: 1fr; } .top nav { display: none; } .hint { font-size: 11px; } }
@@ -359,7 +360,7 @@
 </footer>
 
 <script src="cursors.js?v=1"></script>
-<script src="laser.js?v=6"></script>
+<script src="laser.js?v=7"></script>
 <script>
 'use strict';
 const COLOURS = ['#ff2a2a', '#ff8a00', '#ffd400', '#2ecc40', '#1e90ff', '#d62aff'];
@@ -451,7 +452,7 @@ for (const b of document.querySelectorAll('[data-scene]')) {
 // ---- Controls ---------------------------------------------------------------------------------
 // Using any control means the visitor has taken over from the demo.
 const controls = $('try').querySelector('.controls');
-for (const type of ['pointerdown', 'keydown', 'input']) controls.addEventListener(type, () => stage.takeOver(), true);
+for (const type of ['pointerdown', 'keydown', 'input', 'click']) controls.addEventListener(type, () => stage.takeOver(), true);
 $('power').addEventListener('click', () => stage.setOn(!stage.on));
 $('tray-button').addEventListener('click', () => { stage.takeOver(); stage.setOn(!stage.on); });
 $('presets').addEventListener('click', e => {

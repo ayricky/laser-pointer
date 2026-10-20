@@ -540,7 +540,7 @@
     begin(point, event) {
       if (!this.on) return;
       const now = performance.now();
-      const stroke = { id: this.nextId++, points: [{ ...point, t: now }], look: { ...this.look }, whole: false, breaks: [], morph: null };
+      const stroke = { id: this.nextId++, points: [{ ...point, t: now }], look: { ...this.look }, whole: false, breaks: [], morph: null, ghost: !!this.ghost };
       this.strokes.push(stroke);
       this.undoStack.push({ added: stroke.id });
       this.redoStack = [];
@@ -678,8 +678,15 @@
       if (!this.ghost) return;
       this.ghost = null;
       if (this.drawing) this.finish(false);
+      // Its marks fade out as a clear does, but nothing of them is left to undo.
+      const marks = this.strokes.filter(s => s.ghost);
+      if (marks.length) {
+        this.strokes = this.strokes.filter(s => !s.ghost);
+        this.clearing = marks; this.clearedAt = performance.now();
+      }
       this.forgetHistory();
       this.onChange(this);
+      this.wake();
     }
 
     forgetHistory() { this.undoStack = []; this.redoStack = []; }
@@ -694,6 +701,11 @@
         const away = now - g.pausedAt;
         g.at += away;
         g.started += away;
+        for (const s of this.strokes) {
+          for (const p of s.points) p.t += away;
+          if (s.morph) s.morph.at += away;
+        }
+        this.clearedAt += away;
         g.pausedAt = null;
         this.wake();
       }
@@ -751,6 +763,7 @@
 
     render() {
       this.frame = 0;
+      if (this.ghost && this.ghost.pausedAt !== null) return;
       const now = performance.now(), ctx = this.ctx;
       this.advanceGhost(now);
       ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
