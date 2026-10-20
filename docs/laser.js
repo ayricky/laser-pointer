@@ -429,7 +429,9 @@
   const MORPH_MS = 140, CLEAR_MS = 220, RIPPLE_MS = 450, TOAST_MS = 1400;
 
   class Stage {
-    constructor(element, { cursor, onChange } = {}) {
+    /// `manual`: only takeOver() stops the ghost, and the page under it stays usable while it
+    /// plays. `keys`: whether this stage answers the keyboard.
+    constructor(element, { cursor, onChange, manual = false, keys = true } = {}) {
       this.element = element;
       this.canvas = document.createElement('canvas');
       Object.assign(this.canvas.style, { position: 'absolute', inset: '0', width: '100%', height: '100%', zIndex: '5', touchAction: 'none' });
@@ -438,6 +440,7 @@
       this.look = { ...PRESETS.Laser };
       this.cursor = cursor;
       this.onChange = onChange || (() => {});
+      this.manual = manual; this.keys = keys;
       this.on = false;
       this.strokes = []; this.undoStack = []; this.redoStack = []; this.clearing = []; this.clearedAt = 0;
       this.ripples = []; this.toast = null; this.nextId = 1; this.drawing = null; this.path = [];
@@ -459,7 +462,7 @@
       const dpr = window.devicePixelRatio || 1, r = this.canvas.getBoundingClientRect();
       this.width = r.width; this.height = r.height; this.dpr = dpr;
       this.canvas.width = Math.round(r.width * dpr); this.canvas.height = Math.round(r.height * dpr);
-      if (this.ghost && this.ghost.path) { this.finish(false); this.ghost.path = null; }
+      if (this.ghost && this.ghost.path) { this.finish(false); this.ghost.path = null; this.ghost.travel = null; }
       this.wake();
     }
 
@@ -470,9 +473,13 @@
     }
 
     applyInput() {
-      this.canvas.style.pointerEvents = this.on ? 'auto' : 'none';
-      this.element.style.cursor = this.on ? 'none' : '';
+      const live = this.on && !(this.manual && this.ghost);
+      this.canvas.style.pointerEvents = live ? 'auto' : 'none';
+      this.element.style.cursor = live ? 'none' : '';
     }
+
+    /** The visitor's mouse, unless a manual stage's ghost has the pointer. */
+    visitor() { return !(this.manual && this.ghost); }
 
     emit() { this.onChange(this); }
 
@@ -500,9 +507,9 @@
 
     listen() {
       const c = this.canvas;
-      this.element.addEventListener('pointermove', e => { this.takeOver(); this.pointer = this.local(e); this.wake(); });
-      this.element.addEventListener('pointerenter', () => { this.takeOver(); if (this.on) this.pose.ignite(performance.now()); this.inside = true; });
-      this.element.addEventListener('pointerleave', () => { this.inside = false; this.wake(); });
+      this.element.addEventListener('pointermove', e => { if (!this.visitor()) return; this.takeOver(); this.pointer = this.local(e); this.wake(); });
+      this.element.addEventListener('pointerenter', () => { if (!this.visitor()) return; this.takeOver(); if (this.on) this.pose.ignite(performance.now()); this.inside = true; });
+      this.element.addEventListener('pointerleave', () => { if (!this.visitor()) return; this.inside = false; this.wake(); });
       // One pointer owns a gesture; a second finger is ignored until it ends.
       const mine = e => this.drawing && e.pointerId === this.pointerId;
       c.addEventListener('pointerdown', e => {
@@ -522,8 +529,10 @@
         this.ripples.push({ ...this.local(e), at: performance.now() });
         this.wake();
       });
+      if (!this.keys) return;
       window.addEventListener('keydown', e => {
         if (e.target.closest && e.target.closest('input, textarea, select')) return;
+        if (!this.visitor()) return;
         const key = e.key.toLowerCase();
         if (key === 'l' || key === 'escape' || e.ctrlKey || e.altKey) this.takeOver();
         if (key === 'l' && !e.ctrlKey) { e.preventDefault(); if (!e.repeat) this.setOn(!this.on); return; }
@@ -659,17 +668,25 @@
     wake() { if (!this.frame) this.frame = requestAnimationFrame(t => this.render(t)); }
 
     // ---- The ghost: a scripted hand that shows the laser off before anyone touches it ----------
-    // A script is a list of gestures, each a list of [x, y] points in fractions of the stage (or a
-    // function giving one, asked just before it's drawn), drawn at a human pace through the same
-    // input path as the mouse, so they snap like real strokes. None of it enters undo history.
+    // A script is a list of steps. A step is a gesture, a list of [x, y] points in fractions of the
+    // stage, or a function asked just before its turn, which may do something (change the look,
+    // the scene) and give a gesture, or `{ points, wait, speed, lock, snap, draw, before, after }`,
+    // or nothing. Gestures are drawn at a human pace through the same input path as the mouse, so
+    // they snap like real strokes; `lock` holds Alt ('horizontal') or Shift+Alt ('vertical'),
+    // `snap: false` lets go with Ctrl, `draw: false` only moves there. `before` and `after` are
+    // called as the button goes down and comes up. Between gestures the pointer glides to the next
+    // one. None of it enters undo history.
 
-    play(script, { pause = 900, again = 2600 } = {}) {
+    play(script, { pause = 900, again = 2600, start = 0, delay = 500 } = {}) {
       if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
-      this.ghost = { script, pause, again, index: 0, at: performance.now() + 500, path: null, pausedAt: null };
+      this.finish(false);
+      this.ghost = { script, pause, again, index: start, at: performance.now() + delay, path: null, travel: null, pausedAt: null };
       this.forgetHistory();
       this.setOn(true);
+      this.applyInput();
       this.toast = null;
       this.pauseGhost();
+      this.emit();
       this.wake();
     }
 
@@ -685,7 +702,19 @@
         this.clearing = marks; this.clearedAt = performance.now();
       }
       this.forgetHistory();
+      this.applyInput();
       this.onChange(this);
+      this.wake();
+    }
+
+    /** Ends the ghost and leaves the stage inert: its marks fade and input passes through. */
+    retire() {
+      this.takeOver();
+      this.finish(false);
+      this.on = false;
+      this.inside = false;
+      this.applyInput();
+      this.emit();
       this.wake();
     }
 
@@ -701,6 +730,7 @@
         const away = now - g.pausedAt;
         g.at += away;
         g.started += away;
+        if (g.travel) g.travel.start += away;
         for (const s of new Set([...this.strokes, ...this.clearing])) {
           for (const p of s.points) p.t += away;
           if (s.morph) s.morph.at += away;
@@ -724,28 +754,58 @@
           return;
         }
         const gesture = g.script[g.index++];
-        g.path = this.ghostPath(typeof gesture === 'function' ? gesture() : gesture);
+        const step = typeof gesture === 'function' ? gesture(this) : gesture;
+        const spec = Array.isArray(step) ? { points: step } : step || {};
+        if (!this.ghost || this.ghost !== g) return; // the step handed over or restarted
+        if (!spec.points || spec.points.length < 2) { g.at = now + (spec.wait || 0); return; }
+        g.spec = spec;
+        g.event = spec.lock ? { altKey: true, shiftKey: spec.lock === 'vertical' } : {};
+        g.path = this.ghostPath(spec.points, spec.speed || 1);
+        const first = g.path.points[0], from = this.pointer, far = from && this.inside ? Math.hypot(first.x - from.x, first.y - from.y) : 0;
+        g.travel = far > 12 ? { from: { x: from.x, y: from.y }, start: now, ms: Math.min(650, Math.max(200, far / 1.5)) } : null;
+        if (!g.travel) { this.pointer = first; this.inside = true; }
+      }
+      if (g.travel) {
+        const k = Math.min(1, (now - g.travel.start) / g.travel.ms), e = k < 0.5 ? 4 * k * k * k : 1 - Math.pow(2 - 2 * k, 3) / 2;
+        const to = g.path.points[0], from = g.travel.from;
+        this.pointer = { x: from.x + (to.x - from.x) * e, y: from.y + (to.y - from.y) * e };
+        this.inside = true;
+        if (k < 1) return;
+        g.travel = null;
+      }
+      if (g.spec.draw === false) {
+        g.path = null;
+        g.at = now + (g.spec.wait ?? g.pause);
+        if (g.spec.after) g.spec.after(this);
+        return;
+      }
+      if (!this.drawing) {
+        if (g.spec.before) g.spec.before(this);
+        if (this.ghost !== g) return;
         g.started = now;
-        this.begin(g.path.points[0], {});
+        this.begin(g.path.points[0], g.event);
+        if (!this.drawing) { g.path = null; return; }
       }
       const elapsed = now - g.started, points = g.path.points;
       const target = Math.min(points.length - 1, Math.floor(elapsed / g.path.step));
       for (let i = g.path.done + 1; i <= target; i++) {
         this.pointer = points[i];
-        this.extend(points[i], {});
+        this.extend(points[i], g.event);
       }
       g.path.done = target;
       this.pointer = points[target];
       this.inside = true;
       if (target >= points.length - 1) {
-        this.finish(true);
+        this.finish(g.spec.snap !== false);
         g.path = null;
-        g.at = now + g.pause;
+        g.at = now + (g.spec.wait ?? g.pause);
+        if (g.spec.after) g.spec.after(this);
       }
     }
 
-    /** A gesture as pointer positions about every 4 ms, Catmull-Rom smooth, at about 0.9 px/ms. */
-    ghostPath(gesture) {
+    /** A gesture as pointer positions about every 4 ms, Catmull-Rom smooth, at about 0.9 px/ms
+     *  times `speed`. */
+    ghostPath(gesture, speed = 1) {
       const px = gesture.map(([x, y]) => ({ x: x * this.width, y: y * this.height }));
       const points = [];
       for (let i = 0; i < px.length - 1; i++) {
@@ -758,7 +818,7 @@
         }
       }
       points.push(px[px.length - 1]);
-      return { points, step: 4, done: 0 };
+      return { points, step: 4 / speed, done: 0 };
     }
 
     render() {

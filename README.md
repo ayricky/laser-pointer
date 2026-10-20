@@ -83,6 +83,11 @@ a `v*` tag runs the same on GitHub Actions for x64 and Arm64, publishes the exes
 keeps the Store bundle as an artifact. Images under `packaging\Assets` and `docs\img` come from
 `assets\brand\logo.svg`: `cd tools; npm install; npm run icons`.
 
+## Support
+
+The Microsoft Store version (US$2.99) pays for the work. If you build it yourself and it helps,
+a tip on [Ko-fi](https://ko-fi.com/ayricky) is welcome.
+
 ## Licence
 
 [MIT](LICENSE).

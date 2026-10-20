@@ -1,0 +1,94 @@
+/* The film's screen: a small Windows desktop with four apps, sized in container units so it
+   looks the same at any width. The page sets the frame around it and the wallpaper (--wall). */
+.film-screen {
+  --wall: radial-gradient(70% 80% at 15% 10%, #bcd3ff 0%, transparent 60%), radial-gradient(60% 70% at 90% 85%, #ffc9d6 0%, transparent 60%), linear-gradient(160deg, #e9f0ff, #f6eefa 55%, #fff1ea);
+  --bar: #f3f4f7d9; --bar-fg: #1f2330; --bar-line: #00000014;
+  position: relative; aspect-ratio: 16 / 10; overflow: hidden; container-type: inline-size; user-select: none; -webkit-user-select: none;
+  background: var(--wall); cursor: crosshair;
+  font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --mono: ui-monospace, "Cascadia Code", Consolas, monospace;
+  --display: "Segoe UI Variable Display", "Segoe UI", system-ui, -apple-system, sans-serif;
+}
+.film-screen.driving { cursor: none; }
+
+.film-screen .window { position: absolute; left: 7%; right: 7%; top: 6%; bottom: 12.5%; border-radius: .9cqw; overflow: hidden; background: #fff; box-shadow: 0 2cqw 5cqw #1a1f3a33, 0 0 0 1px #0000001f;
+  opacity: 0; transform: translateY(1.2cqw) scale(.985); transition: opacity .45s, transform .55s cubic-bezier(.2,.8,.2,1); display: flex; flex-direction: column; }
+.film-screen .window.shown { opacity: 1; transform: none; }
+.film-screen .titlebar { height: 3.2cqw; flex: none; display: flex; align-items: center; gap: .8cqw; padding: 0 1.2cqw; font-size: 1cqw; color: #333; background: #f3f3f5; border-bottom: 1px solid #e3e3e8; }
+.film-screen .titlebar .glyph { width: 1.3cqw; height: 1.3cqw; border-radius: .3cqw; }
+.film-screen .titlebar .wc { margin-left: auto; display: flex; gap: 2.2cqw; color: #555; font-size: 1.1cqw; }
+.film-screen .window.dark .titlebar { background: #1d2028; color: #c9cdd6; border-color: #00000050; }
+.film-screen .window.dark .titlebar .wc { color: #9aa0ab; }
+.film-screen .body { flex: 1; position: relative; overflow: hidden; }
+
+/* Presenting */
+.film-screen .slide { background: #fbfbfd; color: #121418; height: 100%; padding: 4cqw 5cqw; display: grid; grid-template-columns: 1.1fr 1fr; gap: 4cqw; }
+.film-screen .slide .eyebrow { font: 600 .9cqw var(--mono); letter-spacing: .16em; color: #6b7280; }
+.film-screen .slide h3 { font: 650 2.9cqw/1.05 var(--display); letter-spacing: -.03em; margin: 2.2cqw 0 2.4cqw; }
+.film-screen .slide .figure { font: 700 6cqw/1 var(--display); letter-spacing: -.04em; display: inline-block; }
+.film-screen .slide .figure small { font-size: .42em; color: #6b7280; }
+.film-screen .slide ul { padding-left: 1.4cqw; margin: 2.4cqw 0 0; color: #374151; font-size: 1.2cqw; line-height: 1.8; }
+.film-screen .chart { display: flex; align-items: end; gap: 2.2cqw; padding: 4cqw 1cqw 0; border-bottom: 1px solid #e5e7eb; height: 92%; }
+.film-screen .chart div { flex: 1; background: #d5d9e1; border-radius: .4cqw .4cqw 0 0; position: relative; }
+.film-screen .chart .lead { background: linear-gradient(#ff5a3a, #e11d48); }
+.film-screen .chart span { position: absolute; top: -1.8cqw; left: 0; right: 0; text-align: center; font: 600 .95cqw var(--mono); color: #374151; }
+/* Teaching */
+.film-screen .sheet { background: #fffdf7 repeating-linear-gradient(#0000 0 2.6cqw, #e6edf9 2.6cqw calc(2.6cqw + 1px)); color: #1f2937; height: 100%; padding: 3cqw 6cqw; font-family: Georgia, "Times New Roman", serif; }
+.film-screen .sheet h4 { font: 600 1.8cqw "Segoe UI", system-ui, sans-serif; margin: 0 0 1.6cqw; color: #111827; }
+.film-screen .sheet .step { font-size: 2.5cqw; line-height: 1.65; display: block; width: max-content; }
+.film-screen .sheet .mistake { color: #b91c1c; }
+.film-screen .sheet .note { font: italic 1.3cqw Georgia, serif; color: #6b7280; margin-top: 1.4cqw; }
+/* Demos */
+.film-screen .app { background: #f5f6f9; color: #1f2937; height: 100%; display: grid; grid-template-columns: 22% 1fr; font-size: 1.15cqw; }
+.film-screen .app aside { background: #eceef3; padding: 2.2cqw 1.4cqw; display: grid; gap: .6cqw; align-content: start; }
+.film-screen .app aside div { padding: .7cqw 1cqw; border-radius: .6cqw; color: #4b5563; }
+.film-screen .app aside .on { background: #fff; color: #111827; font-weight: 600; box-shadow: 0 1px 3px #0001; }
+.film-screen .app main { padding: 3cqw 4cqw; }
+.film-screen .app h4 { font: 650 2cqw var(--display); margin: 0 0 2cqw; letter-spacing: -.02em; }
+.film-screen .app .field { display: flex; justify-content: space-between; align-items: center; padding: 1.5cqw 0; border-bottom: 1px solid #e5e7eb; }
+.film-screen .app .toggle { width: 3.2cqw; height: 1.8cqw; border-radius: 1cqw; background: #c7ccd6; position: relative; transition: background .2s; }
+.film-screen .app .toggle::after { content: ""; position: absolute; left: .3cqw; top: .3cqw; width: 1.2cqw; height: 1.2cqw; border-radius: 50%; background: #fff; transition: left .25s cubic-bezier(.3,1.5,.5,1); box-shadow: 0 1px 2px #0003; }
+.film-screen .app .toggle.on { background: #2563eb; } .film-screen .app .toggle.on::after { left: 1.7cqw; }
+.film-screen .app .save { display: inline-block; margin-top: 2.4cqw; padding: .9cqw 1.8cqw; border-radius: .7cqw; background: #2563eb; color: #fff; font-weight: 600; }
+/* Code */
+.film-screen .code { background: #0d1017; color: #c9d1d9; height: 100%; padding: 2.4cqw 0; font: 1.25cqw/1.95 var(--mono); }
+.film-screen .code .line { padding: 0 3cqw; white-space: pre; display: block; }
+.film-screen .code .del { background: #3b121980; color: #ffb4b4; } .film-screen .code .add { background: #0f332480; color: #b4f5cf; }
+.film-screen .code .k { color: #ff7b72; } .film-screen .code .f { color: #d2a8ff; } .film-screen .code .s { color: #a5d6ff; } .film-screen .code .c { color: #6e7681; }
+
+.film-screen .taskbar { position: absolute; left: 0; right: 0; bottom: 0; height: 6.5%; background: var(--bar); backdrop-filter: blur(14px); display: flex; align-items: center; justify-content: center; gap: 1cqw; border-top: 1px solid var(--bar-line); }
+.film-screen .taskbar .icon { width: 3cqw; height: 3cqw; border-radius: .5cqw; display: grid; place-items: center; }
+.film-screen .taskbar .icon.active { background: #8882; box-shadow: inset 0 -.25cqw 0 -.1cqw #3b82f6; }
+.film-screen .taskbar .icon img, .film-screen .taskbar .icon i { width: 1.9cqw; height: 1.9cqw; border-radius: .35cqw; display: block; }
+.film-screen .taskbar .tray { position: absolute; right: 1.4cqw; display: flex; gap: 1.2cqw; align-items: center; color: var(--bar-fg); font-size: 1cqw; }
+.film-screen .taskbar .tray img { width: 1.4cqw; height: 1.4cqw; display: block; }
+
+/* Your turn: the toolbar inside the screen */
+.film-screen .film-tools { position: absolute; top: 1.6%; left: 50%; z-index: 7; transform: translate(-50%, -10px); opacity: 0; pointer-events: none; transition: opacity .25s, transform .25s; cursor: default;
+  display: flex; gap: 10px; align-items: center; padding: 6px 8px; border-radius: 14px; background: #ffffffeb; backdrop-filter: blur(14px); box-shadow: 0 10px 40px #1a1f3a30, 0 0 0 1px #0000001a; font-size: 12.5px; color: #1f2330; white-space: nowrap; }
+.film-screen.driving .film-tools { opacity: 1; transform: translate(-50%, 0); pointer-events: auto; }
+.film-screen .film-tools .seg { display: flex; gap: 2px; background: #0000000d; border-radius: 9px; padding: 2px; }
+.film-screen .film-tools button { all: unset; cursor: pointer; padding: 5px 10px; border-radius: 7px; color: #5b6070; }
+.film-screen .film-tools button:hover { color: #111; }
+.film-screen .film-tools button[aria-pressed="true"] { background: #fff; color: #111; box-shadow: 0 1px 3px #0002; }
+.film-screen .film-tools .dot { width: 16px; height: 16px; padding: 0; border-radius: 50%; box-shadow: inset 0 0 0 1px #0002; }
+.film-screen .film-tools .dot[aria-pressed="true"] { outline: 2px solid #111; outline-offset: 2px; box-shadow: none; }
+.film-screen .film-tools .cur { padding: 3px; border-radius: 6px; } .film-screen .film-tools .cur img { width: 20px; height: 20px; display: block; }
+.film-screen .film-tools .cur[aria-pressed="true"] { background: #111; }
+.film-screen .film-tools .sep { width: 1px; height: 20px; background: #0000001a; }
+.film-screen .film-tools .resume { background: #111; color: #fff; font-weight: 600; padding: 5px 12px; }
+.film-screen .film-tools .resume:hover { color: #fff; background: #333; }
+.film-screen button:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
+
+/* The invitation to draw, while the film plays */
+.film-screen .film-follow { position: absolute; z-index: 8; left: 0; top: 0; pointer-events: none; opacity: 0; transition: opacity .2s; white-space: nowrap;
+  padding: 8px 14px 8px 10px; border-radius: 999px; background: #111318; color: #fff; font: 600 13px "Segoe UI Variable Text", "Segoe UI", sans-serif; box-shadow: 0 10px 30px #0004; display: flex; gap: 8px; align-items: center; }
+.film-screen .film-follow i { width: 8px; height: 8px; border-radius: 50%; background: #ff2a2a; box-shadow: 0 0 0 3px #ff2a2a40; }
+.film-screen.hover:not(.driving) .film-follow { opacity: 1; }
+.film-screen .film-badge { all: unset; position: absolute; z-index: 8; top: 2.2%; right: 2%; cursor: pointer; display: flex; gap: 8px; align-items: center; padding: 7px 14px 7px 10px; border-radius: 999px;
+  background: #ffffffe6; backdrop-filter: blur(10px); color: #111318; font: 650 12.5px "Segoe UI Variable Text", "Segoe UI", sans-serif; box-shadow: 0 6px 24px #1a1f3a30, 0 0 0 1px #0000001a; transition: transform .15s, opacity .25s; }
+.film-screen .film-badge:hover { transform: translateY(-1px); }
+.film-screen .film-badge i { width: 8px; height: 8px; border-radius: 50%; background: #ff2a2a; animation: film-live 1.4s ease-in-out infinite; }
+.film-screen.driving .film-badge { opacity: 0; pointer-events: none; }
+@keyframes film-live { 50% { box-shadow: 0 0 0 6px #ff2a2a00; } 0% { box-shadow: 0 0 0 0 #ff2a2a88; } }
+@media (prefers-reduced-motion: reduce) { .film-screen *, .film-screen *::after { animation: none !important; transition: none !important; } }
