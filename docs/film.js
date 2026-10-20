@@ -85,7 +85,7 @@
    * hooks: caption(text, chapter), keys(list), snap(shape), progress(chapter, 0..1), mode(driving).
    * invites: any of 'follow' (a tag by the mouse) and 'badge' (a button in the corner).
    */
-  function create(screen, { hooks = {}, invites = ['follow'], logo = 'img/logo.svg' } = {}) {
+  function create(screen, { hooks = {}, invites = ['follow'], logo = 'img/logo.svg?v=2' } = {}) {
     const call = (name, ...args) => hooks[name] && hooks[name](...args);
     screen.classList.add('film-screen');
     screen.insertAdjacentHTML('beforeend', DESKTOP.replace('LOGO', logo) + invites.map(i => INVITES[i]).join(''));
