@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48">
+  <defs>
+    <radialGradient id="bloom">
+      <stop offset="0" stop-color="COLOR" stop-opacity=".62"/>
+      <stop offset=".38" stop-color="COLOR" stop-opacity=".24"/>
+      <stop offset="1" stop-color="COLOR" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <circle cx="24" cy="24" r="17" fill="url(#bloom)"/>
+  <circle cx="24" cy="24" r="6.4" fill="#000" fill-opacity=".36"/>
+  <circle cx="24" cy="24" r="5.4" fill="COLOR"/>
+  <circle cx="24" cy="24" r="2.3" fill="#fff" fill-opacity=".95"/>
+</svg>

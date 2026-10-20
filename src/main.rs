@@ -1,105 +1,98 @@
 //! Screen-wide laser pointer, driven by user-configurable shortcuts (Alt+L toggles it by default).
-//! While on: left-drag draws; right clicks and the scroll wheel pass through to the app underneath.
+//! While on: left-drag draws (hold Alt for a horizontal line, Shift+Alt for a vertical one);
+//! right, middle and side clicks and the scroll wheels pass through to the app underneath.
 //! A tray icon opens the settings panel.
 #![windows_subsystem = "windows"]
 
+mod constrain;
+mod cursors;
+mod games;
+mod graphics;
 mod panel;
+mod region;
 mod settings;
+#[cfg(test)]
+mod snapshot;
 mod stroke;
 mod ui;
 
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use windows::core::{w, Interface, Result};
+use windows::core::{w, Result, BOOL};
 use windows::Win32::Foundation::{
-    GetLastError, COLORREF, E_FAIL, ERROR_ALREADY_EXISTS, HANDLE, HWND, LPARAM, LRESULT, POINT,
-    RECT, WAIT_OBJECT_0, WPARAM,
+    GetLastError, COLORREF, ERROR_ALREADY_EXISTS, HANDLE, HWND, LPARAM, LRESULT, POINT, RECT,
+    WAIT_OBJECT_0, WPARAM,
 };
-use windows::Win32::Graphics::Direct2D::Common::{
-    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_GRADIENT_STOP, D2D1_PIXEL_FORMAT,
-    D2D_RECT_F, D2D_SIZE_F, D2D_SIZE_U,
-};
-use windows::Win32::Graphics::Direct2D::{
-    D2D1CreateFactory, ID2D1Bitmap1, ID2D1DeviceContext, ID2D1DeviceContext5, ID2D1Factory1,
-    ID2D1RenderTarget, ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_ALIASED, D2D1_BITMAP_OPTIONS,
-    D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_CPU_READ, D2D1_BITMAP_OPTIONS_TARGET,
-    D2D1_BITMAP_PROPERTIES1, D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_NONE,
-    D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_GAMMA_2_2,
-    D2D1_MAP_OPTIONS_READ, D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES, D2D1_ROUNDED_RECT,
-};
-use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
-use windows::Win32::Graphics::Direct3D11::{
-    D3D11CreateDevice, ID3D11Device, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION,
-};
-use windows::Win32::Graphics::DirectComposition::{
-    DCompositionCreateDevice, IDCompositionDevice, IDCompositionTarget, IDCompositionVisual,
-};
-use windows::Win32::Graphics::DirectWrite::{
-    DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, IDWriteTextLayout,
-    DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
-    DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_METRICS,
-};
-use windows::Win32::Graphics::Dxgi::Common::{
-    DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_UNKNOWN,
-    DXGI_SAMPLE_DESC,
-};
-use windows::Win32::Graphics::Dxgi::{
-    CreateDXGIFactory2, IDXGIDevice, IDXGIFactory2, IDXGISurface, IDXGISwapChain1, IDXGISwapChain2,
-    DXGI_CREATE_FACTORY_FLAGS, DXGI_PRESENT, DXGI_PRESENT_PARAMETERS, DXGI_SCALING_STRETCH,
-    DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG, DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT,
-    DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, DXGI_USAGE_RENDER_TARGET_OUTPUT,
-};
+use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
+use windows::Win32::Graphics::Direct2D::{D2D1_ANTIALIAS_MODE_ALIASED, D2D1_ELLIPSE};
 use windows::Win32::Graphics::Gdi::{
-    CreateBitmap, CreateDIBSection, DeleteObject, GetMonitorInfoW, MonitorFromPoint, BITMAPINFO,
-    BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::SystemInformation::GetTickCount;
 use windows::Win32::System::Threading::{CreateMutexW, INFINITE};
+use windows::Win32::UI::Accessibility::HWINEVENTHOOK;
 use windows::Win32::UI::HiDpi::{
-    GetDpiForWindow, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+    GetDpiForMonitor, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+    MDT_EFFECTIVE_DPI,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    RegisterHotKey, ReleaseCapture, SendInput, SetCapture, UnregisterHotKey, HOT_KEY_MODIFIERS,
-    INPUT, INPUT_0, INPUT_MOUSE, MOD_NOREPEAT, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
-    MOUSEEVENTF_WHEEL, MOUSEINPUT, MOUSE_EVENT_FLAGS,
+    GetAsyncKeyState, GetMouseMovePointsEx, RegisterHotKey, ReleaseCapture, SendInput, SetCapture,
+    UnregisterHotKey, GMMP_USE_DISPLAY_POINTS, HOT_KEY_MODIFIERS, INPUT, INPUT_0, INPUT_KEYBOARD,
+    INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP, MOD_NOREPEAT, MOUSEEVENTF_HWHEEL,
+    MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
+    MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT, MOUSEMOVEPOINT,
+    MOUSE_EVENT_FLAGS, VIRTUAL_KEY, VK_MENU, VK_SHIFT,
 };
-use windows::Win32::UI::Shell::SHCreateMemStream;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateIconIndirect, CreateWindowExW, DefWindowProcW, DestroyCursor, DispatchMessageW,
-    GetCursorPos, GetSystemMetrics, GetWindowLongPtrW, KillTimer, LoadCursorW,
+    CreateWindowExW, DefWindowProcW, DestroyCursor, DispatchMessageW, GetCursorPos,
+    GetMessageTime, GetSystemMetrics, GetWindowLongPtrW, KillTimer, LoadCursorW,
     MsgWaitForMultipleObjectsEx, PeekMessageW, PostQuitMessage, RegisterClassW, SetCursor,
     SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-    TranslateMessage, GWL_EXSTYLE, HCURSOR, HICON, HWND_TOPMOST, ICONINFO, IDC_CROSS, LWA_ALPHA,
-    MA_NOACTIVATE, MSG, MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT, SM_CXVIRTUALSCREEN,
-    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOSIZE, SW_HIDE, SW_SHOWNOACTIVATE, WM_DESTROY, WM_DISPLAYCHANGE, WM_HOTKEY,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT,
-    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSW, WS_EX_LAYERED,
-    WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_EX_TRANSPARENT, WS_POPUP,
+    SystemParametersInfoW, TranslateMessage, GWL_EXSTYLE, HCURSOR, HICON, HWND_TOPMOST,
+    IDC_CROSS, LWA_ALPHA, MA_NOACTIVATE, MSG, MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT,
+    SC_CLOSE, SC_KEYMENU, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+    SM_YVIRTUALSCREEN, SPI_GETCLIENTAREAANIMATION, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOOWNERZORDER, SWP_NOSIZE, SW_HIDE, SW_SHOWNOACTIVATE, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+    WM_CAPTURECHANGED, WM_CHAR, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_HOTKEY, WM_KEYDOWN,
+    WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEACTIVATE,
+    WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP,
+    WM_SETCURSOR, WM_SYSCHAR, WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER,
+    WM_XBUTTONDOWN, WM_XBUTTONUP, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+    WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 use windows_numerics::Vector2;
 
+use constrain::{Change, Lock};
+use graphics::{device_lost, rect_f, Graphics, Toast};
+use region::Region;
 use settings::{Binding, Command, Slot, COMMANDS, MAX_PRESETS};
-use stroke::{rgba, union, Bounds, Point, Scratch, MIN_STEP};
+use stroke::{rgba, Bounds, Point, Scratch, Stroke, MIN_STEP};
 
-// Hotkey ids: commands are 1..=8, presets start here.
+// Hotkey ids: commands are 1..=9, presets start here.
 const HOTKEY_PRESET: i32 = 100;
 const HOTKEY_PROBE: i32 = 99;
+
 const TIMER_PASSTHROUGH: usize = 1;
+const TIMER_RECOVER: usize = 2;
+const TIMER_TRIM: usize = 3;
+const TIMER_CURSOR: usize = 4;
 const PASSTHROUGH_MS: u32 = 80;
+const RECOVER_MS: u32 = 1000;
+const TRIM_MS: u32 = 3000;
+const CURSOR_FRAME_MS: u32 = 16;
+
 // wParam flag on WM_MOUSEWHEEL.
 const MK_CONTROL: usize = 0x8;
+// An unassigned virtual key: tapping it while Alt is held stops the Alt release from opening the
+// foreground app's menu or switching keyboard layouts.
+const VK_MASK: VIRTUAL_KEY = VIRTUAL_KEY(0xE8);
 
 const RIPPLE_SECS: f32 = 0.45;
 const TOAST_SECS: f32 = 1.4;
-
-// Excalidraw's light-mode laser cursor (MIT).
-const PEN_PATH: &str = "m7.868 11.113 7.773 7.774a2.359 2.359 0 0 0 1.667.691 2.368 2.368 0 0 0 2.357-2.358c0-.625-.248-1.225-.69-1.667L11.201 7.78 9.558 9.469l-1.69 1.643v.001Zm10.273 3.606-3.333 3.333m-3.25-6.583 2 2m-7-7 3 3M3.664 3.625l1 1M2.529 6.922l1.407-.144m5.735-2.932-1.118.866M4.285 9.823l.758-1.194m1.863-6.207-.13 1.408";
-const CURSOR_SIZE: f32 = 28.0;
-const DOT_CURSOR_SIZE: f32 = 34.0;
+const CLEAR_SECS: f32 = 0.22;
 
 static LASER_ON: AtomicBool = AtomicBool::new(false);
 /// Kept strokes are on screen, so the clear shortcut has something to do.
@@ -116,56 +109,183 @@ thread_local! {
 struct Ripple {
     x: f32,
     y: f32,
+    scale: f32,
     at: Instant,
 }
 
-struct Toast {
-    layout: IDWriteTextLayout,
-    width: f32,
-    height: f32,
-    centre: f32,
-    bottom: f32,
-    at: Instant,
+/// A stroke on screen. Kept strokes are baked into the ink layer once finished.
+struct Drawn {
+    id: u64,
+    stroke: Stroke,
+    baked: bool,
 }
 
-struct Graphics {
-    swap_chain: IDXGISwapChain1,
-    waitable: HANDLE,
-    factory: ID2D1Factory1,
-    dc: ID2D1DeviceContext,
-    target: Option<ID2D1Bitmap1>,
-    brush: ID2D1SolidColorBrush,
-    dwrite: IDWriteFactory,
-    toast_text: IDWriteTextFormat,
-    size: (u32, u32),
-    // Kept alive for the lifetime of the window; dropping them detaches the visual tree.
-    _composition: (
-        IDCompositionDevice,
-        IDCompositionTarget,
-        IDCompositionVisual,
-    ),
+/// What undo walks back through.
+enum Edit {
+    Added(u64),
+    Cleared(Vec<Drawn>),
+}
+
+enum Redo {
+    Stroke(Drawn),
+    Clear,
+}
+
+/// The last mouse sample taken into the stroke, in screen coordinates, so the history Windows
+/// keeps can be read back without repeating it.
+#[derive(Clone, Copy, PartialEq, Default, Debug)]
+struct Sample {
+    x: i32,
+    y: i32,
+    time: u32,
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct CursorKey {
+    style: usize,
+    color: u32,
+    dpi: u32,
+    /// Quantised zoom, so animation frames are rendered once and reused.
+    step: u8,
+}
+
+const ZOOM_MIN: f32 = 0.3;
+const ZOOM_STEP: f32 = 0.05;
+
+fn zoom_step(zoom: f32) -> u8 {
+    ((zoom - ZOOM_MIN) / ZOOM_STEP).round().clamp(0.0, 20.0) as u8
+}
+
+/// The cursor grows in when the laser turns on and squeezes while the button is held.
+#[derive(Default)]
+struct Pointer {
+    cursors: Vec<(CursorKey, HCURSOR)>,
+    current: Option<CursorKey>,
+    ignited: Option<Instant>,
+    /// Button state and when it last changed.
+    pressed: Option<(bool, Instant)>,
+}
+
+fn ease_out(k: f32) -> f32 {
+    1.0 - (1.0 - k).powi(3)
+}
+
+/// Overshoots a little before settling, like something switched on.
+fn back_out(k: f32) -> f32 {
+    let (c1, c3) = (1.4, 2.4);
+    1.0 + c3 * (k - 1.0).powi(3) + c1 * (k - 1.0).powi(2)
+}
+
+impl Pointer {
+    /// The current zoom, and whether it is still changing.
+    fn zoom(&mut self, now: Instant) -> (f32, bool) {
+        if !animations_enabled() {
+            return (1.0, false);
+        }
+        let mut animating = false;
+        let mut zoom = 1.0;
+        if let Some(at) = self.ignited {
+            let k = now.duration_since(at).as_secs_f32() / 0.2;
+            if k < 1.0 {
+                zoom *= 0.35 + 0.65 * back_out(k);
+                animating = true;
+            } else {
+                self.ignited = None;
+            }
+        }
+        if let Some((down, at)) = self.pressed {
+            let elapsed = now.duration_since(at).as_secs_f32();
+            let (k, squeeze) = if down {
+                let k = (elapsed / 0.09).min(1.0);
+                (k, ease_out(k))
+            } else {
+                let k = (elapsed / 0.14).min(1.0);
+                (k, 1.0 - ease_out(k))
+            };
+            zoom *= 1.0 - 0.14 * squeeze;
+            if k < 1.0 {
+                animating = true;
+            } else if !down {
+                self.pressed = None;
+            }
+        }
+        (zoom, animating)
+    }
+
+    /// Drops cursors for looks no longer in use, and caps how many are kept.
+    fn evict(&mut self, keep: CursorKey) {
+        self.cursors.retain(|(key, cursor)| {
+            let current = key.style == keep.style && key.color == keep.color;
+            if !current {
+                unsafe {
+                    let _ = DestroyCursor(*cursor);
+                }
+            }
+            current
+        });
+        while self.cursors.len() > 48 {
+            let (_, cursor) = self.cursors.remove(0);
+            unsafe {
+                let _ = DestroyCursor(cursor);
+            }
+        }
+    }
+}
+
+fn animations_enabled() -> bool {
+    let mut enabled = BOOL(1);
+    unsafe {
+        let _ = SystemParametersInfoW(
+            SPI_GETCLIENTAREAANIMATION,
+            0,
+            Some(&mut enabled as *mut BOOL as *mut _),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        );
+    }
+    enabled.as_bool()
 }
 
 struct App {
     hwnd: HWND,
-    gfx: Graphics,
-    strokes: Vec<Vec<Point>>,
+    /// None while recovering from a lost GPU.
+    gfx: Option<Graphics>,
+    strokes: Vec<Drawn>,
+    next_id: u64,
     drawing: bool,
+    /// Last mouse sample taken into the stroke being drawn.
+    sample: Option<Sample>,
+    lock: Lock,
+    anchor: (f32, f32),
+    /// The menu-mask key was already tapped during this press of Alt.
+    alt_masked: bool,
+    undo: Vec<Edit>,
+    redo: Vec<Redo>,
+    /// Strokes fading out after a clear.
+    clearing: Vec<Stroke>,
+    cleared_at: Instant,
+    ripples: Vec<Ripple>,
+    toast: Option<(Toast, Instant)>,
     dirty: bool,
-    scale: f32,
     /// Virtual-screen position of the window, to map screen coordinates into it.
     origin: (i32, i32),
-    ripples: Vec<Ripple>,
-    toast: Option<Toast>,
+    size: (u32, u32),
     shown: bool,
-    /// What each swap-chain buffer last had drawn on it, so a frame only clears and
-    /// presents the parts of the screen that changed.
-    buffers: [Option<Bounds>; 2],
+    /// Short-lived content (strokes in flight, ripples, the toast) drawn into each swap-chain
+    /// buffer last time, which that buffer must repaint before it is shown again.
+    stale: [Region; 2],
+    /// Kept-ink changes each buffer hasn't caught up with yet.
+    ink_damage: [Region; 2],
+    /// Kept-ink changes since the last present.
+    present_damage: Region,
     back: usize,
+    /// False until the buffers have been painted whole since they were (re)created.
     presented: bool,
     scratch: Scratch,
-    cursor_key: Option<(u32, bool)>,
-    cursor_owned: bool,
+    pointer: Pointer,
+    /// The game the overlay took the mouse from while the laser is on.
+    game: Option<HWND>,
+    warned_exclusive: bool,
+    foreground_hook: HWINEVENTHOOK,
 }
 
 fn main() -> Result<()> {
@@ -176,7 +296,7 @@ fn main() -> Result<()> {
             return Ok(());
         }
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-        settings::load();
+        let first_run = settings::load();
         let instance = GetModuleHandleW(None)?;
         let class = w!("LaserPointerOverlay");
         RegisterClassW(&WNDCLASSW {
@@ -210,35 +330,25 @@ fn main() -> Result<()> {
         SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA)?;
         OVERLAY.store(hwnd.0 as isize, Ordering::Relaxed);
 
-        let scale = GetDpiForWindow(hwnd) as f32 / 96.0;
-        let gfx = Graphics::new(hwnd, width as u32, height as u32, scale)?;
-
+        let size = (width as u32, height as u32);
+        let gfx = Graphics::new(hwnd, size.0, size.1)?;
         // Stays hidden until there's something to show, so nothing sits over the desktop.
         APP.with(|app| {
-            *app.borrow_mut() = Some(App {
-                hwnd,
-                gfx,
-                strokes: Vec::new(),
-                drawing: false,
-                dirty: false,
-                scale,
-                origin: (x, y),
-                ripples: Vec::new(),
-                toast: None,
-                shown: false,
-                buffers: [Some(full_bounds(width as u32, height as u32)); 2],
-                back: 0,
-                presented: false,
-                scratch: Scratch::default(),
-                cursor_key: None,
-                cursor_owned: false,
-            })
+            *app.borrow_mut() = Some(App::new(hwnd, gfx, (x, y), size));
         });
         with_app(App::refresh_cursor);
         // Shortcuts first: adding the tray icon can take Explorer a few seconds.
         sync_hotkeys();
         ui::init(instance.into())?;
+        if first_run {
+            let shortcut = ui::shortcut_name(settings::get().key(Command::Toggle));
+            ui::balloon(
+                "Laser Pointer is ready",
+                &format!("Press {shortcut} to draw. Settings live in this tray icon."),
+            );
+        }
         run();
+        with_app(App::shutdown);
         ui::shutdown();
     }
     Ok(())
@@ -249,15 +359,10 @@ fn main() -> Result<()> {
 unsafe fn run() {
     let mut msg = MSG::default();
     loop {
-        let (animating, waitable) = APP.with(|app| {
-            let app = app.borrow();
-            let app = app.as_ref().expect("app initialised before the loop");
-            (app.needs_frame(), app.gfx.waitable)
-        });
-        let handles: &[HANDLE] = if animating {
-            std::slice::from_ref(&waitable)
-        } else {
-            &[]
+        let waitable = with_app(|app| app.needs_frame().then(|| app.waitable()).flatten()).flatten();
+        let handles: &[HANDLE] = match &waitable {
+            Some(handle) => std::slice::from_ref(handle),
+            None => &[],
         };
         let woke =
             MsgWaitForMultipleObjectsEx(Some(handles), INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
@@ -268,7 +373,7 @@ unsafe fn run() {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
-        if animating && woke == WAIT_OBJECT_0 {
+        if waitable.is_some() && woke == WAIT_OBJECT_0 {
             with_app(App::render);
         }
     }
@@ -306,10 +411,7 @@ pub fn quit() {
 
 /// After the panel or tray menu changes a setting.
 pub fn settings_changed() {
-    with_app(|app| {
-        app.refresh_cursor();
-        app.dirty = true;
-    });
+    with_app(App::refresh_cursor);
     ui::settings_changed();
 }
 
@@ -320,29 +422,38 @@ pub fn run_command(command: Command) {
         Command::Undo => {
             with_app(App::undo);
         }
+        Command::Redo => {
+            with_app(App::redo);
+        }
         Command::Clear => {
-            with_app(App::clear);
+            with_app(|app| app.clear(|_| true));
         }
         Command::ToggleInk => {
             let mut current = settings::get();
             current.look.ink = !current.look.ink;
             settings::set(current);
             settings::save();
-            let text = if current.look.ink {
-                "Keep strokes on"
-            } else {
-                "Keep strokes off"
-            };
             with_app(|app| {
-                app.notify(text);
-                app.update_ink_visible();
+                // Turning it off lets go of what was kept, as well as what comes next.
+                if !current.look.ink {
+                    app.clear(|stroke| stroke.look.ink);
+                }
+                app.notify(if current.look.ink {
+                    "Keep strokes on"
+                } else {
+                    "Keep strokes off"
+                });
             });
             settings_changed();
         }
         Command::NextPreset | Command::PreviousPreset => {
             let count = settings::presets().len();
             if count > 0 {
-                let step = if command == Command::NextPreset { 1 } else { count - 1 };
+                let step = if command == Command::NextPreset {
+                    1
+                } else {
+                    count - 1
+                };
                 let next = settings::active_preset().map_or(0, |index| (index + step) % count);
                 apply_preset(next);
             }
@@ -390,7 +501,7 @@ pub fn sync_hotkeys() {
         let mut failed = 0;
         for command in COMMANDS {
             let active = match command {
-                Command::Off | Command::Undo => on,
+                Command::Off | Command::Undo | Command::Redo => on,
                 Command::Clear => on || ink,
                 _ => true,
             };
@@ -431,16 +542,24 @@ pub fn shortcut_free(binding: Binding) -> bool {
 
 pub fn tray_icon(on: bool, size: u32) -> Option<HICON> {
     let svg = tray_svg(on, settings::get().look.color);
-    with_app(|app| unsafe { svg_icon(&app.gfx, &svg, size, None) })?.ok()
+    with_app(|app| unsafe { app.gfx.as_ref()?.svg_icon(&svg, size, None, 1.0).ok() })?
 }
 
-fn cursor_svg() -> String {
-    format!(
-        r##"<svg viewBox="0 0 24 24" stroke-width="1" xmlns="http://www.w3.org/2000/svg"><path stroke="#1b1b1f" fill="#fff" d="{PEN_PATH}"/></svg>"##
-    )
+/// Renders a cursor style for the settings panel's picker.
+pub fn cursor_preview(style: usize, color: u32, size: u32) -> Option<HICON> {
+    let style = &cursors::STYLES[style];
+    with_app(|app| unsafe {
+        app.gfx
+            .as_ref()?
+            .svg_icon(&style.svg(color), size, None, 1.0)
+            .ok()
+    })?
 }
 
-/// The cursor pen, heavier so it reads at tray size, with a dot of the laser colour while on.
+// Excalidraw's laser cursor outline (MIT), heavier so it reads at tray size.
+const PEN_PATH: &str = "m7.868 11.113 7.773 7.774a2.359 2.359 0 0 0 1.667.691 2.368 2.368 0 0 0 2.357-2.358c0-.625-.248-1.225-.69-1.667L11.201 7.78 9.558 9.469l-1.69 1.643v.001Zm10.273 3.606-3.333 3.333m-3.25-6.583 2 2m-7-7 3 3M3.664 3.625l1 1M2.529 6.922l1.407-.144m5.735-2.932-1.118.866M4.285 9.823l.758-1.194m1.863-6.207-.13 1.408";
+
+/// The pen, with a dot of the laser colour while on.
 fn tray_svg(on: bool, color: u32) -> String {
     let dot = if on {
         format!(
@@ -452,6 +571,23 @@ fn tray_svg(on: bool, color: u32) -> String {
     format!(
         r##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke="#1b1b1f" stroke-width="1.6" fill="#fff" d="{PEN_PATH}"/>{dot}</svg>"##
     )
+}
+
+/// Keeps the overlay above borderless games and slide shows that raise themselves.
+unsafe extern "system" fn on_foreground(
+    _hook: HWINEVENTHOOK,
+    _event: u32,
+    _hwnd: HWND,
+    _object: i32,
+    _child: i32,
+    _thread: u32,
+    _time: u32,
+) {
+    with_app(|app| {
+        if app.shown {
+            app.raise();
+        }
+    });
 }
 
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -467,6 +603,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 LRESULT(0)
             }
             WM_SETCURSOR if laser_on() => {
+                with_app(App::refresh_cursor);
                 SetCursor(Some(HCURSOR(CURSOR.load(Ordering::Relaxed) as _)));
                 LRESULT(1)
             }
@@ -482,21 +619,30 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 LRESULT(0)
             }
             WM_LBUTTONUP => {
-                with_app(|app| app.drawing = false);
+                with_app(|app| {
+                    app.extend(client_point(lparam));
+                    app.finish();
+                });
                 let _ = ReleaseCapture();
                 LRESULT(0)
             }
-            WM_RBUTTONDOWN => LRESULT(0),
-            WM_RBUTTONUP => {
-                with_app(|app| app.ripple(client_point(lparam)));
-                pass_through(
-                    hwnd,
-                    &[
-                        mouse_input(MOUSEEVENTF_LEFTDOWN, 0),
-                        mouse_input(MOUSEEVENTF_LEFTUP, 0),
-                    ],
-                );
+            // Alt-Tab or a dialog took the mouse mid-stroke.
+            WM_CAPTURECHANGED => {
+                with_app(App::finish);
                 LRESULT(0)
+            }
+            WM_RBUTTONDOWN | WM_MBUTTONDOWN => LRESULT(0),
+            WM_XBUTTONDOWN => LRESULT(1),
+            // A right-click clicks the app underneath; middle and side buttons pass as themselves.
+            WM_RBUTTONUP | WM_MBUTTONUP | WM_XBUTTONUP => {
+                with_app(|app| app.ripple(client_point(lparam)));
+                let (down, up, data) = match msg {
+                    WM_RBUTTONUP => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, 0),
+                    WM_MBUTTONUP => (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, 0),
+                    _ => (MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, ((wparam.0 >> 16) & 0xffff) as u32),
+                };
+                pass_through(hwnd, &[mouse_input(down, data), mouse_input(up, data)]);
+                LRESULT(isize::from(msg == WM_XBUTTONUP))
             }
             WM_MOUSEWHEEL => {
                 let delta = ((wparam.0 >> 16) & 0xffff) as u16 as i16;
@@ -508,14 +654,44 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 }
                 LRESULT(0)
             }
-            WM_TIMER if wparam.0 == TIMER_PASSTHROUGH => {
-                let _ = KillTimer(Some(hwnd), TIMER_PASSTHROUGH);
-                if laser_on() {
-                    set_click_through(hwnd, false);
+            WM_MOUSEHWHEEL => {
+                let delta = ((wparam.0 >> 16) & 0xffff) as u16 as i16;
+                pass_through(hwnd, &[mouse_input(MOUSEEVENTF_HWHEEL, delta as i32 as u32)]);
+                LRESULT(0)
+            }
+            // Only reachable while the overlay holds the foreground over a game. Alt alone must
+            // not enter menu mode, and Alt+F4 must not close the overlay and quit the app.
+            WM_KEYDOWN | WM_KEYUP | WM_SYSKEYDOWN | WM_SYSKEYUP | WM_CHAR | WM_SYSCHAR => LRESULT(0),
+            WM_SYSCOMMAND
+                if matches!((wparam.0 & 0xfff0) as u32, SC_KEYMENU | SC_CLOSE) =>
+            {
+                LRESULT(0)
+            }
+            WM_TIMER => {
+                match wparam.0 {
+                    TIMER_PASSTHROUGH => {
+                        let _ = KillTimer(Some(hwnd), TIMER_PASSTHROUGH);
+                        if laser_on() {
+                            set_click_through(hwnd, false);
+                        }
+                    }
+                    TIMER_RECOVER => {
+                        let _ = KillTimer(Some(hwnd), TIMER_RECOVER);
+                        with_app(App::recover);
+                    }
+                    TIMER_TRIM => {
+                        let _ = KillTimer(Some(hwnd), TIMER_TRIM);
+                        with_app(App::trim);
+                    }
+                    TIMER_CURSOR => {
+                        with_app(App::refresh_cursor);
+                    }
+                    _ => {}
                 }
                 LRESULT(0)
             }
-            WM_DISPLAYCHANGE => {
+            // The overlay spans every monitor, so it ignores the suggested rectangle.
+            WM_DISPLAYCHANGE | WM_DPICHANGED => {
                 with_app(App::fit_to_screen);
                 LRESULT(0)
             }
@@ -545,13 +721,17 @@ unsafe fn virtual_screen() -> (i32, i32, i32, i32) {
     )
 }
 
-fn full_bounds(width: u32, height: u32) -> Bounds {
-    Bounds {
-        left: 0.0,
-        top: 0.0,
-        right: width as f32,
-        bottom: height as f32,
+fn monitor_dpi(point: POINT) -> u32 {
+    let (mut dpi, mut _y) = (96, 96);
+    unsafe {
+        let monitor = MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST);
+        let _ = GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi, &mut _y);
     }
+    dpi
+}
+
+fn monitor_scale(point: POINT) -> f32 {
+    monitor_dpi(point) as f32 / 96.0
 }
 
 unsafe fn set_click_through(hwnd: HWND, on: bool) {
@@ -585,364 +765,34 @@ unsafe fn pass_through(hwnd: HWND, inputs: &[INPUT]) {
     SetTimer(Some(hwnd), TIMER_PASSTHROUGH, PASSTHROUGH_MS, None);
 }
 
-impl App {
-    fn needs_frame(&self) -> bool {
-        if !self.shown {
-            return false;
-        }
-        // Kept strokes don't change on their own, so only repaint them when something new arrives.
-        let fading = !settings::get().look.ink && self.has_strokes();
-        self.dirty || fading || !self.ripples.is_empty() || self.toast.is_some()
-    }
+fn key_held(key: VIRTUAL_KEY) -> bool {
+    unsafe { GetAsyncKeyState(i32::from(key.0)) < 0 }
+}
 
-    fn has_strokes(&self) -> bool {
-        self.strokes.iter().any(|points| !points.is_empty())
-    }
-
-    /// Anything left to show once the laser is off: kept strokes, a fading tail, a notice.
-    fn has_content(&self) -> bool {
-        self.has_strokes() || !self.ripples.is_empty() || self.toast.is_some()
-    }
-
-    fn update_ink_visible(&self) {
-        let visible = settings::get().look.ink && self.has_strokes();
-        INK_VISIBLE.store(visible, Ordering::Relaxed);
-    }
-
-    fn set_on(&mut self, on: bool) {
-        LASER_ON.store(on, Ordering::Relaxed);
-        // Kept strokes outlive the laser; they stay on screen until cleared.
-        if !settings::get().look.ink {
-            self.strokes.clear();
-        }
-        self.ripples.clear();
-        self.drawing = false;
-        self.dirty = true;
-        self.toast = None;
-        self.notify(if on { "Laser on" } else { "Laser off" });
-        unsafe {
-            set_click_through(self.hwnd, !on);
-            if on {
-                self.show();
-                // Another always-on-top window (a slideshow, say) may have been raised since.
-                let _ = SetWindowPos(
-                    self.hwnd,
-                    Some(HWND_TOPMOST),
-                    0,
-                    0,
-                    0,
-                    0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-                );
-                SetCursor(Some(HCURSOR(CURSOR.load(Ordering::Relaxed) as _)));
-            } else {
-                let _ = ReleaseCapture();
-                if !self.has_content() {
-                    self.hide();
-                }
-            }
-        }
-        self.update_ink_visible();
-    }
-
-    /// Paints before showing, so an old frame never flashes up.
-    fn show(&mut self) {
-        if self.shown {
-            return;
-        }
-        self.render();
-        unsafe {
-            let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
-        }
-        self.shown = true;
-    }
-
-    fn hide(&mut self) {
-        unsafe {
-            let _ = ShowWindow(self.hwnd, SW_HIDE);
-        }
-        self.shown = false;
-    }
-
-    /// A pill near the bottom of the screen, if the user wants them.
-    fn notify(&mut self, text: &str) {
-        if !settings::get().indicator {
-            return;
-        }
-        self.toast = self.make_toast(text);
-        self.dirty = true;
-        self.show();
-    }
-
-    fn make_toast(&self, text: &str) -> Option<Toast> {
-        let wide: Vec<u16> = text.encode_utf16().collect();
-        unsafe {
-            let layout = self
-                .gfx
-                .dwrite
-                .CreateTextLayout(&wide, &self.gfx.toast_text, 4000.0, 400.0)
-                .ok()?;
-            let mut metrics = DWRITE_TEXT_METRICS::default();
-            layout.GetMetrics(&mut metrics).ok()?;
-            let mut cursor = POINT::default();
-            let _ = GetCursorPos(&mut cursor);
-            let mut info = MONITORINFO {
-                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+fn tap_mask_key() {
+    let key = |flags| INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VK_MASK,
+                dwFlags: flags,
                 ..Default::default()
-            };
-            let _ = GetMonitorInfoW(MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST), &mut info);
-            let work = info.rcWork;
-            Some(Toast {
-                layout,
-                width: metrics.width,
-                height: metrics.height,
-                centre: ((work.left + work.right) / 2 - self.origin.0) as f32,
-                bottom: (work.bottom - self.origin.1) as f32 - 72.0 * self.scale,
-                at: Instant::now(),
-            })
-        }
-    }
-
-    fn begin(&mut self, (x, y): (f32, f32)) {
-        if !laser_on() {
-            return;
-        }
-        self.drawing = true;
-        self.dirty = true;
-        self.strokes.push(vec![Point {
-            x,
-            y,
-            at: Instant::now(),
-        }]);
-        self.update_ink_visible();
-    }
-
-    fn extend(&mut self, (x, y): (f32, f32)) {
-        if !self.drawing {
-            return;
-        }
-        let Some(points) = self.strokes.last_mut() else {
-            return;
-        };
-        if let Some(last) = points.last() {
-            if (x - last.x).hypot(y - last.y) < MIN_STEP * self.scale {
-                return;
-            }
-        }
-        points.push(Point {
-            x,
-            y,
-            at: Instant::now(),
-        });
-        self.dirty = true;
-    }
-
-    fn undo(&mut self) {
-        if self.drawing {
-            return;
-        }
-        self.strokes.retain(|points| !points.is_empty());
-        if self.strokes.pop().is_some() {
-            self.dirty = true;
-        }
-        self.update_ink_visible();
-    }
-
-    fn clear(&mut self) {
-        self.strokes.clear();
-        self.drawing = false;
-        self.dirty = true;
-        self.update_ink_visible();
-    }
-
-    fn ripple(&mut self, (x, y): (f32, f32)) {
-        if settings::get().ripples {
-            self.ripples.push(Ripple {
-                x,
-                y,
-                at: Instant::now(),
-            });
-        }
-    }
-
-    fn resize_by(&mut self, delta: i16) {
-        let mut settings = settings::get();
-        let width = settings.look.width as i32 + i32::from(delta.signum());
-        settings.look.width = width.clamp(2, 24) as u32;
-        settings::set(settings);
-        settings::save();
-        self.notify(&format!("Thickness  {} px", settings.look.width));
-        self.dirty = true;
-    }
-
-    fn fit_to_screen(&mut self) {
-        let (x, y, width, height) = unsafe { virtual_screen() };
-        unsafe {
-            let _ = SetWindowPos(
-                self.hwnd,
-                Some(HWND_TOPMOST),
-                x,
-                y,
-                width,
-                height,
-                SWP_NOACTIVATE,
-            );
-            let _ = self.gfx.resize(width as u32, height as u32);
-        }
-        self.origin = (x, y);
-        self.strokes.clear();
-        self.buffers = [Some(full_bounds(width as u32, height as u32)); 2];
-        self.back = 0;
-        self.presented = false;
-        self.dirty = true;
-        self.update_ink_visible();
-    }
-
-    /// Rebuilds the cursor when its colour or kind changes.
-    fn refresh_cursor(&mut self) {
-        let settings = settings::get();
-        let key = (settings.look.color, settings.dot_cursor);
-        if self.cursor_key == Some(key) {
-            return;
-        }
-        self.cursor_key = Some(key);
-        let made = unsafe {
-            if settings.dot_cursor {
-                dot_cursor(&self.gfx, settings.look.color, self.scale)
-            } else {
-                let size = (CURSOR_SIZE * self.scale).round() as u32;
-                svg_icon(&self.gfx, &cursor_svg(), size, Some((0, 0)))
-            }
-        };
-        let cursor = match &made {
-            Ok(icon) => HCURSOR(icon.0),
-            Err(_) => unsafe { LoadCursorW(None, IDC_CROSS).unwrap_or_default() },
-        };
-        let old = HCURSOR(CURSOR.swap(cursor.0 as isize, Ordering::Relaxed) as _);
-        unsafe {
-            if laser_on() {
-                SetCursor(Some(cursor));
-            }
-            if self.cursor_owned && !old.is_invalid() {
-                let _ = DestroyCursor(old);
-            }
-        }
-        self.cursor_owned = made.is_ok();
-    }
-
-    fn render(&mut self) {
-        let settings = settings::get();
-        let now = Instant::now();
-        self.ripples
-            .retain(|ripple| now.duration_since(ripple.at).as_secs_f32() < RIPPLE_SECS);
-        if self
-            .toast
-            .as_ref()
-            .is_some_and(|toast| now.duration_since(toast.at).as_secs_f32() >= TOAST_SECS)
-        {
-            self.toast = None;
-        }
-
-        let Self {
-            gfx,
-            strokes,
-            scratch,
-            ripples,
-            toast,
-            scale,
-            buffers,
-            back,
-            drawing,
-            ..
-        } = self;
-        let scale = *scale;
-        let target: &ID2D1RenderTarget = &gfx.dc;
-        let mut drawn = None;
-        unsafe {
-            gfx.dc.BeginDraw();
-            // Everything outside what this buffer last showed is already transparent.
-            if let Some(stale) = buffers[*back] {
-                gfx.dc.PushAxisAlignedClip(&rect_f(stale), D2D1_ANTIALIAS_MODE_ALIASED);
-                gfx.dc.Clear(Some(&D2D1_COLOR_F::default()));
-                gfx.dc.PopAxisAlignedClip();
-            }
-            for points in strokes.iter_mut() {
-                let bounds = stroke::draw(
-                    &gfx.factory,
-                    target,
-                    &gfx.brush,
-                    points,
-                    now,
-                    &settings.look,
-                    scale,
-                    scratch,
-                );
-                drawn = union(drawn, bounds);
-            }
-            // Faded-out strokes go, except the one still being drawn.
-            let count = strokes.len();
-            let mut index = 0;
-            strokes.retain(|points| {
-                index += 1;
-                !points.is_empty() || (*drawing && index == count)
-            });
-            for ripple in ripples.iter() {
-                let k = now.duration_since(ripple.at).as_secs_f32() / RIPPLE_SECS;
-                let radius = (6.0 + 30.0 * (1.0 - (1.0 - k).powi(3))) * scale;
-                gfx.brush
-                    .SetColor(&rgba(settings.look.color, 0.9 * (1.0 - k).powf(1.5)));
-                gfx.dc.DrawEllipse(
-                    &ellipse(ripple.x, ripple.y, radius),
-                    &gfx.brush,
-                    3.0 * scale * (1.0 - 0.5 * k),
-                    None,
-                );
-                drawn = union(drawn, Some(Bounds::around(ripple.x, ripple.y, radius + 4.0 * scale)));
-            }
-            if let Some(toast) = toast {
-                let age = now.duration_since(toast.at).as_secs_f32();
-                let alpha = (age / 0.15).min(1.0).min((TOAST_SECS - age) / 0.3).max(0.0);
-                drawn = union(
-                    drawn,
-                    Some(gfx.draw_toast(toast, settings.look.color, alpha, scale)),
-                );
-            }
-            let _ = gfx.dc.EndDraw(None, None);
-        }
-
-        // Present only what changed since the frame now on screen.
-        let changed = union(drawn, buffers[1 - *back]);
-        let dirty = changed.map_or(
-            RECT {
-                left: 0,
-                top: 0,
-                right: 1,
-                bottom: 1,
             },
-            |bounds| pixel_rect(bounds, gfx.size, 2.0 * scale),
+        },
+    };
+    unsafe {
+        SendInput(
+            &[key(Default::default()), key(KEYEVENTF_KEYUP)],
+            std::mem::size_of::<INPUT>() as i32,
         );
-        let mut rects = [dirty];
-        let parameters = DXGI_PRESENT_PARAMETERS {
-            // The first frame after (re)creating the buffers must be presented whole.
-            DirtyRectsCount: u32::from(self.presented),
-            pDirtyRects: rects.as_mut_ptr(),
-            ..Default::default()
-        };
-        unsafe {
-            let _ = gfx.swap_chain.Present1(1, DXGI_PRESENT(0), &parameters);
-        }
-        buffers[*back] = drawn.map(|bounds| inflate(bounds, 2.0 * scale));
-        *back ^= 1;
-        self.presented = true;
-        self.dirty = false;
-        let was_visible = INK_VISIBLE.load(Ordering::Relaxed);
-        self.update_ink_visible();
-        if was_visible != INK_VISIBLE.load(Ordering::Relaxed) {
-            sync_hotkeys();
-        }
-        if !laser_on() && !self.has_content() && self.shown {
-            self.hide();
-        }
+    }
+}
+
+pub(crate) fn ellipse(x: f32, y: f32, radius: f32) -> D2D1_ELLIPSE {
+    D2D1_ELLIPSE {
+        point: Vector2 { X: x, Y: y },
+        radiusX: radius,
+        radiusY: radius,
     }
 }
 
@@ -955,370 +805,931 @@ fn inflate(bounds: Bounds, by: f32) -> Bounds {
     }
 }
 
-fn rect_f(bounds: Bounds) -> D2D_RECT_F {
-    D2D_RECT_F {
-        left: bounds.left.floor(),
-        top: bounds.top.floor(),
-        right: bounds.right.ceil(),
-        bottom: bounds.bottom.ceil(),
-    }
+fn intersects(a: Bounds, b: Bounds) -> bool {
+    a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom
 }
 
-fn pixel_rect(bounds: Bounds, (width, height): (u32, u32), margin: f32) -> RECT {
+fn pixel_rect(bounds: Bounds, (width, height): (u32, u32)) -> Option<RECT> {
     let clamp = |value: f32, max: u32| (value.max(0.0) as i32).min(max as i32);
     let rect = RECT {
-        left: clamp((bounds.left - margin).floor(), width),
-        top: clamp((bounds.top - margin).floor(), height),
-        right: clamp((bounds.right + margin).ceil(), width),
-        bottom: clamp((bounds.bottom + margin).ceil(), height),
+        left: clamp(bounds.left.floor(), width),
+        top: clamp(bounds.top.floor(), height),
+        right: clamp(bounds.right.ceil(), width),
+        bottom: clamp(bounds.bottom.ceil(), height),
     };
-    if rect.right <= rect.left || rect.bottom <= rect.top {
-        RECT {
-            left: 0,
-            top: 0,
-            right: 1,
-            bottom: 1,
-        }
+    (rect.right > rect.left && rect.bottom > rect.top).then_some(rect)
+}
+
+fn ripple_bounds(ripple: &Ripple) -> Bounds {
+    Bounds::around(ripple.x, ripple.y, 40.0 * ripple.scale)
+}
+
+/// Converts a time from the mouse's history into an Instant, clamped so a stale stamp can't
+/// make a point look older than the stroke it belongs to.
+fn sample_instant(time: u32, ticks_now: u32, now: Instant) -> Instant {
+    let age = ticks_now.wrapping_sub(time).min(1000);
+    now.checked_sub(Duration::from_millis(u64::from(age)))
+        .unwrap_or(now)
+}
+
+/// Mouse history coordinates are 16-bit; monitors left of or above the primary wrap around.
+fn unwrap_coordinate(value: i32) -> i32 {
+    if value > 32767 {
+        value - 65536
     } else {
-        rect
+        value
     }
 }
 
-fn ellipse(x: f32, y: f32, radius: f32) -> D2D1_ELLIPSE {
-    D2D1_ELLIPSE {
-        point: Vector2 { X: x, Y: y },
-        radiusX: radius,
-        radiusY: radius,
-    }
-}
-
-fn bitmap_properties(options: D2D1_BITMAP_OPTIONS) -> D2D1_BITMAP_PROPERTIES1 {
-    D2D1_BITMAP_PROPERTIES1 {
-        pixelFormat: D2D1_PIXEL_FORMAT {
-            format: DXGI_FORMAT_B8G8R8A8_UNORM,
-            alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
-        },
-        dpiX: 96.0,
-        dpiY: 96.0,
-        bitmapOptions: options,
-        ..Default::default()
-    }
-}
-
-impl Graphics {
-    unsafe fn new(hwnd: HWND, width: u32, height: u32, scale: f32) -> Result<Self> {
-        let mut d3d: Option<ID3D11Device> = None;
-        D3D11CreateDevice(
-            None,
-            D3D_DRIVER_TYPE_HARDWARE,
-            Default::default(),
-            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-            None,
-            D3D11_SDK_VERSION,
-            Some(&mut d3d),
-            None,
-            None,
-        )?;
-        let dxgi: IDXGIDevice = d3d
-            .ok_or_else(|| windows::core::Error::from(E_FAIL))?
-            .cast()?;
-
-        let factory: IDXGIFactory2 = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0))?;
-        let swap_chain = factory.CreateSwapChainForComposition(
-            &dxgi,
-            &DXGI_SWAP_CHAIN_DESC1 {
-                Width: width,
-                Height: height,
-                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                SampleDesc: DXGI_SAMPLE_DESC {
-                    Count: 1,
-                    Quality: 0,
-                },
-                BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
-                BufferCount: 2,
-                Scaling: DXGI_SCALING_STRETCH,
-                SwapEffect: DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
-                AlphaMode: DXGI_ALPHA_MODE_PREMULTIPLIED,
-                Flags: DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT.0 as u32,
-                ..Default::default()
-            },
-            None,
-        )?;
-        let latency: IDXGISwapChain2 = swap_chain.cast()?;
-        latency.SetMaximumFrameLatency(1)?;
-        let waitable = latency.GetFrameLatencyWaitableObject();
-
-        let d2d: ID2D1Factory1 = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
-        let dc = d2d
-            .CreateDevice(&dxgi)?
-            .CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)?;
-        let brush = dc.CreateSolidColorBrush(&rgba(settings::get().look.color, 1.0), None)?;
-        let dwrite: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
-        let toast_text = dwrite.CreateTextFormat(
-            w!("Segoe UI Variable Text"),
-            None,
-            DWRITE_FONT_WEIGHT_SEMI_BOLD,
-            DWRITE_FONT_STYLE_NORMAL,
-            DWRITE_FONT_STRETCH_NORMAL,
-            15.0 * scale,
-            w!("en-us"),
-        )?;
-
-        let composition: IDCompositionDevice = DCompositionCreateDevice(&dxgi)?;
-        let target = composition.CreateTargetForHwnd(hwnd, true)?;
-        let visual = composition.CreateVisual()?;
-        visual.SetContent(&swap_chain)?;
-        target.SetRoot(&visual)?;
-        composition.Commit()?;
-
-        let mut gfx = Self {
-            swap_chain,
-            waitable,
-            factory: d2d,
-            dc,
-            target: None,
-            brush,
-            dwrite,
-            toast_text,
-            size: (width, height),
-            _composition: (composition, target, visual),
-        };
-        gfx.bind_target()?;
-        Ok(gfx)
+impl App {
+    fn new(hwnd: HWND, gfx: Graphics, origin: (i32, i32), size: (u32, u32)) -> Self {
+        let foreground_hook = games::install_foreground_hook(on_foreground);
+        Self {
+            hwnd,
+            gfx: Some(gfx),
+            strokes: Vec::new(),
+            next_id: 0,
+            drawing: false,
+            sample: None,
+            lock: Lock::None,
+            anchor: (0.0, 0.0),
+            alt_masked: false,
+            undo: Vec::new(),
+            redo: Vec::new(),
+            clearing: Vec::new(),
+            cleared_at: Instant::now(),
+            ripples: Vec::new(),
+            toast: None,
+            dirty: false,
+            origin,
+            size,
+            shown: false,
+            stale: Default::default(),
+            ink_damage: Default::default(),
+            present_damage: Region::default(),
+            back: 0,
+            presented: false,
+            scratch: Scratch::default(),
+            pointer: Pointer::default(),
+            game: None,
+            warned_exclusive: false,
+            foreground_hook,
+        }
     }
 
-    unsafe fn bind_target(&mut self) -> Result<()> {
-        let surface: IDXGISurface = self.swap_chain.GetBuffer(0)?;
-        let target = self.dc.CreateBitmapFromDxgiSurface(
-            &surface,
-            Some(&bitmap_properties(
-                D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
-            )),
-        )?;
-        self.dc.SetTarget(&target);
-        self.target = Some(target);
-        Ok(())
+    fn shutdown(&mut self) {
+        games::remove_hook(self.foreground_hook);
+        self.pointer.evict(CursorKey {
+            style: usize::MAX,
+            color: 0,
+            dpi: 0,
+            step: 0,
+        });
     }
 
-    unsafe fn resize(&mut self, width: u32, height: u32) -> Result<()> {
-        self.dc.SetTarget(None);
-        self.target = None;
-        self.swap_chain.ResizeBuffers(
-            2,
-            width,
-            height,
-            DXGI_FORMAT_UNKNOWN,
-            DXGI_SWAP_CHAIN_FLAG(DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT.0),
-        )?;
-        self.size = (width, height);
-        self.bind_target()
+    fn waitable(&self) -> Option<HANDLE> {
+        self.gfx.as_ref().map(|gfx| gfx.waitable)
     }
 
-    unsafe fn draw_toast(&self, toast: &Toast, color: u32, alpha: f32, scale: f32) -> Bounds {
-        let (pad, dot, gap) = (18.0 * scale, 5.0 * scale, 10.0 * scale);
-        let width = toast.width + pad * 2.0 + dot * 2.0 + gap;
-        let height = toast.height + 18.0 * scale;
-        let left = toast.centre - width / 2.0;
-        let top = toast.bottom - height;
-        let rect = D2D_RECT_F {
-            left,
-            top,
-            right: left + width,
-            bottom: top + height,
-        };
-        self.brush.SetColor(&rgba(0x1c1c22, 0.9 * alpha));
-        self.dc.FillRoundedRectangle(
-            &D2D1_ROUNDED_RECT {
-                rect,
-                radiusX: height / 2.0,
-                radiusY: height / 2.0,
-            },
-            &self.brush,
-        );
-        self.brush.SetColor(&rgba(color, alpha));
-        self.dc
-            .FillEllipse(&ellipse(left + pad + dot, top + height / 2.0, dot), &self.brush);
-        self.brush.SetColor(&rgba(0xffffff, alpha));
-        self.dc.DrawTextLayout(
-            Vector2 {
-                X: left + pad + dot * 2.0 + gap,
-                Y: top + (height - toast.height) / 2.0,
-            },
-            &toast.layout,
-            &self.brush,
-            D2D1_DRAW_TEXT_OPTIONS_NONE,
-        );
+    fn full(&self) -> Bounds {
         Bounds {
-            left,
-            top,
-            right: left + width,
-            bottom: top + height,
+            left: 0.0,
+            top: 0.0,
+            right: self.size.0 as f32,
+            bottom: self.size.1 as f32,
         }
     }
-}
 
-/// A glowing dot in the laser colour, like the real thing.
-unsafe fn dot_cursor(gfx: &Graphics, color: u32, scale: f32) -> Result<HICON> {
-    let size = (DOT_CURSOR_SIZE * scale).round() as u32;
-    let centre = size as f32 / 2.0;
-    render_icon(gfx, size, Some((size / 2, size / 2)), |dc| {
-        let stops = ID2D1RenderTarget::CreateGradientStopCollection(
-            dc,
-            &[
-                D2D1_GRADIENT_STOP {
-                    position: 0.0,
-                    color: rgba(color, 0.65),
-                },
-                D2D1_GRADIENT_STOP {
-                    position: 0.35,
-                    color: rgba(color, 0.35),
-                },
-                D2D1_GRADIENT_STOP {
-                    position: 1.0,
-                    color: rgba(color, 0.0),
-                },
-            ],
-            D2D1_GAMMA_2_2,
-            D2D1_EXTEND_MODE_CLAMP,
-        )?;
-        let glow = dc.CreateRadialGradientBrush(
-            &D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES {
-                center: Vector2 {
-                    X: centre,
-                    Y: centre,
-                },
-                gradientOriginOffset: Vector2::default(),
-                radiusX: centre,
-                radiusY: centre,
-            },
-            None,
-            &stops,
-        )?;
-        dc.FillEllipse(&ellipse(centre, centre, centre), &glow);
-        let solid = dc.CreateSolidColorBrush(&rgba(color, 1.0), None)?;
-        dc.FillEllipse(&ellipse(centre, centre, 5.0 * scale), &solid);
-        solid.SetColor(&rgba(0xffffff, 0.9));
-        dc.FillEllipse(&ellipse(centre, centre, 2.0 * scale), &solid);
-        Ok(())
-    })
-}
-
-/// Rasterises an SVG with Direct2D, so the cursor and tray icon stay sharp at any display scale.
-unsafe fn svg_icon(
-    gfx: &Graphics,
-    svg: &str,
-    size: u32,
-    hotspot: Option<(u32, u32)>,
-) -> Result<HICON> {
-    let stream = SHCreateMemStream(Some(svg.as_bytes()))
-        .ok_or_else(|| windows::core::Error::from(E_FAIL))?;
-    let dc5: ID2D1DeviceContext5 = gfx.dc.cast()?;
-    let document = dc5.CreateSvgDocument(
-        &stream,
-        D2D_SIZE_F {
-            width: size as f32,
-            height: size as f32,
-        },
-    )?;
-    render_icon(gfx, size, hotspot, |_| {
-        dc5.DrawSvgDocument(&document);
-        Ok(())
-    })
-}
-
-/// Draws into an offscreen bitmap and turns it into an icon, or a cursor if given a hotspot.
-unsafe fn render_icon(
-    gfx: &Graphics,
-    size: u32,
-    hotspot: Option<(u32, u32)>,
-    draw: impl FnOnce(&ID2D1DeviceContext) -> Result<()>,
-) -> Result<HICON> {
-    let extent = D2D_SIZE_U {
-        width: size,
-        height: size,
-    };
-    let canvas = gfx.dc.CreateBitmap(
-        extent,
-        None,
-        0,
-        &bitmap_properties(D2D1_BITMAP_OPTIONS_TARGET),
-    )?;
-    let readback = gfx.dc.CreateBitmap(
-        extent,
-        None,
-        0,
-        &bitmap_properties(D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW),
-    )?;
-    gfx.dc.SetTarget(&canvas);
-    gfx.dc.BeginDraw();
-    gfx.dc.Clear(Some(&D2D1_COLOR_F::default()));
-    let painted = draw(&gfx.dc);
-    let drawn = gfx.dc.EndDraw(None, None);
-    if let Some(target) = &gfx.target {
-        gfx.dc.SetTarget(target);
+    fn needs_frame(&self) -> bool {
+        self.shown && (self.dirty || self.animating())
     }
-    painted?;
-    drawn?;
-    readback.CopyFromBitmap(None, &canvas, None)?;
 
-    let header = BITMAPINFOHEADER {
-        biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-        biWidth: size as i32,
-        biHeight: -(size as i32),
-        biPlanes: 1,
-        biBitCount: 32,
-        biCompression: BI_RGB.0,
-        ..Default::default()
-    };
-    let mut bits = std::ptr::null_mut();
-    let color = CreateDIBSection(
-        None,
-        &BITMAPINFO {
-            bmiHeader: header,
-            ..Default::default()
-        },
-        DIB_RGB_COLORS,
-        &mut bits,
-        None,
-        0,
-    )?;
-    let mapped = readback.Map(D2D1_MAP_OPTIONS_READ)?;
-    let row_bytes = size as usize * 4;
-    for row in 0..size as usize {
-        let source =
-            std::slice::from_raw_parts(mapped.bits.add(row * mapped.pitch as usize), row_bytes);
-        let destination =
-            std::slice::from_raw_parts_mut((bits as *mut u8).add(row * row_bytes), row_bytes);
-        // Direct2D hands back premultiplied pixels; icon bitmaps want straight alpha.
-        for (from, to) in source
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .zip(destination.as_chunks_mut::<4>().0)
-        {
-            let alpha = from[3];
-            for (channel, value) in to.iter_mut().take(3).enumerate() {
-                *value = if alpha == 0 {
-                    0
-                } else {
-                    (u32::from(from[channel]) * 255 / u32::from(alpha)).min(255) as u8
-                };
+    /// Something on screen changes by itself, without new input.
+    fn animating(&self) -> bool {
+        self.strokes.iter().any(|drawn| !drawn.stroke.look.ink)
+            || !self.ripples.is_empty()
+            || self.toast.is_some()
+            || !self.clearing.is_empty()
+    }
+
+    /// Anything left to show once the laser is off: kept strokes, a fading tail, a notice.
+    fn has_content(&self) -> bool {
+        !self.strokes.is_empty()
+            || !self.ripples.is_empty()
+            || self.toast.is_some()
+            || !self.clearing.is_empty()
+    }
+
+    fn update_ink_visible(&self) {
+        let visible = self.strokes.iter().any(|drawn| drawn.stroke.look.ink);
+        if INK_VISIBLE.swap(visible, Ordering::Relaxed) != visible {
+            sync_hotkeys();
+        }
+    }
+
+    /// Marks an area whose kept ink changed, for both buffers and the next present.
+    fn damage_ink(&mut self, bounds: Bounds) {
+        for region in &mut self.ink_damage {
+            region.add(bounds);
+        }
+        self.present_damage.add(bounds);
+        self.dirty = true;
+    }
+
+    /// Throws the ink layer away and bakes every kept stroke again on the next frame.
+    fn rebake(&mut self) {
+        if let Some(gfx) = &mut self.gfx {
+            gfx.drop_ink();
+        }
+        for drawn in &mut self.strokes {
+            drawn.baked = false;
+        }
+        let full = self.full();
+        self.damage_ink(full);
+    }
+
+    fn raise(&self) {
+        unsafe {
+            let _ = SetWindowPos(
+                self.hwnd,
+                Some(HWND_TOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
+            );
+        }
+    }
+
+    fn set_on(&mut self, on: bool) {
+        LASER_ON.store(on, Ordering::Relaxed);
+        self.finish();
+        self.ripples.clear();
+        self.toast = None;
+        self.dirty = true;
+        unsafe {
+            set_click_through(self.hwnd, !on);
+            if on {
+                self.notify("Laser on");
+                self.show();
+                // Another always-on-top window (a slide show, say) may have been raised since.
+                self.raise();
+                self.take_mouse_from_game();
+                self.pointer.ignited = Some(Instant::now());
+                self.refresh_cursor();
+                SetCursor(Some(HCURSOR(CURSOR.load(Ordering::Relaxed) as _)));
+            } else {
+                self.notify("Laser off");
+                let _ = ReleaseCapture();
+                if let Some(game) = self.game.take() {
+                    games::give_back(self.hwnd, game);
+                }
+                if !self.has_content() {
+                    self.hide();
+                }
             }
-            to[3] = alpha;
+        }
+        self.update_ink_visible();
+    }
+
+    fn take_mouse_from_game(&mut self) {
+        if games::exclusive_fullscreen() && !self.warned_exclusive {
+            self.warned_exclusive = true;
+            ui::balloon(
+                "Can't draw over this game",
+                "It's running in exclusive fullscreen. Switch it to Fullscreen Windowed \
+                 (borderless) in its video settings.",
+            );
+        }
+        if !settings::get().game_focus {
+            return;
+        }
+        let (x, y, width, height) = unsafe { virtual_screen() };
+        let screen = RECT {
+            left: x,
+            top: y,
+            right: x + width,
+            bottom: y + height,
+        };
+        if let Some(game) = games::mouse_capturing_window(self.hwnd, screen) {
+            if games::take_focus(self.hwnd) {
+                self.game = Some(game);
+            }
         }
     }
-    readback.Unmap()?;
 
-    let mask = CreateBitmap(size as i32, size as i32, 1, 1, None);
-    let (x, y) = hotspot.unwrap_or_default();
-    let icon = CreateIconIndirect(&ICONINFO {
-        fIcon: hotspot.is_none().into(),
-        xHotspot: x,
-        yHotspot: y,
-        hbmMask: mask,
-        hbmColor: color,
-    });
-    let _ = DeleteObject(color.into());
-    let _ = DeleteObject(mask.into());
-    icon
+    /// Paints before showing, so an old frame never flashes up.
+    fn show(&mut self) {
+        if self.shown {
+            return;
+        }
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), TIMER_TRIM);
+        }
+        if let Some(gfx) = &mut self.gfx {
+            if gfx.trimmed {
+                if unsafe { gfx.untrim() }.is_err() {
+                    self.lose_device();
+                }
+                self.presented = false;
+            }
+        }
+        self.render();
+        unsafe {
+            let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
+        }
+        self.shown = true;
+    }
+
+    /// Hiding starts a timer that hands the screen-sized buffers back if nothing shows up soon.
+    fn hide(&mut self) {
+        unsafe {
+            let _ = ShowWindow(self.hwnd, SW_HIDE);
+            SetTimer(Some(self.hwnd), TIMER_TRIM, TRIM_MS, None);
+        }
+        self.shown = false;
+    }
+
+    fn trim(&mut self) {
+        if self.shown || self.has_content() {
+            return;
+        }
+        if let Some(gfx) = &mut self.gfx {
+            if unsafe { gfx.trim() }.is_err() {
+                self.lose_device();
+            }
+        }
+        self.presented = false;
+    }
+
+    /// The GPU was reset or removed: rebuild everything from scratch. The strokes are only
+    /// geometry, so nothing the user drew is lost.
+    fn lose_device(&mut self) {
+        self.gfx = None;
+        unsafe {
+            SetTimer(Some(self.hwnd), TIMER_RECOVER, RECOVER_MS / 4, None);
+        }
+    }
+
+    fn recover(&mut self) {
+        let (width, height) = self.size;
+        match unsafe { Graphics::new(self.hwnd, width, height) } {
+            Ok(gfx) => {
+                self.gfx = Some(gfx);
+                self.presented = false;
+                self.stale = Default::default();
+                self.rebake();
+                ui::settings_changed();
+            }
+            Err(_) => unsafe {
+                SetTimer(Some(self.hwnd), TIMER_RECOVER, RECOVER_MS, None);
+            },
+        }
+    }
+
+    /// A pill near the bottom of the monitor the cursor is on, if the user wants them.
+    fn notify(&mut self, text: &str) {
+        if !settings::get().indicator {
+            return;
+        }
+        let mut cursor = POINT::default();
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        unsafe {
+            let _ = GetCursorPos(&mut cursor);
+            let _ = GetMonitorInfoW(MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST), &mut info);
+        }
+        let scale = monitor_scale(cursor);
+        let work = info.rcWork;
+        let centre = ((work.left + work.right) / 2 - self.origin.0) as f32;
+        let bottom = (work.bottom - self.origin.1) as f32 - 72.0 * scale;
+        let Some(gfx) = &self.gfx else { return };
+        self.toast = unsafe { gfx.make_toast(text, centre, bottom, scale) }.map(|toast| (toast, Instant::now()));
+        self.dirty = true;
+        self.show();
+    }
+
+    fn screen_point(&self, (x, y): (f32, f32)) -> POINT {
+        POINT {
+            x: x as i32 + self.origin.0,
+            y: y as i32 + self.origin.1,
+        }
+    }
+
+    fn lock_held(&mut self) -> Lock {
+        let alt = key_held(VK_MENU);
+        if !alt {
+            self.alt_masked = false;
+        }
+        Lock::from_modifiers(alt, key_held(VK_SHIFT))
+    }
+
+    /// The first time a line starts during a press of Alt, stops the foreground app from
+    /// treating the Alt release as a request for its menu or a keyboard-layout switch.
+    fn mask_alt(&mut self) {
+        if !self.alt_masked {
+            self.alt_masked = true;
+            tap_mask_key();
+        }
+    }
+
+    fn begin(&mut self, point: (f32, f32)) {
+        if !laser_on() {
+            return;
+        }
+        self.finish();
+        let screen = self.screen_point(point);
+        let time = unsafe { GetMessageTime() } as u32;
+        let now = Instant::now();
+        let at = sample_instant(time, unsafe { GetTickCount() }, now);
+        let stroke = Stroke::new(
+            Point {
+                x: point.0,
+                y: point.1,
+                at,
+            },
+            settings::get().look,
+            monitor_scale(screen),
+        );
+        self.next_id += 1;
+        self.strokes.push(Drawn {
+            id: self.next_id,
+            stroke,
+            baked: false,
+        });
+        self.undo.push(Edit::Added(self.next_id));
+        self.redo.clear();
+        self.sample = Some(Sample {
+            x: screen.x,
+            y: screen.y,
+            time,
+        });
+        self.lock = self.lock_held();
+        self.anchor = point;
+        if self.lock != Lock::None {
+            self.mask_alt();
+        }
+        self.drawing = true;
+        self.dirty = true;
+        self.pointer.pressed = Some((true, now));
+        self.refresh_cursor();
+        self.update_ink_visible();
+    }
+
+    /// Adds the mouse's path since the last message, including the samples Windows coalesced
+    /// away, so a fast flick stays round instead of turning into a polygon.
+    fn extend(&mut self, point: (f32, f32)) {
+        if !self.drawing {
+            return;
+        }
+        let lock = self.lock_held();
+        match constrain::change(self.lock, lock) {
+            Change::Keep => {}
+            Change::Anchor => {
+                self.anchor = self
+                    .strokes
+                    .last()
+                    .and_then(|drawn| drawn.stroke.points.last())
+                    .map_or(point, |last| (last.x, last.y));
+                self.mask_alt();
+            }
+            Change::Restart => {
+                self.finish();
+                self.begin(point);
+                return;
+            }
+        }
+        self.lock = lock;
+        let screen = self.screen_point(point);
+        let time = unsafe { GetMessageTime() } as u32;
+        let (now, ticks) = (Instant::now(), unsafe { GetTickCount() });
+        let current = Sample {
+            x: screen.x,
+            y: screen.y,
+            time,
+        };
+        for sample in self.history_since(current) {
+            self.append(sample, now, ticks);
+        }
+        self.sample = Some(current);
+    }
+
+    /// The samples between the last one taken and `current`, oldest first, ending with `current`.
+    fn history_since(&self, current: Sample) -> Vec<Sample> {
+        let query = MOUSEMOVEPOINT {
+            x: current.x & 0xffff,
+            y: current.y & 0xffff,
+            time: current.time,
+            dwExtraInfo: 0,
+        };
+        let mut raw = [MOUSEMOVEPOINT::default(); 64];
+        let count = unsafe {
+            GetMouseMovePointsEx(
+                std::mem::size_of::<MOUSEMOVEPOINT>() as u32,
+                &query,
+                &mut raw,
+                GMMP_USE_DISPLAY_POINTS,
+            )
+        };
+        let Ok(count) = usize::try_from(count) else {
+            return vec![current];
+        };
+        // Newest first: walk back until reaching what was already taken.
+        let mut samples: Vec<Sample> = raw[..count]
+            .iter()
+            .map(|point| Sample {
+                x: unwrap_coordinate(point.x),
+                y: unwrap_coordinate(point.y),
+                time: point.time,
+            })
+            .take_while(|sample| {
+                self.sample.is_none_or(|last| {
+                    *sample != last && sample.time.wrapping_sub(last.time) < 0x8000_0000
+                })
+            })
+            .collect();
+        samples.reverse();
+        if samples.last() != Some(&current) {
+            samples.push(current);
+        }
+        samples
+    }
+
+    fn append(&mut self, sample: Sample, now: Instant, ticks: u32) {
+        let (lock, anchor) = (self.lock, self.anchor);
+        let origin = self.origin;
+        let Some(drawn) = self.strokes.last_mut() else {
+            return;
+        };
+        let stroke = &mut drawn.stroke;
+        let (x, y) = lock.project(
+            ((sample.x - origin.0) as f32, (sample.y - origin.1) as f32),
+            anchor,
+        );
+        if stroke
+            .points
+            .last()
+            .is_some_and(|last| (x - last.x).hypot(y - last.y) < MIN_STEP * stroke.scale)
+        {
+            return;
+        }
+        let at = sample_instant(sample.time, ticks, now);
+        let at = stroke.points.last().map_or(at, |last| at.max(last.at));
+        stroke.points.push(Point { x, y, at });
+        self.dirty = true;
+    }
+
+    fn finish(&mut self) {
+        if !self.drawing {
+            return;
+        }
+        self.drawing = false;
+        self.sample = None;
+        self.lock = Lock::None;
+        self.dirty = true;
+        self.pointer.pressed = Some((false, Instant::now()));
+        self.refresh_cursor();
+    }
+
+    fn remove_stroke(&mut self, id: u64) -> Option<Drawn> {
+        let index = self.strokes.iter().position(|drawn| drawn.id == id)?;
+        let drawn = self.strokes.remove(index);
+        if drawn.baked {
+            self.rebake();
+        }
+        Some(drawn)
+    }
+
+    fn undo(&mut self) {
+        if self.drawing {
+            return;
+        }
+        let now = Instant::now();
+        while let Some(edit) = self.undo.pop() {
+            match edit {
+                Edit::Added(id) => {
+                    // A fading stroke that has already gone has nothing left to undo.
+                    if let Some(drawn) = self.remove_stroke(id) {
+                        self.redo.push(Redo::Stroke(drawn));
+                        break;
+                    }
+                }
+                Edit::Cleared(list) => {
+                    let restored: Vec<Drawn> = list
+                        .into_iter()
+                        .filter(|drawn| !drawn.stroke.expired(now))
+                        .map(|drawn| Drawn {
+                            baked: false,
+                            ..drawn
+                        })
+                        .collect();
+                    if restored.is_empty() {
+                        continue;
+                    }
+                    self.clearing.clear();
+                    self.strokes.extend(restored);
+                    self.redo.push(Redo::Clear);
+                    break;
+                }
+            }
+        }
+        self.dirty = true;
+        self.update_ink_visible();
+    }
+
+    fn redo(&mut self) {
+        if self.drawing {
+            return;
+        }
+        match self.redo.pop() {
+            Some(Redo::Stroke(mut drawn)) => {
+                // A fading stroke fades again from now rather than vanishing at once.
+                if let Some(last) = drawn.stroke.points.last().map(|point| point.at) {
+                    let shift = Instant::now().saturating_duration_since(last);
+                    for point in &mut drawn.stroke.points {
+                        point.at += shift;
+                    }
+                }
+                drawn.baked = false;
+                self.undo.push(Edit::Added(drawn.id));
+                self.strokes.push(drawn);
+            }
+            Some(Redo::Clear) => {
+                let redo = std::mem::take(&mut self.redo);
+                self.clear(|_| true);
+                self.redo = redo;
+            }
+            None => return,
+        }
+        self.dirty = true;
+        self.update_ink_visible();
+    }
+
+    /// Fades out the strokes `which` picks, as one undoable step.
+    fn clear(&mut self, which: impl Fn(&Stroke) -> bool) {
+        self.finish();
+        let (gone, kept): (Vec<Drawn>, Vec<Drawn>) = std::mem::take(&mut self.strokes)
+            .into_iter()
+            .partition(|drawn| which(&drawn.stroke));
+        self.strokes = kept;
+        if gone.is_empty() {
+            return;
+        }
+        if gone.iter().any(|drawn| drawn.baked) {
+            self.rebake();
+        }
+        self.clearing = gone.iter().map(|drawn| drawn.stroke.clone()).collect();
+        self.cleared_at = Instant::now();
+        self.undo.push(Edit::Cleared(gone));
+        self.redo.clear();
+        self.dirty = true;
+        self.update_ink_visible();
+    }
+
+    fn ripple(&mut self, (x, y): (f32, f32)) {
+        if settings::get().ripples {
+            let scale = monitor_scale(self.screen_point((x, y)));
+            self.ripples.push(Ripple {
+                x,
+                y,
+                scale,
+                at: Instant::now(),
+            });
+            self.dirty = true;
+        }
+    }
+
+    fn resize_by(&mut self, delta: i16) {
+        let mut settings = settings::get();
+        let width = settings.look.width as i32 + i32::from(delta.signum());
+        settings.look.width = width.clamp(2, 24) as u32;
+        settings::set(settings);
+        settings::save();
+        self.notify(&format!("Thickness  {} px", settings.look.width));
+    }
+
+    /// Monitors were added, removed or rearranged. Strokes keep their place on screen.
+    fn fit_to_screen(&mut self) {
+        let (x, y, width, height) = unsafe { virtual_screen() };
+        let (dx, dy) = ((self.origin.0 - x) as f32, (self.origin.1 - y) as f32);
+        for drawn in &mut self.strokes {
+            drawn.stroke.translate(dx, dy);
+        }
+        for stroke in &mut self.clearing {
+            stroke.translate(dx, dy);
+        }
+        for ripple in &mut self.ripples {
+            ripple.x += dx;
+            ripple.y += dy;
+        }
+        self.toast = None;
+        self.origin = (x, y);
+        self.size = (width as u32, height as u32);
+        unsafe {
+            let _ = SetWindowPos(
+                self.hwnd,
+                Some(HWND_TOPMOST),
+                x,
+                y,
+                width,
+                height,
+                SWP_NOACTIVATE,
+            );
+        }
+        if let Some(gfx) = &mut self.gfx {
+            if unsafe { gfx.resize(width as u32, height as u32) }.is_err() {
+                self.lose_device();
+            }
+        }
+        self.presented = false;
+        self.stale = Default::default();
+        self.rebake();
+    }
+
+    /// Picks the cursor for the current style, colour, monitor and animation frame, rendering it
+    /// the first time it's needed. Keeps a timer running only while the cursor is animating.
+    fn refresh_cursor(&mut self) {
+        let settings = settings::get();
+        let mut position = POINT::default();
+        if unsafe { GetCursorPos(&mut position) }.is_err() {
+            return;
+        }
+        let now = Instant::now();
+        let (zoom, animating) = self.pointer.zoom(now);
+        unsafe {
+            if animating && laser_on() {
+                SetTimer(Some(self.hwnd), TIMER_CURSOR, CURSOR_FRAME_MS, None);
+            } else {
+                let _ = KillTimer(Some(self.hwnd), TIMER_CURSOR);
+            }
+        }
+        let key = CursorKey {
+            style: settings.cursor,
+            color: settings.look.color,
+            dpi: monitor_dpi(position),
+            step: zoom_step(zoom),
+        };
+        if self.pointer.current == Some(key) {
+            return;
+        }
+        let cached = self.pointer.cursors.iter().find(|(cached, _)| *cached == key);
+        let cursor = match cached {
+            Some((_, cursor)) => *cursor,
+            None => {
+                let Some(cursor) = self.render_cursor(key) else {
+                    return;
+                };
+                self.pointer.evict(key);
+                self.pointer.cursors.push((key, cursor));
+                cursor
+            }
+        };
+        self.pointer.current = Some(key);
+        CURSOR.store(cursor.0 as isize, Ordering::Relaxed);
+        if laser_on() {
+            unsafe {
+                SetCursor(Some(cursor));
+            }
+        }
+    }
+
+    fn render_cursor(&self, key: CursorKey) -> Option<HCURSOR> {
+        let style = &cursors::STYLES[key.style];
+        let scale = key.dpi as f32 / 96.0;
+        let size = (cursors::SIZE * scale).round() as u32;
+        let hotspot = (style.hotspot.0 * scale, style.hotspot.1 * scale);
+        let zoom = ZOOM_MIN + f32::from(key.step) * ZOOM_STEP;
+        let rendered = self.gfx.as_ref().and_then(|gfx| unsafe {
+            gfx.svg_icon(&style.svg(key.color), size, Some(hotspot), zoom)
+                .ok()
+        });
+        match rendered {
+            Some(icon) => Some(HCURSOR(icon.0)),
+            // Without a GPU for now, a plain crosshair beats no cursor at all.
+            None => unsafe { LoadCursorW(None, IDC_CROSS).ok() },
+        }
+    }
+
+    /// Bakes finished kept strokes into the ink layer, so they cost nothing to keep on screen.
+    fn bake_finished(&mut self) {
+        let Some(gfx) = &mut self.gfx else { return };
+        let last = self.strokes.len().wrapping_sub(1);
+        let mut damaged = Vec::new();
+        for (index, drawn) in self.strokes.iter_mut().enumerate() {
+            let in_progress = self.drawing && index == last;
+            if drawn.baked || !drawn.stroke.look.ink || in_progress {
+                continue;
+            }
+            let (scratch, stroke) = (&mut self.scratch, &mut drawn.stroke);
+            let baked = unsafe {
+                gfx.bake(|gfx| {
+                    stroke::draw(&gfx.factory, &gfx.dc, &gfx.brush, stroke, Instant::now(), 1.0, scratch);
+                })
+            };
+            if baked.is_err() {
+                break;
+            }
+            drawn.baked = true;
+            damaged.extend(drawn.stroke.bounds());
+        }
+        for bounds in damaged {
+            self.damage_ink(bounds);
+        }
+    }
+
+    fn render(&mut self) {
+        let now = Instant::now();
+        let color = settings::get().look.color;
+        self.ripples
+            .retain(|ripple| now.duration_since(ripple.at).as_secs_f32() < RIPPLE_SECS);
+        if self
+            .toast
+            .as_ref()
+            .is_some_and(|(_, at)| now.duration_since(*at).as_secs_f32() >= TOAST_SECS)
+        {
+            self.toast = None;
+        }
+        if now.duration_since(self.cleared_at).as_secs_f32() >= CLEAR_SECS {
+            self.clearing.clear();
+        }
+        let last = self.strokes.len().wrapping_sub(1);
+        let drawing = self.drawing;
+        let mut index = 0;
+        self.strokes.retain(|drawn| {
+            index += 1;
+            !drawn.stroke.expired(now) || (drawing && index - 1 == last)
+        });
+        self.bake_finished();
+        let Some(gfx) = &self.gfx else { return };
+        if gfx.trimmed {
+            return;
+        }
+        let size = gfx.size();
+
+        // What moves this frame, and where.
+        let mut moving = Region::default();
+        let live: Vec<usize> = (0..self.strokes.len())
+            .filter(|&i| !self.strokes[i].baked)
+            .collect();
+        for &i in &live {
+            if let Some(bounds) = self.strokes[i].stroke.bounds() {
+                moving.add(bounds);
+            }
+        }
+        for stroke in &self.clearing {
+            if let Some(bounds) = stroke.bounds() {
+                moving.add(bounds);
+            }
+        }
+        for ripple in &self.ripples {
+            moving.add(ripple_bounds(ripple));
+        }
+        if let Some((toast, _)) = &self.toast {
+            moving.add(Graphics::toast_bounds(toast));
+        }
+
+        let back = self.back;
+        let mut repaint = Region::default();
+        if self.presented {
+            repaint.union(&self.stale[back]);
+            repaint.union(&self.ink_damage[back]);
+            repaint.union(&moving);
+        } else {
+            repaint.add(self.full());
+        }
+        let clear_fade = 1.0 - (now.duration_since(self.cleared_at).as_secs_f32() / CLEAR_SECS).min(1.0);
+
+        let drawn = unsafe {
+            gfx.dc.BeginDraw();
+            for area in repaint.rects() {
+                let area = inflate(area, 2.0);
+                let clip = rect_f(area);
+                gfx.dc.PushAxisAlignedClip(&clip, D2D1_ANTIALIAS_MODE_ALIASED);
+                gfx.dc.Clear(Some(&D2D1_COLOR_F::default()));
+                gfx.draw_ink(clip);
+                for &i in &live {
+                    let stroke = &mut self.strokes[i].stroke;
+                    if stroke.bounds().is_some_and(|bounds| intersects(bounds, area)) {
+                        stroke::draw(&gfx.factory, &gfx.dc, &gfx.brush, stroke, now, 1.0, &mut self.scratch);
+                    }
+                }
+                for stroke in &mut self.clearing {
+                    if stroke.bounds().is_some_and(|bounds| intersects(bounds, area)) {
+                        let ease = clear_fade * clear_fade;
+                        stroke::draw(&gfx.factory, &gfx.dc, &gfx.brush, stroke, self.cleared_at, ease, &mut self.scratch);
+                    }
+                }
+                for ripple in &self.ripples {
+                    if intersects(ripple_bounds(ripple), area) {
+                        let k = now.duration_since(ripple.at).as_secs_f32() / RIPPLE_SECS;
+                        let radius = (6.0 + 30.0 * (1.0 - (1.0 - k).powi(3))) * ripple.scale;
+                        gfx.brush.SetColor(&rgba(color, 0.9 * (1.0 - k).powf(1.5)));
+                        gfx.dc.DrawEllipse(
+                            &ellipse(ripple.x, ripple.y, radius),
+                            &gfx.brush,
+                            3.0 * ripple.scale * (1.0 - 0.5 * k),
+                            None,
+                        );
+                    }
+                }
+                if let Some((toast, at)) = &self.toast {
+                    if intersects(Graphics::toast_bounds(toast), area) {
+                        let age = now.duration_since(*at).as_secs_f32();
+                        let alpha = (age / 0.15).min(1.0).min((TOAST_SECS - age) / 0.3).max(0.0);
+                        gfx.draw_toast(toast, color, alpha);
+                    }
+                }
+                gfx.dc.PopAxisAlignedClip();
+            }
+            gfx.dc.EndDraw(None, None)
+        };
+
+        // Present only what differs from the frame now on screen.
+        let mut changed = moving;
+        changed.union(&self.stale[1 - back]);
+        changed.union(&self.present_damage);
+        let mut rects: Vec<RECT> = if self.presented {
+            changed
+                .rects()
+                .filter_map(|bounds| pixel_rect(inflate(bounds, 2.0), size))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if self.presented && rects.is_empty() {
+            rects.push(RECT {
+                left: 0,
+                top: 0,
+                right: 1,
+                bottom: 1,
+            });
+        }
+        let presented = drawn.and_then(|()| unsafe { gfx.present(&mut rects) });
+
+        self.stale[back] = moving;
+        self.ink_damage[back].clear();
+        self.present_damage.clear();
+        self.back ^= 1;
+        self.presented = true;
+        self.dirty = false;
+        if let Err(error) = presented {
+            if device_lost(&error) {
+                self.lose_device();
+            }
+        }
+        self.update_ink_visible();
+        if !laser_on() && !self.has_content() && self.shown {
+            self.hide();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mouse_history_coordinates_unwrap_to_negative_monitors() {
+        assert_eq!(unwrap_coordinate(100), 100);
+        assert_eq!(unwrap_coordinate(65536 - 1920), -1920);
+    }
+
+    #[test]
+    fn sample_times_never_run_ahead_or_far_behind() {
+        let now = Instant::now();
+        assert_eq!(sample_instant(1000, 1000, now), now);
+        assert_eq!(now.duration_since(sample_instant(990, 1000, now)), Duration::from_millis(10));
+        // A stamp from the future, or wrapped around, is treated as at most a second old.
+        assert!(now.duration_since(sample_instant(2000, 1000, now)) <= Duration::from_secs(1));
+    }
+
+    #[test]
+    fn idle_cursor_zoom_is_exactly_one() {
+        assert_eq!(ZOOM_MIN + f32::from(zoom_step(1.0)) * ZOOM_STEP, 1.0);
+        assert_eq!(zoom_step(0.0), 0);
+        assert_eq!(zoom_step(5.0), 20);
+    }
+
+    #[test]
+    fn ignition_overshoots_then_settles() {
+        assert!((back_out(0.0)).abs() < 1e-6);
+        assert!((back_out(1.0) - 1.0).abs() < 1e-6);
+        assert!((0..20).map(|i| back_out(i as f32 / 20.0)).fold(0.0, f32::max) > 1.0);
+    }
+
+    #[test]
+    fn dirty_rects_are_clamped_to_the_buffer() {
+        let bounds = Bounds {
+            left: -10.0,
+            top: 5.5,
+            right: 50.2,
+            bottom: 2000.0,
+        };
+        let rect = pixel_rect(bounds, (40, 100)).unwrap();
+        assert_eq!((rect.left, rect.top, rect.right, rect.bottom), (0, 5, 40, 100));
+        assert!(pixel_rect(Bounds::around(-50.0, -50.0, 5.0), (40, 100)).is_none());
+    }
 }

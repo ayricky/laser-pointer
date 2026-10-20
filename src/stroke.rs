@@ -18,10 +18,59 @@ pub const MIN_STEP: f32 = 2.0;
 const CURVE_STEP: f32 = 3.0;
 const CAP_STEPS: usize = 8;
 
+#[derive(Clone, Copy, Debug)]
 pub struct Point {
     pub x: f32,
     pub y: f32,
     pub at: Instant,
+}
+
+#[derive(Clone, Debug)]
+pub struct Stroke {
+    pub points: Vec<Point>,
+    /// Captured when the stroke began, so switching pens never restyles what is already drawn.
+    pub look: Look,
+    /// DPI scale of the monitor it was drawn on.
+    pub scale: f32,
+    /// A corrected shape fades out all at once instead of shrinking along its trail.
+    pub whole: bool,
+}
+
+impl Stroke {
+    pub fn new(point: Point, look: Look, scale: f32) -> Self {
+        Self {
+            points: vec![point],
+            look,
+            scale,
+            whole: false,
+        }
+    }
+
+    /// Where it could paint, glow included, without building its geometry.
+    pub fn bounds(&self) -> Option<Bounds> {
+        let first = self.points.first()?;
+        let reach = self.look.width as f32 / 2.0 * self.scale * layers(self.look.style)[0].0 + 2.0;
+        let mut bounds = Bounds::around(first.x, first.y, reach);
+        for point in &self.points {
+            bounds = bounds.union(Bounds::around(point.x, point.y, reach));
+        }
+        Some(bounds)
+    }
+
+    /// Fading strokes are done once every point has aged out.
+    pub fn expired(&self, now: Instant) -> bool {
+        !self.look.ink
+            && self.points.last().is_none_or(|last| {
+                now.duration_since(last.at).as_millis() >= u128::from(self.look.fade_ms)
+            })
+    }
+
+    pub fn translate(&mut self, dx: f32, dy: f32) {
+        for point in &mut self.points {
+            point.x += dx;
+            point.y += dy;
+        }
+    }
 }
 
 /// Buffers reused frame to frame so drawing doesn't allocate.
@@ -94,21 +143,27 @@ fn layers(style: u32) -> &'static [(f32, f32, f32)] {
     }
 }
 
-/// Drops points that have faded out, then fills what is left. Returns the area drawn on.
-#[allow(clippy::too_many_arguments)]
+/// Drops points that have faded out, then fills what is left, `fade` times as opaque as usual.
+/// Returns the area drawn on.
 pub fn draw(
     factory: &ID2D1Factory,
     target: &ID2D1RenderTarget,
     brush: &ID2D1SolidColorBrush,
-    points: &mut Vec<Point>,
+    stroke: &mut Stroke,
     now: Instant,
-    look: &Look,
-    scale: f32,
+    fade: f32,
     scratch: &mut Scratch,
 ) -> Option<Bounds> {
+    let Stroke {
+        points,
+        look,
+        scale,
+        whole,
+    } = stroke;
+    let (look, scale) = (*look, *scale);
     let base = look.width as f32 / 2.0 * scale;
-    radii(points, now, base, look, scale, &mut scratch.radii);
-    if !look.ink {
+    radii(points, now, base, &look, scale, *whole, &mut scratch.radii);
+    if !look.ink && !*whole {
         let faded = scratch.radii.iter().take_while(|&&radius| radius < 0.1).count();
         // Keep one faded point so the tail still tapers all the way to nothing.
         let drop = if faded == points.len() {
@@ -131,7 +186,7 @@ pub fn draw(
         &mut scratch.widths,
     );
 
-    let opacity = look.opacity as f32 / 100.0;
+    let opacity = look.opacity as f32 / 100.0 * fade;
     let mut bounds = None;
     for &(width, alpha, white) in layers(look.style) {
         scratch.layer.clear();
@@ -154,13 +209,14 @@ fn ease_out(k: f32) -> f32 {
 
 /// Thinner the older a point is and the further it sits behind the head, whichever is smaller.
 /// Measured in distance rather than point count, so the tail is the same length however fast
-/// the mouse reports.
+/// the mouse reports. A whole shape thins evenly, by the age of its newest point.
 fn radii(
     points: &[Point],
     now: Instant,
     base: f32,
     look: &Look,
     scale: f32,
+    whole: bool,
     radii: &mut Vec<f32>,
 ) {
     radii.clear();
@@ -168,8 +224,14 @@ fn radii(
     if look.ink {
         return;
     }
-    let trail = look.trail as f32 * scale;
     let fade = look.fade_ms as f32 / 1000.0;
+    if whole {
+        let newest = points.iter().map(|point| point.at).max();
+        let age = newest.map_or(0.0, |at| 1.0 - now.duration_since(at).as_secs_f32() / fade);
+        radii.fill(base * ease_out(age.max(0.0)));
+        return;
+    }
+    let trail = look.trail as f32 * scale;
     let mut behind = 0.0;
     for index in (0..points.len()).rev() {
         let point = &points[index];

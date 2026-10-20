@@ -4,11 +4,12 @@
 use std::f32::consts::TAU;
 use std::time::{Duration, Instant};
 
-use windows::core::{w, Result, BOOL, PCWSTR};
+use windows::core::{w, Interface, Result, BOOL, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HWND};
-use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D_RECT_F, D2D_SIZE_U};
+use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D_RECT_F, D2D_SIZE_F, D2D_SIZE_U};
 use windows::Win32::Graphics::Direct2D::{
-    D2D1CreateFactory, ID2D1Factory, ID2D1HwndRenderTarget, ID2D1SolidColorBrush,
+    D2D1CreateFactory, ID2D1DeviceContext5, ID2D1Factory, ID2D1RenderTarget,
+    ID2D1SolidColorBrush, ID2D1SvgDocument,
     D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_ELLIPSE,
     D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_HWND_RENDER_TARGET_PROPERTIES,
     D2D1_PRESENT_OPTIONS_NONE, D2D1_RENDER_TARGET_PROPERTIES, D2D1_ROUNDED_RECT,
@@ -25,22 +26,24 @@ use windows::Win32::Graphics::DirectWrite::{
     DWRITE_WORD_WRAPPING_WRAP,
 };
 use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
+use windows::Win32::UI::Shell::SHCreateMemStream;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN, VIRTUAL_KEY, VK_BACK, VK_CONTROL,
     VK_ESCAPE, VK_F1, VK_F24, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_RCONTROL,
     VK_RETURN, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT, VK_TAB,
 };
-use windows_numerics::Vector2;
+use windows_numerics::{Matrix3x2, Vector2};
 
 use crate::settings::{
     self, Binding, Command, Look, Preset, Settings, Slot, MAX_NAME, MAX_PRESETS, STYLE_GLOW,
     STYLE_NAMES, STYLE_NEON, STYLE_SOLID,
 };
-use crate::stroke::{self, rgba, Point, Scratch};
+use crate::cursors::{self, STYLES as CURSOR_STYLES};
+use crate::stroke::{self, rgba, Point, Scratch, Stroke};
 use crate::ui::shortcut_name;
 
 pub const WIDTH: f32 = 420.0;
-pub const HEIGHT: f32 = 600.0;
+pub const HEIGHT: f32 = 636.0;
 const MARGIN: f32 = 20.0;
 const INNER: f32 = WIDTH - 2.0 * MARGIN;
 const CONTENT_TOP: f32 = 118.0;
@@ -75,7 +78,17 @@ const FADE: usize = 2;
 const TRAIL: usize = 3;
 const SLIDER_TOP: f32 = 414.0;
 
-const SLIDERS: [SliderDef; 5] = [
+fn snap_name(value: i32) -> String {
+    match value {
+        0 => "Off",
+        1..=3 => "Gentle",
+        4..=6 => "Medium",
+        _ => "Strong",
+    }
+    .into()
+}
+
+const SLIDERS: [SliderDef; 6] = [
     SliderDef {
         label: "Thickness",
         range: (2, 24),
@@ -111,6 +124,14 @@ const SLIDERS: [SliderDef; 5] = [
         set: |s, v| s.smoothing = v as u32,
         show: |v| v.to_string(),
     },
+    // How readily a finished stroke straightens into a line, circle, box or arrow.
+    SliderDef {
+        label: "Shape snap",
+        range: (0, 10),
+        get: |s| (s.snap / 10) as i32,
+        set: |s, v| s.snap = v as u32 * 10,
+        show: snap_name,
+    },
 ];
 const TRACK_X: f32 = 128.0;
 const TRACK_W: f32 = 208.0;
@@ -132,12 +153,6 @@ const TOGGLES: [ToggleDef; 5] = [
         set: |s, v| s.look.ink = v,
     },
     ToggleDef {
-        title: "Laser dot cursor",
-        detail: "A glowing dot instead of the pen",
-        get: |s| s.dot_cursor,
-        set: |s, v| s.dot_cursor = v,
-    },
-    ToggleDef {
         title: "Click ripples",
         detail: "Show where right-clicks land",
         get: |s| s.ripples,
@@ -148,6 +163,12 @@ const TOGGLES: [ToggleDef; 5] = [
         detail: "Confirm toggles, presets and size changes",
         get: |s| s.indicator,
         set: |s, v| s.indicator = v,
+    },
+    ToggleDef {
+        title: "Pause games while drawing",
+        detail: "Take the mouse from a game, and hand it back after",
+        get: |s| s.game_focus,
+        set: |s, v| s.game_focus = v,
     },
     ToggleDef {
         title: "Start with Windows",
@@ -177,6 +198,7 @@ enum Widget {
     NewPreset,
     Binding(Slot),
     Unbind(Slot),
+    Cursor(usize),
     Toggle(usize),
     Reset,
     Quit,
@@ -274,6 +296,10 @@ impl Theme {
         // Stored as 0xAABBGGRR.
         let accent = read_dword(w!(r"Software\Microsoft\Windows\DWM"), w!("AccentColor"))
             .map(|abgr| (abgr & 0xff) << 16 | (abgr & 0xff00) | (abgr >> 16) & 0xff);
+        Self::new(light, accent)
+    }
+
+    fn new(light: bool, accent: Option<u32>) -> Self {
         if light {
             let accent = accent.map_or(hex(0x005fb8), |rgb| mix(hex(rgb), hex(0x000000), 0.12));
             Self {
@@ -358,6 +384,8 @@ enum Line {
     Note,
     Section(&'static str),
     Item(Slot, String, &'static str),
+    /// A gesture that can't be rebound, listed so it can be found: label, keys, when.
+    Fixed(&'static str, &'static str, &'static str),
 }
 
 const ROW: f32 = 44.0;
@@ -366,14 +394,18 @@ fn line_height(line: &Line) -> f32 {
     match line {
         Line::Note => 38.0,
         Line::Section(_) => 30.0,
-        Line::Item(..) => ROW,
+        Line::Item(..) | Line::Fixed(..) => ROW,
     }
 }
+
+/// The cursor picker on the Options tab, above the switches.
+const CURSOR_SWATCH: f32 = 40.0;
+const TOGGLES_TOP: f32 = CONTENT_TOP + 80.0;
 
 pub struct Panel {
     factory: ID2D1Factory,
     dwrite: IDWriteFactory,
-    target: ID2D1HwndRenderTarget,
+    target: ID2D1RenderTarget,
     brush: ID2D1SolidColorBrush,
     fonts: Fonts,
     pub theme: Theme,
@@ -388,6 +420,9 @@ pub struct Panel {
     autostart: bool,
     started: Instant,
     preview: Preview,
+    /// For drawing cursor styles; None before Windows 10 1703, which lacks SVG support.
+    svg: Option<ID2D1DeviceContext5>,
+    cursor_documents: std::cell::RefCell<Vec<((usize, u32), ID2D1SvgDocument)>>,
 }
 
 unsafe fn text_format(
@@ -481,6 +516,16 @@ impl Panel {
                 presentOptions: D2D1_PRESENT_OPTIONS_NONE,
             },
         )?;
+        Self::with_target(factory, target.cast()?, dpi, Theme::current())
+    }
+
+    /// Draws onto any render target: the panel's window, or a bitmap in the snapshot tests.
+    unsafe fn with_target(
+        factory: ID2D1Factory,
+        target: ID2D1RenderTarget,
+        dpi: u32,
+        theme: Theme,
+    ) -> Result<Self> {
         let brush = target.CreateSolidColorBrush(&D2D1_COLOR_F::default(), None)?;
         let dwrite: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
         let display = w!("Segoe UI Variable Display");
@@ -502,13 +547,14 @@ impl Panel {
             section: text_format(&dwrite, body, semibold, 14.0, leading, middle, false)?,
             icon: text_format(&dwrite, icon_family(&dwrite), regular, 14.0, centre, middle, false)?,
         };
+        let svg: Option<ID2D1DeviceContext5> = target.cast().ok();
         Ok(Self {
             factory,
             dwrite,
             target,
             brush,
             fonts,
-            theme: Theme::current(),
+            theme,
             scale: dpi as f32 / 96.0,
             tab: PEN,
             hover: None,
@@ -525,6 +571,8 @@ impl Panel {
                 last: Instant::now(),
                 scratch: Scratch::default(),
             },
+            svg,
+            cursor_documents: Default::default(),
         })
     }
 
@@ -597,6 +645,7 @@ impl Panel {
             Command::Toggle,
             Command::Off,
             Command::Undo,
+            Command::Redo,
             Command::Clear,
             Command::ToggleInk,
             Command::Quit,
@@ -618,6 +667,10 @@ impl Panel {
         for (index, preset) in settings::presets().iter().enumerate() {
             lines.push(Line::Item(Slot::Preset(index), preset.name.clone(), "switches to this preset"));
         }
+        lines.push(Line::Section("While drawing"));
+        lines.push(Line::Fixed("Straight horizontal line", "Alt", "hold while drawing"));
+        lines.push(Line::Fixed("Straight vertical line", "Shift+Alt", "hold while drawing"));
+        lines.push(Line::Fixed("Skip shape snapping", "Ctrl", "hold as you let go"));
         lines
     }
 
@@ -700,8 +753,14 @@ impl Panel {
                 }
             }
             OPTIONS => {
+                let count = CURSOR_STYLES.len() as f32;
+                let gap = (INNER - count * CURSOR_SWATCH) / (count - 1.0);
+                for index in 0..CURSOR_STYLES.len() {
+                    let x = MARGIN + index as f32 * (CURSOR_SWATCH + gap);
+                    widgets.push((Widget::Cursor(index), rect(x, CONTENT_TOP + 26.0, CURSOR_SWATCH, CURSOR_SWATCH)));
+                }
                 for index in 0..TOGGLES.len() {
-                    widgets.push((Widget::Toggle(index), rect(MARGIN - 8.0, CONTENT_TOP + index as f32 * 52.0, INNER + 16.0, 48.0)));
+                    widgets.push((Widget::Toggle(index), rect(MARGIN - 8.0, TOGGLES_TOP + index as f32 * 52.0, INNER + 16.0, 48.0)));
                 }
                 widgets.push((Widget::Reset, RESET));
                 widgets.push((Widget::Quit, QUIT));
@@ -779,6 +838,7 @@ impl Panel {
             Widget::Swatch(index) if index < SWATCHES.len() => current.look.color = SWATCHES[index],
             Widget::Swatch(_) => return Action::PickColor,
             Widget::Style(index) => current.look.style = STYLES[index],
+            Widget::Cursor(index) => current.cursor = index,
             Widget::Slider(index) => {
                 if !Self::slider_enabled(index, &current) {
                     return Action::None;
@@ -1058,7 +1118,7 @@ impl Panel {
     }
 
     unsafe fn draw_pen(&mut self, settings: &Settings) {
-        self.draw_preview(&settings.look, settings.dot_cursor);
+        self.draw_preview(&settings.look, settings.cursor);
         let theme = &self.theme;
         self.section("Presets", 230.0);
         let active = settings::active_preset();
@@ -1086,7 +1146,7 @@ impl Panel {
         }
     }
 
-    unsafe fn draw_preview(&mut self, look: &Look, dot_cursor: bool) {
+    unsafe fn draw_preview(&mut self, look: &Look, cursor: usize) {
         let card = D2D1_ROUNDED_RECT {
             rect: PREVIEW,
             radiusX: 8.0,
@@ -1108,24 +1168,26 @@ impl Panel {
         }
         self.target
             .PushAxisAlignedClip(&PREVIEW, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        let mut preview = Stroke {
+            points: std::mem::take(&mut self.preview.points),
+            look: *look,
+            scale: 1.0,
+            whole: false,
+        };
         stroke::draw(
             &self.factory,
             &self.target,
             &self.brush,
-            &mut self.preview.points,
+            &mut preview,
             Instant::now(),
-            look,
             1.0,
             &mut self.preview.scratch,
         );
-        if dot_cursor {
-            let (hx, hy) = Preview::position(self.preview.t);
-            let color = hex(look.color);
-            self.circle(hx, hy, 9.0, faded(color, 0.18));
-            self.circle(hx, hy, 6.0, faded(color, 0.35));
-            self.circle(hx, hy, 3.5, color);
-            self.circle(hx, hy, 1.5, faded(hex(0xffffff), 0.9));
-        }
+        self.preview.points = preview.points;
+        let (hx, hy) = Preview::position(self.preview.t);
+        let (sx, sy) = CURSOR_STYLES[cursor].hotspot;
+        let zoom = 0.75;
+        self.draw_cursor(cursor, look.color, hx - sx * zoom, hy - sy * zoom, zoom);
         self.target.PopAxisAlignedClip();
         self.brush.SetColor(&self.theme.border);
         self.target.DrawRoundedRectangle(&card, &self.brush, 1.0, None);
@@ -1237,6 +1299,13 @@ impl Panel {
                     self.text(scope, &self.fonts.small_line, rect(MARGIN, y + 23.0, 176.0, 16.0), theme.muted);
                     self.binding_field(*slot, field, clear);
                 }
+                Line::Fixed(label, keys, when) => {
+                    let (field, _) = Self::binding_box(y);
+                    self.text(label, &self.fonts.body, rect(MARGIN, y + 3.0, 176.0, 22.0), theme.text);
+                    self.text(when, &self.fonts.small_line, rect(MARGIN, y + 23.0, 176.0, 16.0), theme.muted);
+                    self.outline_round(field, 4.0, faded(theme.control_border, 0.6), 1.0);
+                    self.text(keys, &self.fonts.body_centre, field, theme.muted);
+                }
             }
             y += line_height(&line);
         }
@@ -1254,7 +1323,7 @@ impl Panel {
             let hint = if self.capturing.is_some() {
                 "Press the keys you want. Click anywhere else to cancel."
             } else {
-                "Esc, Undo and Clear only listen while they can do something."
+                "Esc, Undo, Redo and Clear only listen while they can do something."
             };
             self.text(hint, &self.fonts.small_line, rect(MARGIN, LIST_BOTTOM + 8.0, INNER, 24.0), theme.muted);
         }
@@ -1306,9 +1375,25 @@ impl Panel {
 
     unsafe fn draw_options(&self, settings: &Settings) {
         let theme = &self.theme;
+        let named = match self.hover {
+            Some(Widget::Cursor(index)) => index,
+            _ => settings.cursor,
+        };
+        self.section(&format!("Cursor \u{b7} {}", CURSOR_STYLES[named].name), CONTENT_TOP);
         for (widget, area) in self.layout() {
             let hovered = self.hover == Some(widget);
             match widget {
+                Widget::Cursor(index) => {
+                    let selected = settings.cursor == index;
+                    self.fill_round(area, 6.0, if hovered { theme.control_hover } else { theme.control });
+                    if selected {
+                        self.outline_round(area, 6.0, theme.accent, 2.0);
+                    } else {
+                        self.outline_round(area, 6.0, theme.control_border, 1.0);
+                    }
+                    let zoom = CURSOR_SWATCH / cursors::SIZE;
+                    self.draw_cursor(index, settings.look.color, area.left, area.top, zoom);
+                }
                 Widget::Toggle(index) => self.toggle(index, area, settings, hovered),
                 Widget::Reset => self.button(area, "Reset pen & options", hovered, theme.text),
                 Widget::Quit => self.button(area, "Quit", hovered, theme.danger),
@@ -1318,7 +1403,7 @@ impl Panel {
         self.text(
             "Right-click passes a click through to the app underneath. The scroll wheel scrolls the page; Ctrl+wheel changes thickness.",
             &self.fonts.small,
-            rect(MARGIN, CONTENT_TOP + 5.0 * 52.0 + 10.0, INNER, 40.0),
+            rect(MARGIN, TOGGLES_TOP + TOGGLES.len() as f32 * 52.0 + 6.0, INNER, 40.0),
             theme.muted,
         );
         if let Some((text, at, _)) = &self.status {
@@ -1329,6 +1414,44 @@ impl Panel {
     }
 
     // ---- Primitives -----------------------------------------------------------------------------
+
+    /// Draws a cursor style's 48-unit square with its top-left at (x, y), scaled by `zoom`.
+    unsafe fn draw_cursor(&self, style: usize, color: u32, x: f32, y: f32, zoom: f32) {
+        let Some(svg) = &self.svg else { return };
+        let key = (style, color);
+        let mut documents = self.cursor_documents.borrow_mut();
+        let document = match documents.iter().find(|(cached, _)| *cached == key) {
+            Some((_, document)) => document.clone(),
+            None => {
+                let source = CURSOR_STYLES[style].svg(color);
+                let Some(stream) = SHCreateMemStream(Some(source.as_bytes())) else {
+                    return;
+                };
+                let size = D2D_SIZE_F {
+                    width: cursors::SIZE,
+                    height: cursors::SIZE,
+                };
+                let Ok(document) = svg.CreateSvgDocument(&stream, size) else {
+                    return;
+                };
+                // Only the current colour's set is worth keeping.
+                documents.retain(|((_, cached), _)| *cached == color);
+                documents.push((key, document.clone()));
+                document
+            }
+        };
+        let mut previous = Matrix3x2::default();
+        svg.GetTransform(&mut previous);
+        svg.SetTransform(&Matrix3x2 {
+            M11: zoom * previous.M11,
+            M22: zoom * previous.M22,
+            M31: previous.M31 + x * previous.M11,
+            M32: previous.M32 + y * previous.M22,
+            ..Default::default()
+        });
+        svg.DrawSvgDocument(&document);
+        svg.SetTransform(&previous);
+    }
 
     unsafe fn fill(&self, area: D2D_RECT_F, color: D2D1_COLOR_F) {
         self.brush.SetColor(&color);
@@ -1554,5 +1677,46 @@ impl Panel {
         self.text(toggle.title, &self.fonts.body, rect(left, area.top + 4.0, 300.0, 22.0), theme.text);
         self.text(toggle.detail, &self.fonts.small_line, rect(left, area.top + 25.0, 310.0, 18.0), theme.muted);
         self.switch(rect(area.right - 48.0, area.top + 14.0, 40.0, 20.0), on, hovered);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::snapshot;
+
+    /// Writes every tab, light and dark, at 100 % and 150 %, to target-v2/snapshots for review.
+    #[test]
+    #[ignore = "writes PNGs to look at"]
+    fn snapshot_panel() {
+        snapshot::init();
+        for (theme, light) in [("light", true), ("dark", false)] {
+            for dpi in [96, 144] {
+                for (tab, name) in [(PEN, "pen"), (PRESETS, "presets"), (SHORTCUTS, "shortcuts"), (OPTIONS, "options")] {
+                    let scale = dpi as f32 / 96.0;
+                    let (width, height) = ((WIDTH * scale) as u32, (HEIGHT * scale) as u32);
+                    let canvas = snapshot::Canvas::new(width, height, dpi);
+                    let mut panel = unsafe {
+                        Panel::with_target(canvas.factory.clone(), canvas.target.clone(), dpi, Theme::new(light, Some(0x0078d4)))
+                    }
+                    .unwrap();
+                    panel.tab = tab;
+                    if tab == PEN {
+                        for _ in 0..40 {
+                            panel.preview.last -= Duration::from_millis(16);
+                            panel.tick();
+                        }
+                    }
+                    if tab == OPTIONS {
+                        panel.hover = Some(Widget::Cursor(3));
+                    }
+                    if tab == SHORTCUTS {
+                        panel.scroll = Panel::max_scroll();
+                    }
+                    unsafe { panel.draw() };
+                    canvas.save(&format!("panel-{name}-{theme}-{dpi}.png"));
+                }
+            }
+        }
     }
 }

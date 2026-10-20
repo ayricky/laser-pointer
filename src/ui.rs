@@ -22,8 +22,9 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN, TME_LEAVE, TRACKMOUSEEVENT,
 };
 use windows::Win32::UI::Shell::{
-    Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIM_ADD, NIM_DELETE,
-    NIM_MODIFY, NIM_SETVERSION, NINF_KEY, NIN_SELECT, NOTIFYICONDATAW, NOTIFYICON_VERSION_4,
+    Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIIF_INFO,
+    NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NINF_KEY, NIN_SELECT, NOTIFYICONDATAW,
+    NOTIFYICON_VERSION_4,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AllowSetForegroundWindow, AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
@@ -220,6 +221,26 @@ pub fn shortcut_name(binding: Binding) -> String {
     name
 }
 
+/// Fills a fixed-size UTF-16 field, leaving room for the terminating null.
+fn copy_text(field: &mut [u16], text: &str) {
+    let room = field.len() - 1;
+    for (slot, unit) in field.iter_mut().zip(text.encode_utf16().take(room)) {
+        *slot = unit;
+    }
+}
+
+/// A notification from the tray icon, for things worth saying once.
+pub fn balloon(title: &str, text: &str) {
+    let mut data = notify_data();
+    data.uFlags = NIF_INFO;
+    data.dwInfoFlags = NIIF_INFO;
+    copy_text(&mut data.szInfoTitle, title);
+    copy_text(&mut data.szInfo, text);
+    unsafe {
+        let _ = Shell_NotifyIconW(NIM_MODIFY, &data);
+    }
+}
+
 fn notify_data() -> NOTIFYICONDATAW {
     NOTIFYICONDATAW {
         cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
@@ -244,9 +265,7 @@ unsafe fn update_tray(add: bool) {
         if on { "on" } else { "off" },
         shortcut_name(current.key(Command::Toggle))
     );
-    for (slot, unit) in data.szTip.iter_mut().zip(tip.encode_utf16().take(127)) {
-        *slot = unit;
-    }
+    copy_text(&mut data.szTip, &tip);
     if add {
         let _ = Shell_NotifyIconW(NIM_ADD, &data);
         data.Anonymous.uVersion = NOTIFYICON_VERSION_4;
