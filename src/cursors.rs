@@ -104,64 +104,64 @@ const CENTRE: (f32, f32) = (SIZE / 2.0, SIZE / 2.0);
 
 pub const STYLES: [CursorStyle; 8] = [
     CursorStyle {
-        id: "dot",
-        name: "Laser dot",
+        id: "soft-glow",
+        name: "Soft glow",
         hotspot: CENTRE,
         motion: Motion::Grow,
-        source: include_str!("../assets/cursors/dot.svg"),
+        source: include_str!("../assets/cursors/soft-glow.svg"),
     },
     CursorStyle {
-        id: "halo",
-        name: "Halo",
+        id: "segment-ring",
+        name: "Segment ring",
         hotspot: CENTRE,
-        motion: Motion::Grow,
-        source: include_str!("../assets/cursors/halo.svg"),
+        motion: Motion::Spin,
+        source: include_str!("../assets/cursors/segment-ring.svg"),
     },
     CursorStyle {
-        id: "ring",
-        name: "Ring",
+        id: "classic-cross",
+        name: "Classic cross",
+        hotspot: CENTRE,
+        motion: Motion::Spin,
+        source: include_str!("../assets/cursors/classic-cross.svg"),
+    },
+    CursorStyle {
+        id: "cross-dot",
+        name: "Cross and dot",
+        hotspot: CENTRE,
+        motion: Motion::Spin,
+        source: include_str!("../assets/cursors/cross-dot.svg"),
+    },
+    CursorStyle {
+        id: "circle-dot",
+        name: "Circle and dot",
         hotspot: CENTRE,
         motion: Motion::Pulse,
-        source: include_str!("../assets/cursors/ring.svg"),
+        source: include_str!("../assets/cursors/circle-dot.svg"),
     },
     CursorStyle {
-        id: "focus",
-        name: "Focus",
+        id: "chevron",
+        name: "Chevron",
         hotspot: CENTRE,
-        motion: Motion::Spin,
-        source: include_str!("../assets/cursors/focus.svg"),
-    },
-    CursorStyle {
-        id: "neon",
-        name: "Neon",
-        hotspot: CENTRE,
-        motion: Motion::Spin,
-        source: include_str!("../assets/cursors/neon.svg"),
-    },
-    CursorStyle {
-        id: "cross",
-        name: "Crosshair",
-        hotspot: CENTRE,
-        motion: Motion::Spin,
-        source: include_str!("../assets/cursors/cross.svg"),
-    },
-    CursorStyle {
-        id: "pen",
-        name: "Pen",
-        hotspot: (7.0, 7.0),
         motion: Motion::Tilt,
-        source: include_str!("../assets/cursors/pen.svg"),
+        source: include_str!("../assets/cursors/chevron.svg"),
     },
     CursorStyle {
-        id: "arrow",
-        name: "Arrow",
-        hotspot: (7.0, 5.5),
-        motion: Motion::Tilt,
-        source: include_str!("../assets/cursors/arrow.svg"),
+        id: "brackets",
+        name: "Brackets",
+        hotspot: CENTRE,
+        motion: Motion::Spin,
+        source: include_str!("../assets/cursors/brackets.svg"),
+    },
+    CursorStyle {
+        id: "micro-dot",
+        name: "Micro dot",
+        hotspot: CENTRE,
+        motion: Motion::Grow,
+        source: include_str!("../assets/cursors/micro-dot.svg"),
     },
 ];
 
-/// Unknown ids fall back to the first style, the laser dot.
+/// Unknown ids fall back to the first style, the soft glow.
 pub fn index_of(id: &str) -> usize {
     STYLES.iter().position(|style| style.id == id).unwrap_or(0)
 }

@@ -271,7 +271,7 @@ pub struct Theme {
     sketch: D2D1_COLOR_F,
 }
 
-fn read_dword(key: PCWSTR, value: PCWSTR) -> Option<u32> {
+pub(crate) fn read_dword(key: PCWSTR, value: PCWSTR) -> Option<u32> {
     let mut data = 0u32;
     let mut size = 4u32;
     unsafe {

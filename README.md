@@ -23,8 +23,9 @@ presentation.
   you let go to keep a stroke freehand.
 - **Shortcuts for everything** — rebind or remove any action, including single keys. Keys that
   only make sense while drawing (Esc, Undo) are claimed only while the laser is on.
-- **Cursor styles** — a laser dot, halo, ring, focus, neon, crosshair, pen or arrow, in the laser
-  colour, that grows in when the laser turns on and squeezes while you draw.
+- **Cursor styles** — a soft glow, segment ring, classic cross, cross and dot, circle and dot,
+  chevron, brackets or micro dot, in the laser colour. Each moves its own way: dots swell in and
+  squeeze, crosshairs spin in and twist, rings pulse, the chevron tilts.
 - **Click ripples** where right-clicks land, and an **on-screen indicator** that confirms toggles,
   preset changes and size changes.
 - **Works over fullscreen games** in borderless mode (see below).
@@ -85,5 +86,4 @@ The default MSVC toolchain needs the Visual Studio Build Tools. With the GNU too
 
 ## Licence
 
-[MIT](LICENSE). The tray icon artwork comes from [Excalidraw](https://github.com/excalidraw/excalidraw)
-under the MIT licence; see [THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt).
+[MIT](LICENSE).

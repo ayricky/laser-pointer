@@ -307,6 +307,10 @@ extern "system" fn tray_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARA
             update_tray(true);
             return LRESULT(0);
         }
+        // The taskbar may have switched between light and dark.
+        if msg == WM_SETTINGCHANGE {
+            update_tray(false);
+        }
         DefWindowProcW(hwnd, msg, wparam, lparam)
     }
 }

@@ -428,8 +428,6 @@ fn parse(text: &str) -> (Settings, Option<Vec<Preset>>) {
     let mut settings = Settings::default();
     let mut presets: Option<Vec<Preset>> = None;
     let mut old_hotkey = Binding::NONE;
-    let mut old_dot_cursor = None;
-    let mut saw_cursor = false;
     for line in text.lines() {
         let Some((key, value)) = line.split_once('=') else {
             continue;
@@ -442,7 +440,6 @@ fn parse(text: &str) -> (Settings, Option<Vec<Preset>>) {
             // defaults an older file without presets gets.
             presets.get_or_insert_with(Vec::new);
         } else if key == "cursor" {
-            saw_cursor = true;
             settings.cursor = cursors::index_of(value);
         } else if let Some(command) = COMMANDS.iter().find(|command| command.key() == key) {
             if let Some(binding) = Binding::parse(value) {
@@ -450,10 +447,9 @@ fn parse(text: &str) -> (Settings, Option<Vec<Preset>>) {
             }
         } else if let Some(value) = number(value) {
             match key {
-                // Older versions only had the one shortcut, and a dot-or-pen cursor switch.
+                // Older versions only had the one shortcut.
                 "hotkey_mods" => old_hotkey.mods = value,
                 "hotkey_vk" => old_hotkey.vk = value,
-                "dot_cursor" => old_dot_cursor = Some(value != 0),
                 _ => {
                     if let Some((_, _, set)) = FIELDS.iter().find(|(name, ..)| *name == key) {
                         set(&mut settings, value);
@@ -464,9 +460,6 @@ fn parse(text: &str) -> (Settings, Option<Vec<Preset>>) {
     }
     if old_hotkey.is_set() && !text.contains("key_toggle=") {
         settings.keys[Command::Toggle.index()] = old_hotkey;
-    }
-    if let (false, Some(dot)) = (saw_cursor, old_dot_cursor) {
-        settings.cursor = cursors::index_of(if dot { "dot" } else { "pen" });
     }
     (settings, presets)
 }
@@ -586,7 +579,7 @@ mod tests {
         let mut settings = Settings::default();
         settings.look.color = 0x123456;
         settings.look.snap = 80;
-        settings.cursor = cursors::index_of("ring");
+        settings.cursor = cursors::index_of("chevron");
         settings.game_focus = false;
         settings.keys[Command::Redo.index()] = Binding::new(MOD_CONTROL.0, u32::from(b'R'));
         let mut presets = default_presets();
@@ -616,7 +609,8 @@ mod tests {
                    preset=Laser|#ff2a2a|4|100|1000|500|2|1|0|0|0\n";
         let (settings, presets) = parse(old);
         assert_eq!(settings.look.width, 6);
-        assert_eq!(settings.cursor, cursors::index_of("pen"));
+        // The old dot-or-pen switch has nothing to map to; the default cursor takes over.
+        assert_eq!(settings.cursor, 0);
         assert!(settings.game_focus);
         assert_eq!(settings.key(Command::Redo), Command::Redo.default_binding());
         let presets = presets.unwrap();
@@ -631,9 +625,11 @@ mod tests {
     }
 
     #[test]
-    fn an_explicit_cursor_wins_over_the_old_switch() {
-        let (settings, _) = parse("dot_cursor=0\ncursor=ring\n");
-        assert_eq!(settings.cursor, cursors::index_of("ring"));
+    fn a_saved_cursor_loads_and_an_unknown_one_falls_back() {
+        let (settings, _) = parse("cursor=brackets\n");
+        assert_eq!(settings.cursor, cursors::index_of("brackets"));
+        let (settings, _) = parse("cursor=no-such-style\n");
+        assert_eq!(settings.cursor, 0);
     }
 
     #[test]
