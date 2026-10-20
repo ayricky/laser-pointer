@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="none">
+  <style>@media(max-width:48px){.ring{stroke-width:8;stroke:#919299}.outer{display:none}}@media(max-width:24px){.ring{stroke-width:12}.dot{r:28}.core{r:9}}</style>
+  <defs><linearGradient id="tile" x2="0" y2="256" gradientUnits="userSpaceOnUse"><stop stop-color="#28292d"/><stop offset="1" stop-color="#141518"/></linearGradient></defs>
+  <rect x="1" y="1" width="254" height="254" rx="55" fill="url(#tile)" stroke="#414247" stroke-width="2"/>
+  <circle class="ring" cx="128" cy="128" r="64" stroke="#727378" stroke-width="4"/>
+  <circle class="outer" cx="128" cy="128" r="84" stroke="#727378" stroke-width="2" opacity=".28"/>
+  <circle class="dot" cx="128" cy="128" r="24" fill="#ff2a2a"/>
+  <circle class="core" cx="128" cy="128" r="8" fill="#fff"/>
+</svg>

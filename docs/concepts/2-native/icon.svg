@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="none">
+ <defs>
+  <linearGradient id="card" x1="84" y1="36" x2="188" y2="221" gradientUnits="userSpaceOnUse"><stop stop-color="#fff"/><stop offset=".48" stop-color="#f2f9ff"/><stop offset="1" stop-color="#b5d8f4"/></linearGradient>
+  <linearGradient id="edge" x1="50" y1="45" x2="202" y2="212" gradientUnits="userSpaceOnUse"><stop stop-color="#fff"/><stop offset="1" stop-color="#83b5d8"/></linearGradient>
+  <filter id="shadow" x="0" y="0" width="256" height="256" filterUnits="userSpaceOnUse"><feGaussianBlur stdDeviation="9"/></filter>
+  <filter id="glow" x="0" y="0" width="256" height="256" filterUnits="userSpaceOnUse"><feGaussianBlur stdDeviation="5"/></filter>
+ </defs>
+ <ellipse cx="129" cy="221" rx="76" ry="9" fill="#233f58" opacity=".19" filter="url(#shadow)"/>
+ <g transform="rotate(-9 128 128)"><rect x="37" y="35" width="182" height="181" rx="28" fill="#7aa5c5"/><rect x="37" y="31" width="182" height="181" rx="28" fill="url(#card)" stroke="url(#edge)" stroke-width="2"/>
+ <path d="M66 69H126M66 82H105" stroke="#76a2c1" stroke-width="6" stroke-linecap="round" opacity=".5"/>
+ <path d="M63 160C79 180 146 170 155 141C165 109 90 101 91 135C92 167 159 161 189 105" stroke="#ff2a2a" stroke-width="11" stroke-linecap="round" opacity=".38" filter="url(#glow)"/>
+ <path d="M63 160C79 180 146 170 155 141C165 109 90 101 91 135C92 167 159 161 189 105" stroke="#f83438" stroke-width="7" stroke-linecap="round"/>
+ <circle cx="189" cy="105" r="12" fill="#ff2a2a" opacity=".45" filter="url(#glow)"/><circle cx="189" cy="105" r="8" fill="#ff2a2a" stroke="white" stroke-width="2"/><circle cx="187" cy="103" r="2" fill="#fff"/>
+ </g>
+</svg>

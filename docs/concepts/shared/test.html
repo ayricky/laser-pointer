@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Laser engine test</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 28px; background: #f3f4f6; color: #18212b; font: 14px/1.5 "Segoe UI Variable Display", "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif; }
+  h1 { font-size: 26px; margin: 0 0 6px; } h2 { font-size: 18px; margin: 0; }
+  p { margin: 8px 0 18px; } main { max-width: 1320px; margin: auto; }
+  .stages { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+  article { min-width: 0; } .stage { position: relative; height: 330px; border: 1px solid #ced4dd; border-radius: 10px; overflow: hidden; background: white; }
+  .stage:focus-visible { outline: 2px solid #2488ef; outline-offset: 3px; }
+  .slide { padding: 30px; } .slide h2 { font-size: 25px; letter-spacing: -.5px; }
+  .slide p { font-size: 17px; color: #667082; margin-top: 4px; }
+  .bars { display: flex; align-items: end; height: 150px; gap: 24px; margin: 28px 24px 0; border-bottom: 1px solid #cbd2dd; }
+  .bars i { background: #9aaac4; width: 44px; height: var(--h); border-radius: 4px 4px 0 0; }
+  .dark { background: #151c27; color: #f4f6fa; border-color: #303c4d; } .dark p { color: #a9b5c8; }
+  .controls { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin: 12px 0; }
+  button, select, input { font: inherit; } button, select { background: white; color: #18212b; border: 1px solid #c5ccd5; border-radius: 5px; padding: 5px 9px; }
+  button { cursor: pointer; } button:hover { border-color: #687b96; }
+  label { display: inline-flex; align-items: center; gap: 5px; } input[type=color] { width: 32px; height: 30px; padding: 2px; border: 1px solid #c5ccd5; border-radius: 4px; }
+  output, pre { font: 12px/1.5 ui-monospace, "Cascadia Code", Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+  output { display: block; min-height: 90px; color: #566477; } #results { border-top: 1px solid #ccd3dd; margin-top: 20px; padding-top: 12px; }
+  .cursor-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+  .swatch { background: white; border: 1px solid #cad0da; border-radius: 10px; overflow: hidden; }
+  .swatch h2 { padding: 10px 16px; text-transform: capitalize; }
+  .sample { display: block; width: 100%; height: 330px; } .caption { margin: 0; padding: 8px 16px; display: flex; justify-content: space-around; font-size: 12px; }
+  .explain { max-width: 950px; }
+  @media(max-width:760px) { body { padding: 16px; } .stages { grid-template-columns: 1fr; } .stage { height: 300px; } .cursor-grid { grid-template-columns: 1fr 1fr; } }
+</style>
+<script>
+  window.addEventListener('error', e => { document.title = 'ERR ' + e.message; document.getElementById('results')?.append('ERROR: ' + e.message + '\n'); });
+  window.addEventListener('unhandledrejection', e => { document.title = 'ERR ' + e.reason; });
+</script>
+<main>
+  <h1>Shared laser engine</h1>
+  <p class="explain">Draw in either stage. Move over the right stage to take over its ghost. Keyboard shortcuts work over or inside a stage: L, Esc, Ctrl+Z / Ctrl+Y, C, K, [ / ], 1 / 2 / 3. Right-click for a ripple. Turn the laser off to use the button underneath.</p>
+  <div class="stages">
+    <article><div class="stage" id="manual"><div class="slide"><h2>Draw here</h2><p>A white canvas for your laser.</p><button class="under">Underlying button: 0</button><div class="bars"><i style="--h:45%"></i><i style="--h:65%"></i><i style="--h:55%"></i><i style="--h:90%"></i></div></div></div><div id="controls-a" class="controls"></div><output id="state-a"></output></article>
+    <article><div class="stage dark" id="automatic"><div class="slide"><h2>Scripted hand</h2><p id="ghost-caption">A loop, underline, arrow and tick.</p><button class="under">Underlying button: 0</button><div class="bars"><i style="--h:40%"></i><i style="--h:60%"></i><i style="--h:70%"></i><i style="--h:95%"></i></div></div></div><div id="controls-b" class="controls"></div><output id="state-b"></output></article>
+  </div>
+  <p><a href="?cursors">Cursor inspection at 4×</a> · <a href="?check">Run API checks</a> · <a href="?strokes">Taper comparison</a></p>
+  <pre id="results" aria-live="polite">Ready. No external requests.</pre>
+</main>
+<script src="laser.js"></script>
+<script>
+  const params = new URLSearchParams(location.search);
+  const results = document.getElementById('results');
+  // Public renderer objects can also be used by a page to draw a cursor preview.
+  if (params.has('cursors')) {
+    document.querySelector('.stages').remove();
+    document.querySelector('.explain').textContent = 'All four cursors at 4×. White and black backgrounds; resting on the left, pressed on the right. Hotspots share the same alignment.';
+    const grid = document.createElement('div'); grid.className = 'cursor-grid';
+    results.before(grid);
+    for (const [name, renderer] of Object.entries(Laser.cursors)) {
+      const card = document.createElement('section'); card.className = 'swatch';
+      card.innerHTML = '<h2>' + name + '</h2>';
+      for (const background of ['#ffffff', '#090d12']) {
+        const canvas = document.createElement('canvas'); canvas.className = 'sample';
+        canvas.width = 640; canvas.height = 660;
+        const c = canvas.getContext('2d'); c.scale(2, 2); c.fillStyle = background; c.fillRect(0, 0, 320, 330);
+        for (const pressed of [false, true]) {
+          c.save(); c.translate(pressed ? 220 : 68, 130); c.scale(4, 4);
+          renderer.draw(c, 0, 0, { color:'#ff2a2a', pressed, on:true, t:1000, ignite:1, press:pressed ? 1 : 0, speed:0, dpr:2 }); c.restore();
+        }
+        c.fillStyle = background === '#ffffff' ? '#667082' : '#a6b2c3'; c.font = '13px Segoe UI'; c.textAlign = 'center';
+        c.fillText('Resting', 68, 285); c.fillText('Pressed', 220, 285); card.append(canvas);
+      }
+      grid.append(card);
+    }
+    results.textContent = 'Cursor sheet rendered successfully.';
+  } else {
+    const script = [
+      { wait:300 }, { on:true }, { preset:'Laser' }, { move:[.25,.24] },
+      { circle:[.47,.31,.29,.13] }, { wait:150 }, { underline:[.2,.74,.42] },
+      { look:{style:'neon',color:'#46c4ff',fade:1800} }, { arrow:[.24,.72,.71,.58] },
+      { preset:2 }, { keep:true }, { tick:[.78,.65,.1] },
+      { path:[[.2,.78],[.28,.69],[.4,.79],[.52,.7]] }, { undo:true },
+      { do:() => document.getElementById('ghost-caption').textContent = 'The last stroke was undone.' },
+      { wait:700 }, { clear:true }, { keep:false }, { on:false }, { wait:350 }, { on:true }, { loop:true }
+    ];
+    const a = Laser.stage(document.getElementById('manual'), {keyboard:true, onChange:s => show('a',s)});
+    const b = Laser.stage(document.getElementById('automatic'), {keyboard:true, cursor:'ring', ghost:script, resume:5000, onChange:s => show('b',s)});
+    function show(id, state) { document.getElementById('state-'+id).textContent = JSON.stringify(state, null, 1); }
+    function controls(id, stage) {
+      const host = document.getElementById('controls-'+id);
+      const button = (name, fn) => { const el = document.createElement('button'); el.textContent = name; el.onclick = fn; host.append(el); };
+      const select = (label, values, fn) => {
+        const el = document.createElement('select'); el.setAttribute('aria-label', label);
+        values.forEach(value => el.add(new Option(value,value))); el.onchange = () => fn(el.value); host.append(el); return el;
+      };
+      button('On / off', () => stage.toggle());
+      select('Style', Laser.styles, style => stage.setLook({style})).value = 'glow';
+      const colour = document.createElement('input'); colour.type = 'color'; colour.value = '#ff2a2a'; colour.setAttribute('aria-label','Colour'); colour.oninput = () => stage.setLook({color:colour.value}); host.append(colour);
+      select('Preset', Laser.presets.map(p => p.name), value => stage.usePreset(value));
+      select('Cursor', [...Object.keys(Laser.cursors),'Custom'], value => stage.setCursor(value === 'Custom' ? {
+        size:48, draw(c,x,y,s) { c.translate(x,y); c.scale(s.ignite,s.ignite); c.fillStyle = s.color; c.strokeStyle = '#fff'; c.lineWidth = 1.5; c.beginPath(); c.roundRect(-5,-5,10,10,2); c.fill(); c.stroke(); }
+      } : value)).value = id === 'b' ? 'ring' : 'dot';
+      button('Keep ink', () => stage.setLook({ink:!stage.state.look.ink}));
+      button('Undo', () => stage.undo()); button('Redo', () => stage.redo()); button('Clear', () => stage.clear());
+      button('Play ghost', () => stage.play(script)); button('Stop ghost', () => stage.stop());
+      button('Destroy', () => { stage.destroy(); host.replaceChildren(document.createTextNode('Destroyed. Reload to recreate.')); });
+    }
+    controls('a',a); controls('b',b);
+    document.querySelectorAll('.under').forEach(el => { let n = 0; el.onclick = () => el.textContent = 'Underlying button: ' + ++n; });
+    if (params.has('strokes')) {
+      b.stop().clear(); a.stop().clear();
+      // Longer fades leave time to inspect the trail-length taper.
+      const freeze = [{look:{color:'#ff2a2a',style:'glow',width:8,fade:5000,trail:210}}, {underline:[.12,.82,.55]}, {wait:9000}];
+      a.play(freeze); b.play([{look:{style:'neon',color:'#45caff',width:8,fade:5000,trail:210}}, {circle:[.48,.53,.28,.25]}, {wait:9000}]);
+    }
+    if (params.has('check')) runChecks();
+    async function runChecks() {
+      const messages = []; let failures = 0;
+      const check = (ok, name) => { messages.push((ok ? 'PASS ' : 'FAIL ') + name); if (!ok) failures++; results.textContent = messages.join('\n'); };
+      const delay = ms => new Promise(resolve => setTimeout(resolve,ms));
+      a.stop().clear(); b.stop().clear();
+      check(Laser.presets.length === 3 && Laser.styles.join() === 'solid,glow,neon', 'public presets and styles');
+      a.usePreset('Pen'); check(a.state.preset === 2 && a.state.look.ink, 'named preset and kept ink');
+      a.usePreset(0).setLook({width:7}); check(a.state.preset === -1 && a.state.look.color === '#ff2a2a', 'partial look merges');
+      const snapshot = a.state; snapshot.look.width = 99; check(a.state.look.width === 7, 'state is a defensive copy');
+      a.setOn(false); check(document.querySelector('#manual canvas').style.pointerEvents === 'none', 'off passes input through'); a.toggle(); check(a.state.on, 'toggle');
+      for (const name of Object.keys(Laser.cursors)) a.setCursor(name);
+      let customDrawn = false; a.setCursor({size:48,draw(){ customDrawn = true; }});
+      a.play([{preset:'Pen'},{underline:[.2,.5,.5]}]);
+      for (let i = 0; i < 300 && !a.state.strokes; i++) await new Promise(requestAnimationFrame);
+      check(a.state.strokes === 1, 'ghost produces a kept stroke');
+      check(customDrawn || matchMedia('(prefers-reduced-motion: reduce)').matches, 'custom cursor draws');
+      a.stop().undo(); check(a.state.strokes === 0, 'undo'); a.redo(); check(a.state.strokes === 1, 'redo');
+      a.clear(); check(a.state.strokes === 0, 'clear removes active strokes'); a.undo(); check(a.state.strokes === 1, 'undo clear');
+      a.clear(); await delay(300); check(a.state.strokes === 0, 'clear fade completes');
+      a.setCursor('dot').usePreset('Laser').play([{move:[.2,.3]},{tick:[.5,.5,.1]},{wait:300}]);
+      a.stop(); check(!a.state.ghosting, 'stop');
+      const temp = document.createElement('div'); temp.style.cssText = 'position:relative;width:200px;height:100px'; document.body.append(temp);
+      const disposable = Laser.stage(temp,{on:false}); disposable.destroy(); disposable.destroy();
+      check(!temp.querySelector('canvas'), 'destroy is idempotent and removes canvas'); temp.remove();
+      check(document.querySelectorAll('[data-laser]').length === 2, 'one canvas per stage');
+      document.title = failures ? 'FAIL '+failures : 'PASS Laser API';
+      results.textContent += '\n' + (failures ? failures + ' failures' : 'All API checks passed.');
+    }
+  }
+</script>
+</html>

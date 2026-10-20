@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="none">
+  <defs>
+    <linearGradient id="tile" x1="40" y1="0" x2="220" y2="256" gradientUnits="userSpaceOnUse"><stop stop-color="#303034"/><stop offset=".55" stop-color="#17171b"/><stop offset="1" stop-color="#0e0e11"/></linearGradient>
+    <radialGradient id="reflection" cx="0" cy="0" r="1" gradientTransform="translate(155 193) rotate(5) scale(115 46)" gradientUnits="userSpaceOnUse"><stop stop-color="#ff3b30" stop-opacity=".18"/><stop offset="1" stop-color="#ff3b30" stop-opacity="0"/></radialGradient>
+    <radialGradient id="bloom"><stop stop-color="#ff756a" stop-opacity=".9"/><stop offset=".23" stop-color="#ff3b30" stop-opacity=".45"/><stop offset="1" stop-color="#ff3b30" stop-opacity="0"/></radialGradient>
+    <linearGradient id="beam" x1="35" y1="159" x2="181" y2="113" gradientUnits="userSpaceOnUse"><stop stop-color="#ff3b30" stop-opacity=".85"/><stop offset="1" stop-color="#ff6257"/></linearGradient>
+  </defs>
+  <rect x="1" y="1" width="254" height="254" rx="55" fill="url(#tile)"/>
+  <rect x="1.5" y="1.5" width="253" height="253" rx="54.5" stroke="#fff" stroke-opacity=".12"/>
+  <rect x="8" y="8" width="240" height="240" rx="49" fill="url(#reflection)"/>
+  <path d="M33 157 179 104 185 122 35 165Z" fill="url(#beam)"/>
+  <path d="m35 161 146-48" stroke="#ff9085" stroke-width="3"/>
+  <circle cx="182" cy="113" r="43" fill="url(#bloom)"/>
+  <circle cx="182" cy="113" r="19" fill="#ff3b30"/>
+  <circle cx="182" cy="113" r="10" fill="#fff8f1"/>
+  <circle cx="180.5" cy="111.5" r="3" fill="#fff"/>
+</svg>
