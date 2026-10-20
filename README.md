@@ -28,7 +28,6 @@ presentation.
   squeeze, crosshairs spin in and twist, rings pulse, the chevron tilts.
 - **Click ripples** where right-clicks land, and an **on-screen indicator** that confirms toggles,
   preset changes and size changes.
-- **Works over fullscreen games** in borderless mode (see below).
 - **Settings panel** in the Windows 11 style, following your light/dark theme and accent colour,
   with a live preview. Left-click the tray icon to open it.
 - Light on resources: the overlay is hidden while there is nothing to show, only the parts of the
@@ -55,16 +54,8 @@ Alt for a horizontal line, Shift+Alt for a vertical one, and Ctrl as you let go 
 
 ## Games
 
-Laser Pointer draws over games running in **borderless** or **fullscreen windowed** mode (in
-Counter-Strike 2: Video → Display Mode → Fullscreen Windowed). A game in true exclusive
-fullscreen owns the display and nothing can appear over it; you'll get a notice saying so.
-
-With **Pause games while drawing** on (Options, on by default), turning the laser on over a game
-that has captured the mouse takes the mouse from it, so drawing doesn't turn the camera, and hands
-it straight back when the laser turns off. Slide shows and other apps that leave the mouse free
-keep the keyboard, so clickers still work.
-
-It is an ordinary always-on-top window: it never injects into or reads another program.
+The laser can draw over games running in borderless or windowed mode. Games in exclusive
+fullscreen own the display, so nothing can appear over them; you'll get a notice saying so.
 
 ## Running it
 
