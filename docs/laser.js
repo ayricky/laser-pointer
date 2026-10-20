@@ -462,7 +462,14 @@
       const dpr = window.devicePixelRatio || 1, r = this.canvas.getBoundingClientRect();
       this.width = r.width; this.height = r.height; this.dpr = dpr;
       this.canvas.width = Math.round(r.width * dpr); this.canvas.height = Math.round(r.height * dpr);
-      if (this.ghost && this.ghost.path) { this.finish(false); this.ghost.path = null; this.ghost.travel = null; }
+      const g = this.ghost;
+      if (g && g.path) {
+        const began = !!this.drawing;
+        this.finish(false);
+        if (began && g.spec.after) g.spec.after(this);
+        g.path = null; g.travel = null;
+        g.index--; g.at = performance.now();
+      }
       this.wake();
     }
 
@@ -711,6 +718,8 @@
     retire() {
       this.takeOver();
       this.finish(false);
+      if (this.strokes.length) { this.clearing = this.strokes; this.strokes = []; this.clearedAt = performance.now(); }
+      this.forgetHistory();
       this.on = false;
       this.inside = false;
       this.applyInput();

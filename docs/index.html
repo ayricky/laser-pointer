@@ -20,8 +20,8 @@
   document.documentElement.dataset.theme = theme;
 })();
 </script>
-<link rel="stylesheet" href="site.css?v=2">
-<link rel="stylesheet" href="film.css?v=1">
+<link rel="stylesheet" href="site.css?v=3">
+<link rel="stylesheet" href="film.css?v=2">
 </head>
 <body>
 <button class="theme" id="theme" aria-label="Dark mode" aria-pressed="false" title="Dark mode">
@@ -102,9 +102,9 @@
 <footer><div class="wrap"><span>© 2026 Ricardo Mariano</span><nav><a href="privacy.html">Privacy</a><a href="https://github.com/ayricky/laser-pointer">GitHub</a><a href="https://github.com/ayricky/laser-pointer/blob/main/LICENSE">MIT licence</a><a href="https://ko-fi.com/ayricky">Ko-fi</a></nav></div></footer>
 
 <script src="cursors.js?v=1"></script>
-<script src="laser.js?v=10"></script>
-<script src="kit.js?v=1"></script>
-<script src="film.js?v=3"></script>
+<script src="laser.js?v=11"></script>
+<script src="kit.js?v=2"></script>
+<script src="film.js?v=4"></script>
 <script>
 'use strict';
 const $ = s => document.querySelector(s);
@@ -161,7 +161,7 @@ themeButton.addEventListener('click', () => {
 });
 syncTheme();
 // Once the monitor has risen into place, so the first marks aim right.
-setTimeout(() => film.play(0), 700);
+setTimeout(() => { if (!film.started) film.play(0); }, 700);
 </script>
 </body>
 </html>

@@ -122,9 +122,9 @@
   const click = (el, kitFor, then, options = {}) => stage => ({
     points: kitFor.moveTo(el), draw: false, wait: 700, ...options,
     after: s => {
-      const [x, y] = kitFor.centre(el), now = performance.now();
+      const [x, y] = kitFor.centre(el), now = performance.now(), ghost = s.ghost;
       s.pose.press(true, now);
-      setTimeout(() => { s.pose.press(false, performance.now()); s.wake(); }, 110);
+      setTimeout(() => { if (s.ghost === ghost && !s.drawing) { s.pose.press(false, performance.now()); s.wake(); } }, 110);
       s.ripples.push({ x, y, at: now });
       s.wake();
       if (then) then(s);

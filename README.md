@@ -5,7 +5,7 @@ draw over anything — slides, browsers, code — with a smooth, fading laser tr
 the scroll wheel still reach the app underneath, so you never have to switch it off to drive your
 presentation.
 
-[Try the interactive demo](docs/index.html) — it runs the app's actual stroke code in the browser.
+[See it in action](https://ayricky.github.io/laser-pointer/): the site's demo runs the app's own stroke and shape code in the browser.
 
 ## Features
 

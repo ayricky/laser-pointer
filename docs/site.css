@@ -82,6 +82,7 @@ h1 .hot path { fill: none; stroke: #ff2a2a; stroke-width: 7; stroke-linecap: rou
 .chapters { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
 .chapters button { all: unset; cursor: pointer; display: grid; gap: 8px; padding: 9px 14px; border-radius: 14px; font-size: 14px; color: var(--dim); transition: background .2s, color .2s; }
 .chapters button:hover { background: var(--soft); color: var(--ink); }
+.chapters button:focus-visible { outline: 2px solid #6cb6ff; outline-offset: 2px; }
 .chapters button[aria-current="true"] { color: var(--ink); background: var(--card); box-shadow: 0 0 0 1px var(--line-strong), 0 6px 20px -10px #0003; }
 .chapters .num { font: 600 11px var(--mono); color: var(--faint); margin-right: 6px; }
 .chapters button[aria-current="true"] .num { color: var(--red); }

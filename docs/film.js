@@ -69,7 +69,7 @@
       <div class="icon active"><img alt="" src="LOGO"></div>
       <div class="tray"><span style="opacity:.6">^</span><img data-m="tray" alt=""><span>10:24</span></div>
     </div>
-    <div class="film-tools" aria-label="Laser settings">
+    <div class="film-tools" data-m="tools" aria-label="Laser settings" inert>
       <div class="seg" data-m="presets"><button data-preset="Laser">Laser</button><button data-preset="Highlighter">Highlighter</button><button data-preset="Pen">Pen</button></div>
       <span class="sep"></span><div data-m="dots" style="display:flex;gap:8px"></div>
       <span class="sep"></span><div data-m="curs" style="display:flex;gap:2px"></div>
@@ -94,7 +94,7 @@
 
     const stage = new Laser.Stage(screen, { cursor: cursorById('soft-glow'), manual: true, onChange: changed });
     const K = GhostKit.kit(stage), { act, draw, click } = GhostKit;
-    const film = { stage, chapter: 0, driving: false, chapters: null, play, drive };
+    const film = { stage, chapter: 0, driving: false, started: false, chapters: null, play, drive };
     let colour = '#ff2a2a';
 
     function changed() {
@@ -175,6 +175,7 @@
 
     /** Plays from chapter `c`, switching to it at once. */
     function play(c = film.chapter) {
+      film.started = true;
       setDriving(false);
       setChapter(c, 1 / film.chapters[c].steps.length);
       film.chapter = c;
@@ -184,14 +185,27 @@
     }
 
     // ---- Your turn -------------------------------------------------------------------------------
-    let lastInput = 0;
+    let idleTimer = 0;
+    /** While the visitor has the laser, the film comes back after IDLE_MS without input. */
+    function idle() {
+      clearTimeout(idleTimer);
+      if (film.driving) idleTimer = setTimeout(() => stage.drawing ? idle() : play(film.chapter), IDLE_MS);
+    }
     function setDriving(on) {
       film.driving = on;
       screen.classList.toggle('driving', on);
+      // Whatever is hidden can't be tabbed to; focus moves to what replaced it.
+      const tools = m('tools'), badge = m('badge'), focused = document.activeElement;
+      tools.inert = !on;
+      if (badge) badge.inert = on;
+      if (!on && tools.contains(focused) && badge) badge.focus();
+      if (on && badge && badge === focused) m('presets').firstElementChild.focus();
       call('mode', on);
+      idle();
     }
     /** The visitor takes the laser. With a press, that press starts their first stroke. */
     function drive(press) {
+      film.started = true;
       if (!film.driving) {
         stage.takeOver();
         keys([]);
@@ -200,7 +214,7 @@
         caption('Your turn. Draw anywhere on the screen.');
       }
       if (!stage.on) stage.setOn(true);
-      lastInput = performance.now();
+      idle();
       if (press) {
         const r = stage.canvas.getBoundingClientRect();
         stage.pointer = { x: press.clientX - r.left, y: press.clientY - r.top };
@@ -225,15 +239,12 @@
     screen.addEventListener('pointerleave', () => screen.classList.remove('hover'));
     const follow = m('follow');
     screen.addEventListener('pointermove', e => {
-      lastInput = performance.now();
+      if (film.driving) idle();
       if (!follow) return;
       const r = screen.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
       follow.style.transform = `translate(${Math.min(x + 18, r.width - follow.offsetWidth - 8)}px, ${y + 22}px)`;
     });
-    addEventListener('keydown', () => { if (film.driving) lastInput = performance.now(); });
-    setInterval(() => {
-      if (film.driving && !stage.drawing && !screen.classList.contains('hover') && performance.now() - lastInput > IDLE_MS) play(film.chapter);
-    }, 1000);
+    addEventListener('keydown', () => { if (film.driving) idle(); });
 
     if (m('badge')) m('badge').addEventListener('click', () => drive());
 
@@ -258,7 +269,7 @@
       m('curs').append(b);
     }
     // Tools are buttons, not the screen: using them shouldn't draw or count as idle.
-    m('presets').parentElement.addEventListener('pointerdown', e => { lastInput = performance.now(); e.stopPropagation(); });
+    m('tools').addEventListener('pointerdown', e => { idle(); e.stopPropagation(); });
 
     changed();
     return film;
