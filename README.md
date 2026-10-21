@@ -10,16 +10,20 @@ presentation.
 ## Features
 
 - **Smooth laser trail** that tapers and fades over time, drawn as one anti-aliased
-  shape per stroke. Solid, Glow and Neon styles; any colour; adjustable thickness, opacity and
-  fade time.
+  shape per stroke. Solid, Glow and Neon styles; any colour from the swatches or the built-in
+  picker; adjustable thickness, opacity and fade time.
+- **Keeps up with your hand.** The head of the stroke is drawn where the cursor is at the moment
+  each frame starts, a few milliseconds ahead when you move fast. Each frame starts as late as is
+  safe before Windows draws the screen, and on Windows 11 laptops the screen runs at its fastest
+  refresh rate while you draw.
 - **Presets** — Laser, Highlighter and Pen to start with; create, rename, update and delete your
   own (up to eight).
 - **Keep strokes** — annotations stay on screen, even with the laser off and clicks passing
   through them, until you clear them. Undo and redo anything, clearing included.
 - **Straight lines** — hold Alt while drawing for a perfectly horizontal line, Shift+Alt for a
   vertical one.
-- **Shape snapping** — let go of a rough circle, box, triangle, line or arrow and it settles into
-  a clean one. How sloppy a stroke may be and still snap is set per preset, from Strict to
+- **Shape snapping** — let go of a rough circle, box, triangle, line or arrow and it springs into
+  a clean one and glows once. A snapped shape holds still for its fade time, then fades out. How sloppy a stroke may be and still snap is set per preset, from Strict to
   Lenient; hold Ctrl as you let go to keep a stroke freehand.
 - **Shortcuts for everything** — rebind or remove any action, including single keys. Keys that
   only make sense while drawing (Esc, Undo) are claimed only while the laser is on.
@@ -27,7 +31,8 @@ presentation.
   chevron, brackets or micro dot, in the laser colour. Each moves its own way: dots swell in and
   squeeze, crosshairs spin in and twist, rings pulse, the chevron tilts.
 - **Click ripples** where right-clicks land, and an **on-screen indicator** that confirms toggles,
-  preset changes and size changes.
+  preset changes and size changes. Optionally, a ring closes in on the cursor as the laser turns
+  on, so the audience can find it. Every animation follows Windows' Animation effects setting.
 - **Settings panel** in the Windows 11 style, following your light/dark theme and accent colour,
   with a live preview. Left-click the tray icon to open it.
 - Light on resources: the overlay is hidden while there is nothing to show, only the parts of the

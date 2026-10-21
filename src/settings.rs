@@ -4,10 +4,10 @@ use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use windows::core::{w, HSTRING, PCWSTR};
+use windows::core::{w, HSTRING, PCWSTR, PWSTR};
 use windows::ApplicationModel::{StartupTask, StartupTaskState};
 use windows::Win32::Foundation::APPMODEL_ERROR_NO_PACKAGE;
-use windows::Win32::Storage::Packaging::Appx::GetCurrentPackageFullName;
+use windows::Win32::Storage::Packaging::Appx::{GetCurrentPackageFamilyName, GetCurrentPackageFullName};
 use windows::Win32::System::Registry::{
     RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW, HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_SZ,
 };
@@ -211,6 +211,10 @@ pub struct Settings {
     pub indicator: bool,
     /// Take the mouse from a game that has captured it while the laser is on.
     pub game_focus: bool,
+    /// A ring closes in on the cursor as the laser turns on, so the audience can find it.
+    pub pulse: bool,
+    /// The first notice has taught how to draw and stop; it says only "Laser on" from then on.
+    pub hinted: bool,
     pub keys: [Binding; COMMANDS.len()],
 }
 
@@ -222,6 +226,8 @@ impl Default for Settings {
             ripples: true,
             indicator: true,
             game_focus: true,
+            pulse: false,
+            hinted: false,
             keys: COMMANDS.map(Command::default_binding),
         }
     }
@@ -361,7 +367,7 @@ pub fn set_binding(slot: Slot, binding: Binding) {
 
 type Field = (&'static str, fn(&Settings) -> u32, fn(&mut Settings, u32));
 
-const FIELDS: [Field; 11] = [
+const FIELDS: [Field; 13] = [
     ("color", |s| s.look.color, |s, v| s.look.color = v),
     ("width", |s| s.look.width, |s, v| s.look.width = v),
     ("opacity", |s| s.look.opacity, |s, v| s.look.opacity = v),
@@ -373,6 +379,8 @@ const FIELDS: [Field; 11] = [
     ("ripples", |s| s.ripples.into(), |s, v| s.ripples = v != 0),
     ("indicator", |s| s.indicator.into(), |s, v| s.indicator = v != 0),
     ("game_focus", |s| s.game_focus.into(), |s, v| s.game_focus = v != 0),
+    ("pulse", |s| s.pulse.into(), |s, v| s.pulse = v != 0),
+    ("hinted", |s| s.hinted.into(), |s, v| s.hinted = v != 0),
 ];
 
 fn path() -> Option<PathBuf> {
@@ -552,6 +560,17 @@ pub enum Autostart {
     Failed,
 }
 
+/// The Store package's family name, in the Store build; the plain exe has none.
+pub fn package_family() -> Option<String> {
+    if !packaged() {
+        return None;
+    }
+    let mut name = [0u16; 128];
+    let mut length = name.len() as u32;
+    let found = unsafe { GetCurrentPackageFamilyName(&mut length, Some(PWSTR(name.as_mut_ptr()))) };
+    (found.0 == 0 && length > 0).then(|| String::from_utf16_lossy(&name[..length as usize - 1]))
+}
+
 fn packaged() -> bool {
     static PACKAGED: OnceLock<bool> = OnceLock::new();
     *PACKAGED.get_or_init(|| {
@@ -648,6 +667,8 @@ mod tests {
         settings.look.snap = 80;
         settings.cursor = cursors::index_of("chevron");
         settings.game_focus = false;
+        settings.pulse = true;
+        settings.hinted = true;
         settings.keys[Command::Redo.index()] = Binding::new(MOD_CONTROL.0, u32::from(b'R'));
         let mut presets = default_presets();
         presets[1].key = Binding::new(MOD_ALT.0, u32::from(b'H'));

@@ -44,13 +44,23 @@ pub fn back_out(k: f32) -> f32 {
     1.0 + c3 * (k - 1.0).powi(3) + c1 * (k - 1.0).powi(2)
 }
 
+/// How long the cursor takes to shrink away as the laser turns off, in seconds.
+pub const EXTINGUISH_SECS: f32 = 0.12;
+
+/// The cursor's scale `k` of the way through shrinking away: slow to start, then gone, as
+/// Windows' own exits go. Every style shrinks the same way, without turning.
+pub fn extinguish(k: f32) -> f32 {
+    let k = k.clamp(0.0, 1.0);
+    1.0 - 0.7 * k * k
+}
+
 impl Motion {
-    /// How long switching on takes, in seconds.
+    /// How long switching on takes, in seconds: Windows' own entrances take 167 to 250 ms.
     pub fn ignite_secs(self) -> f32 {
         if self == Self::Spin {
-            0.16
+            0.2
         } else {
-            0.12
+            0.167
         }
     }
 

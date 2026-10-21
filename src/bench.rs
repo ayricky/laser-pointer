@@ -170,6 +170,89 @@ fn kept_pieces_look_like_the_whole_stroke() {
     }
 }
 
+/// A settled shape drawn from its tessellated parts looks as plain `draw` makes it, holding and
+/// then halfway through fading out.
+#[test]
+#[ignore = "needs a GPU"]
+fn settled_shapes_drawn_once_look_like_plain_draw() {
+    use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D_SIZE_U};
+    use windows::Win32::Graphics::Direct2D::{
+        D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_CPU_READ, D2D1_BITMAP_OPTIONS_TARGET, D2D1_MAP_OPTIONS_READ,
+    };
+    use crate::graphics::bitmap_properties;
+    use crate::settings::{STYLE_GLOW, STYLE_NEON};
+    use crate::stroke::{self, Pieces, Scratch, SHAPE_FADE_MS};
+    unsafe {
+        let size = 600u32;
+        let hwnd = hidden_window(0, 0, size as i32, size as i32);
+        let gfx = Graphics::new(hwnd, size, size).unwrap();
+        let extent = D2D_SIZE_U { width: size, height: size };
+        let pixels = |draw: &dyn Fn()| -> Vec<u8> {
+            let canvas = gfx.dc.CreateBitmap(extent, None, 0, &bitmap_properties(D2D1_BITMAP_OPTIONS_TARGET)).unwrap();
+            let readback = gfx.dc.CreateBitmap(extent, None, 0, &bitmap_properties(D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW)).unwrap();
+            gfx.dc.SetTarget(&canvas);
+            gfx.dc.BeginDraw();
+            gfx.dc.Clear(Some(&D2D1_COLOR_F::default()));
+            draw();
+            gfx.dc.EndDraw(None, None).unwrap();
+            readback.CopyFromBitmap(None, &canvas, None).unwrap();
+            let mapped = readback.Map(D2D1_MAP_OPTIONS_READ).unwrap();
+            let mut out = Vec::new();
+            for row in 0..size as usize {
+                out.extend_from_slice(std::slice::from_raw_parts(mapped.bits.add(row * mapped.pitch as usize), size as usize * 4));
+            }
+            readback.Unmap().unwrap();
+            out
+        };
+        let at = Instant::now();
+        for style in [0, STYLE_GLOW, STYLE_NEON] {
+            let mut look = settings::get().look;
+            (look.ink, look.style, look.smoothing, look.width) = (false, style, 0, 6);
+            // A ring and a stroke through it, as an arrow's parts are.
+            let mut stroke = Stroke::new(Point { x: 0.0, y: 0.0, at }, look, 1.0);
+            stroke.points = (0..=90).map(|i| { let t = i as f32 / 90.0 * std::f32::consts::TAU; Point { x: 300.0 + 150.0 * t.cos(), y: 300.0 + 150.0 * t.sin(), at } }).collect();
+            stroke.breaks.push(stroke.points.len());
+            stroke.points.extend([Point { x: 100.0, y: 500.0, at }, Point { x: 500.0, y: 100.0, at }]);
+            stroke.whole = true;
+            let mut pieces = Pieces::default();
+            for age in [0, look.fade_ms + SHAPE_FADE_MS / 2] {
+                let now = at + Duration::from_millis(u64::from(age));
+                let plain = pixels(&|| {
+                    let mut copy = stroke.clone();
+                    stroke::draw(&gfx.factory, &gfx.dc, &gfx.brush, &mut copy, now, 1.0, &mut Scratch::default()).unwrap();
+                });
+                let cached = std::cell::RefCell::new(std::mem::take(&mut pieces));
+                let shape = pixels(&|| {
+                    stroke::draw_shape(&gfx.factory, &gfx.dc1, &gfx.brush, &stroke, &mut cached.borrow_mut(), now, &mut Scratch::default()).unwrap();
+                });
+                pieces = cached.into_inner();
+                if let Ok(directory) = std::env::var("PIECES_DUMP") {
+                    std::fs::write(format!("{directory}/plain-{style}-{age}.raw"), &plain).unwrap();
+                    std::fs::write(format!("{directory}/shape-{style}-{age}.raw"), &shape).unwrap();
+                }
+                // Compared as seen, over 3 x 3 pixels: a tessellated edge may sit a fraction of a
+                // pixel from where a live fill puts it, and steps along a nearly flat edge, as
+                // kept strokes' pieces do. A missing part or a doubled pass shows far more.
+                let n = size as usize;
+                let seen = |pixels: &[u8], x: usize, y: usize| -> f32 {
+                    (0..9).map(|k| f32::from(pixels[((y + k / 3 - 1) * n + x + k % 3 - 1) * 4 + 3])).sum::<f32>() / 9.0
+                };
+                let (mut differ, mut worst) = (0, 0.0f32);
+                for y in 1..n - 1 {
+                    for x in 1..n - 1 {
+                        let difference = (seen(&plain, x, y) - seen(&shape, x, y)).abs();
+                        worst = worst.max(difference);
+                        differ += usize::from(difference > 24.0);
+                    }
+                }
+                let painted = plain.chunks(4).filter(|p| p[3] > 0).count();
+                eprintln!("style {style}, {age} ms: {differ} of {painted} painted pixels look different, worst by {worst:.0}");
+                assert!(painted > 5000 && worst < 80.0 && differ * 200 < painted, "style {style}, {age} ms: {differ} of {painted}, worst {worst}");
+            }
+        }
+    }
+}
+
 /// Drawing a kept stroke repaints only where it's still growing. What's left on screen once it
 /// stops must be what a full repaint shows: nothing missing, nothing smeared.
 #[test]
@@ -181,6 +264,7 @@ fn a_growing_kept_stroke_leaves_what_a_full_repaint_shows() {
         let hwnd = hidden_window(0, 0, size as i32, size as i32);
         let gfx = Graphics::new(hwnd, size, size).unwrap();
         let mut app = App::new(hwnd, gfx, (0, 0), (size, size));
+        app.live_cursor = || None;
         let waitable = app.waitable().unwrap();
         let frame = |app: &mut App| {
             let _ = WaitForSingleObject(waitable, 100) == WAIT_OBJECT_0;
@@ -217,6 +301,65 @@ fn a_growing_kept_stroke_leaves_what_a_full_repaint_shows() {
     }
 }
 
+/// The head of a stroke being drawn follows the mouse between its messages: drawn where the
+/// cursor is, even when the stroke has as many points as last frame, and never kept.
+#[test]
+#[ignore = "needs a GPU"]
+fn the_head_follows_the_cursor_and_is_never_kept() {
+    use std::sync::atomic::{AtomicI32, Ordering};
+    use windows::Win32::Foundation::{POINT, WAIT_OBJECT_0};
+    static CURSOR_Y: AtomicI32 = AtomicI32::new(0);
+    unsafe {
+        let size = 600u32;
+        let hwnd = hidden_window(0, 0, size as i32, size as i32);
+        let gfx = Graphics::new(hwnd, size, size).unwrap();
+        let mut app = App::new(hwnd, gfx, (0, 0), (size, size));
+        app.live_cursor = || Some(POINT { x: 400, y: CURSOR_Y.load(Ordering::Relaxed) });
+        let waitable = app.waitable().unwrap();
+        let frame = |app: &mut App| {
+            assert_eq!(WaitForSingleObject(waitable, 100), WAIT_OBJECT_0, "a frame went without a present");
+            app.dirty = true;
+            app.render();
+        };
+        let painted_at = |app: &App, y: usize| {
+            let pixels = app.gfx.as_ref().unwrap().read_back();
+            pixels[(y * size as usize + 400) * 4 + 3] > 0
+        };
+        // A short stroke, fading and kept, and a kept one long enough to have settled pieces,
+        // coiled up away from where the head goes.
+        let coil: Vec<(f32, f32)> = (0..900).map(|i| { let t = i as f32 * 0.05; let r = 10.0 + t * 1.6; (100.0 + r * t.cos(), 100.0 + r * t.sin()) }).collect();
+        for (ink, path) in [(false, vec![(100.0, 300.0), (200.0, 300.0)]), (true, vec![(100.0, 300.0), (200.0, 300.0)]), (true, coil)] {
+            let now = Instant::now();
+            let mut look = settings::get().look;
+            look.ink = ink;
+            let mut stroke = Stroke::new(Point { x: path[0].0, y: path[0].1, at: now }, look, 1.0);
+            stroke.points = path.iter().map(|&(x, y)| Point { x, y, at: now }).collect();
+            let length = stroke.points.len();
+            app.strokes = vec![Drawn::new(1, stroke)];
+            app.drawing = true;
+            // Straight on from the stroke, then off to one side, the stroke as long as before.
+            for y in [300, 500] {
+                CURSOR_Y.store(y, Ordering::Relaxed);
+                // The frame before last is the one read back.
+                for _ in 0..3 {
+                    frame(&mut app);
+                }
+                assert!(painted_at(&app, y as usize), "ink {ink}, {length} points: no head at the cursor, {y}");
+                assert_eq!(app.strokes[0].stroke.points.len(), length, "the head was kept");
+            }
+            assert!(!painted_at(&app, 300), "ink {ink}, {length} points: the head drawn before stayed");
+            if length > 600 {
+                assert!(app.strokes[0].pieces.settled() > 0, "the long stroke never settled a piece");
+            }
+            app.drawing = false;
+            app.strokes.clear();
+            for _ in 0..3 {
+                frame(&mut app);
+            }
+        }
+    }
+}
+
 /// Undoing a kept stroke that a fading one still holds back from the ink layer leaves nothing
 /// of it on screen, though only its growing end was repainted while it was drawn.
 #[test]
@@ -227,6 +370,7 @@ fn undoing_a_kept_stroke_leaves_nothing_behind() {
         let hwnd = hidden_window(0, 0, size as i32, size as i32);
         let gfx = Graphics::new(hwnd, size, size).unwrap();
         let mut app = App::new(hwnd, gfx, (0, 0), (size, size));
+        app.live_cursor = || None;
         let waitable = app.waitable().unwrap();
         let frame = |app: &mut App| {
             WaitForSingleObject(waitable, 100);
@@ -281,6 +425,7 @@ fn a_clear_fades_away_and_undoes() {
         let hwnd = hidden_window(0, 0, size as i32, size as i32);
         let gfx = Graphics::new(hwnd, size, size).unwrap();
         let mut app = App::new(hwnd, gfx, (0, 0), (size, size));
+        app.live_cursor = || None;
         let waitable = app.waitable().unwrap();
         let frame = |app: &mut App| {
             WaitForSingleObject(waitable, 100);
@@ -367,6 +512,7 @@ fn perf_report() {
         let gfx = Graphics::new(hwnd, size.0, size.1).unwrap();
         eprintln!("{:<44} {:>7.3} ms", "Graphics::new", started.elapsed().as_secs_f64() * 1000.0);
         let mut app = App::new(hwnd, gfx, (x, y), size);
+        app.live_cursor = || None;
 
         // Turning on after the overlay has been idle: buffers back, toast, a whole-screen frame.
         time("untrim (screen-sized buffers back)", 10, || {

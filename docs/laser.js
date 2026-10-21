@@ -9,10 +9,14 @@
   const MIN_STEP = 2, CURVE_STEP = 3, CAP = 8;
   const LAYERS = {
     solid: [[1, 1, 0]],
-    glow: [[3.4, 0.10, 0], [2.1, 0.20, 0], [1, 1, 0]],
+    glow: [[3.4, 0.10, 0], [2.1, 0.20, 0], [1, 1, 0], [0.38, 0.85, 0.6]],
     neon: [[3.8, 0.12, 0], [2.3, 0.26, 0], [1, 1, 0], [0.45, 1, 0.85]],
   };
   const easeOut4 = k => 1 - Math.pow(1 - k, 4);
+  // A snapped shape glows brighter once as it settles, then holds for its fade time and fades
+  // out over SHAPE_FADE_MS.
+  const FLASH_MS = 400, FLASH = [3, 0.45, 0.35], SHAPE_FADE_MS = 500;
+  const lifetime = s => s.look.fade + (s.whole ? SHAPE_FADE_MS : 0);
   const dist = (a, b) => Math.hypot(b.x - a.x, b.y - a.y);
 
   function smooth(pts, span) {
@@ -66,10 +70,11 @@
     const { points: pts, look: s } = stroke;
     const base = s.width / 2, n = pts.length;
     if (!n) return;
-    let radii = new Array(n).fill(base);
+    let radii = new Array(n).fill(base), life = 1;
     if (!s.ink && stroke.whole) {
       const newest = Math.max(...pts.map(p => p.t));
-      radii.fill(base * easeOut4(Math.max(0, 1 - (now - newest) / s.fade)));
+      const k = Math.min(1, Math.max(0, (now - newest - s.fade) / SHAPE_FADE_MS));
+      life = 1 - k * k * (3 - 2 * k);
     } else if (!s.ink) {
       for (let i = 0; i < n; i++) radii[i] = base * easeOut4(Math.max(0, 1 - (now - pts[i].t) / s.fade));
       let faded = 0;
@@ -79,6 +84,8 @@
       if (!pts.length) return;
     }
     const [r, g, b] = rgb(s.color);
+    const left = stroke.flash ? 1 - (now - stroke.flash) / FLASH_MS : 0;
+    const layers = left > 0 ? [[FLASH[0], FLASH[1] * left * left, FLASH[2]], ...LAYERS[s.style]] : LAYERS[s.style];
     const ends = [...(stroke.breaks || []), pts.length];
     let start = 0;
     for (const end of ends) {
@@ -86,9 +93,9 @@
       start = end;
       if (!part.length) continue;
       const [centre, w] = curveThrough(smooth(part, s.smoothing), widths, CURVE_STEP);
-      for (const [k, a, white] of LAYERS[s.style]) {
+      for (const [k, a, white] of layers) {
         const poly = outline(centre, w.map(x => x * k)), m = v => Math.round(v + (255 - v) * white);
-        ctx.fillStyle = `rgba(${m(r)},${m(g)},${m(b)},${a * s.opacity / 100 * fade})`;
+        ctx.fillStyle = `rgba(${m(r)},${m(g)},${m(b)},${a * s.opacity / 100 * fade * life})`;
         ctx.beginPath(); ctx.moveTo(poly[0].x, poly[0].y);
         for (let i = 1; i < poly.length; i++) ctx.lineTo(poly[i].x, poly[i].y);
         ctx.closePath(); ctx.fill('nonzero');
@@ -430,7 +437,7 @@
     ignite(now) { this.ignitedAt = now; }
     press(down, now) { if (down !== this.down) { this.down = down; this.pressAt = now; } }
     pose(kind, now) {
-      const ignite = (now - this.ignitedAt) / (kind === 'spin' ? 260 : 200);
+      const ignite = (now - this.ignitedAt) / (kind === 'spin' ? 200 : 167);
       const t = now - this.pressAt;
       const press = this.down ? easeOut3(Math.min(1, t / 90)) : 1 - easeOut3(Math.min(1, t / 140));
       return { ...motion(kind, ignite, press), animating: ignite < 1 || (this.down ? t < 90 : t < 140) };
@@ -473,7 +480,14 @@
     Highlighter: { color: '#ffd400', width: 18, opacity: 40, fade: 3000, smoothing: 2, style: 'solid', ink: false, snap: 60 },
     Pen: { color: '#1e90ff', width: 4, opacity: 100, fade: 1000, smoothing: 2, style: 'solid', ink: true, snap: 50 },
   };
-  const MORPH_MS = 140, CLEAR_MS = 220, RIPPLE_MS = 450, TOAST_MS = 1400;
+  const SNAP_MS = 250, CLEAR_MS = 220, RIPPLE_MS = 400, RIPPLE_REACH = 60, TOAST_MS = 1400, TOAST_IN = 250, TOAST_OUT = 167;
+  /** How far a snapping stroke has moved towards its shape, `ms` in: a spring that sets off at
+   *  once, overshoots by a few percent and lands exactly at SNAP_MS, as in src/main.rs. */
+  function spring(ms) {
+    if (ms >= SNAP_MS) return 1;
+    const t = ms / 1000, decay = 20.2, frequency = 19.4, start = 12;
+    return 1 - Math.exp(-decay * t) * (Math.cos(frequency * t) + (decay - start) / frequency * Math.sin(frequency * t));
+  }
 
   class Stage {
     /// `manual`: only takeOver() stops the ghost, and the page under it stays usable while it
@@ -654,6 +668,7 @@
           stroke.whole = true;
           stroke.look.smoothing = 0;
           stroke.morph = { from: correspondence(this.path, correction), to: correction.parts.flat(), at: now };
+          stroke.flash = now;
           stroke.points = stroke.morph.from.map(([x, y]) => ({ x, y, t: now }));
           stroke.breaks = [];
           let count = 0;
@@ -678,7 +693,7 @@
           break;
         }
         const now = performance.now();
-        const alive = s => s.look.ink || (s.points.length && now - Math.max(...s.points.map(p => p.t)) < s.look.fade);
+        const alive = s => s.look.ink || (s.points.length && now - Math.max(...s.points.map(p => p.t)) < lifetime(s));
         const restored = edit.cleared.filter(alive);
         if (!restored.length) continue;
         this.clearing = [];
@@ -790,6 +805,7 @@
         for (const s of new Set([...this.strokes, ...this.clearing])) {
           for (const p of s.points) p.t += away;
           if (s.morph) s.morph.at += away;
+          if (s.flash) s.flash += away;
         }
         this.clearedAt += away;
         g.pausedAt = null;
@@ -888,13 +904,16 @@
       this.strokes = this.strokes.filter(s => {
         if (s === this.drawing || s.look.ink) return true;
         const newest = s.points.length ? Math.max(...s.points.map(p => p.t)) : 0;
-        return now - newest < s.look.fade;
+        return now - newest < lifetime(s);
       });
       for (const s of this.strokes) {
         if (s.morph) {
-          const k = Math.min(1, (now - s.morph.at) / MORPH_MS), t = easeOut3(k);
+          const elapsed = now - s.morph.at, t = spring(elapsed);
           s.points.forEach((p, i) => { const [fx, fy] = s.morph.from[i], [tx, ty] = s.morph.to[i]; p.x = fx + (tx - fx) * t; p.y = fy + (ty - fy) * t; });
-          if (k >= 1) s.morph = null; else animating = true;
+          if (elapsed >= SNAP_MS) s.morph = null; else animating = true;
+        }
+        if (s.flash) {
+          if (now - s.flash >= FLASH_MS) s.flash = null; else animating = true;
         }
         drawStroke(ctx, s, now);
         if (!s.look.ink && s.points.length) animating = true;
@@ -908,7 +927,7 @@
       for (const r of this.ripples) {
         const k = (now - r.at) / RIPPLE_MS;
         ctx.strokeStyle = this.look.color; ctx.globalAlpha = 0.9 * Math.pow(1 - k, 1.5); ctx.lineWidth = 3 * (1 - 0.5 * k);
-        ctx.beginPath(); ctx.arc(r.x, r.y, 6 + 30 * (1 - Math.pow(1 - k, 3)), 0, TAU); ctx.stroke(); ctx.globalAlpha = 1;
+        ctx.beginPath(); ctx.arc(r.x, r.y, 6 + (RIPPLE_REACH - 6) * (1 - Math.pow(1 - k, 3)), 0, TAU); ctx.stroke(); ctx.globalAlpha = 1;
         animating = true;
       }
       if (this.toast) {
@@ -925,7 +944,7 @@
     }
 
     drawToast(age) {
-      const ctx = this.ctx, alpha = Math.max(0, Math.min(1, age / 150, (TOAST_MS - age) / 300));
+      const ctx = this.ctx, alpha = Math.max(0, Math.min(easeOut3(Math.min(1, age / TOAST_IN)), (TOAST_MS - age) / TOAST_OUT));
       ctx.font = '600 14px "Segoe UI Variable Text", "Segoe UI", sans-serif';
       const w = ctx.measureText(this.toast.text).width + 56, h = 34, x = (this.width - w) / 2, y = this.height - 56;
       ctx.globalAlpha = alpha;
