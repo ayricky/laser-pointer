@@ -282,10 +282,16 @@ impl Tolerances {
 
 pub fn correct(points: &[P], scale: f32, strength: f32) -> Option<Correction> {
     let strength = strength.clamp(0.0, 1.0);
-    if strength <= 0.0 || points.len() < 4 || length(points) < 40.0 * scale {
+    let walked = length(points);
+    if strength <= 0.0 || points.len() < 4 || !walked.is_finite() || walked < 40.0 * scale {
         return None;
     }
     let path = resample(points, SAMPLES);
+    // Bends finer than the samples are lost to them: a tight zigzag can sample as a straight
+    // line. Whatever goes that much further than its samples isn't a shape.
+    if length(&path) < 0.5 * walked {
+        return None;
+    }
     let tolerance = Tolerances::new(strength);
     match closed_part(&path, &tolerance) {
         Some(loop_) => polygon(&loop_, &tolerance, scale)
@@ -513,13 +519,17 @@ fn arrow(path: &[P], tolerance: &Tolerances, strength: f32, scale: f32) -> Optio
 /// return to the tip and a second wing on the other side of the shaft.
 fn arrowhead_shaped(head: &[P], start: P, tip: P, reach: f32, tolerance: &Tolerances) -> bool {
     let corners = simplify(head, tolerance.barbs * reach);
-    let side = |p: P| ((tip.0 - start.0) * (p.1 - start.1) - (tip.1 - start.1) * (p.0 - start.0)).signum();
+    // Which side of the shaft, or none when on it: a wing along the shaft is on neither.
+    let side = |p: P| {
+        let cross = (tip.0 - start.0) * (p.1 - start.1) - (tip.1 - start.1) * (p.0 - start.0);
+        if cross > 0.0 { 1 } else if cross < 0.0 { -1 } else { 0 }
+    };
     let wing = |end: P| distance(tip, end) > (tolerance.wing + 0.05) * reach && turn_at(start, tip, end) > tolerance.hook;
     match corners.len() {
         2 => wing(corners[1]),
         4 => {
             let (first, back, second) = (corners[1], corners[2], corners[3]);
-            wing(first) && wing(second) && distance(back, tip) < (0.7 - tolerance.wing) * reach && side(first) != side(second)
+            wing(first) && wing(second) && distance(back, tip) < (0.7 - tolerance.wing) * reach && side(first) * side(second) < 0
         }
         _ => false,
     }
@@ -848,6 +858,22 @@ mod tests {
             ("cursive", cursive),
             ("scribble", walk),
         ]
+    }
+
+    /// Reviewers' cases: a zigzag finer than the samples, a second wing lying along the shaft
+    /// (and its mirror image), and coordinates that aren't numbers.
+    #[test]
+    fn strokes_that_slip_between_the_samples_stay_freehand() {
+        let fine_zigzag: Vec<P> = (0..=190).map(|i| (100.0 + 400.0 * i as f32 / 190.0, 100.0 + 60.0 * (i % 2) as f32)).collect();
+        assert_eq!(correct(&fine_zigzag, 1.0, LASER_DEFAULT).map(|c| c.shape), None);
+        let on_the_shaft = [(0.0, 0.0), (300.0, 0.0), (264.0, 48.0), (300.0, 0.0), (245.0, 0.0)];
+        let mirrored = on_the_shaft.map(|(x, y)| (x, -y));
+        for outline in [on_the_shaft, mirrored] {
+            assert_ne!(correct(&polyline(&outline, 1.0), 1.0, LASER_DEFAULT).map(|c| c.shape), Some(Shape::Arrow));
+        }
+        for bad in [f32::NAN, f32::INFINITY] {
+            assert!(correct(&[(0.0, 0.0), (100.0, 0.0), (bad, 0.0), (200.0, 0.0)], 1.0, LASER_DEFAULT).is_none());
+        }
     }
 
     fn rate(samples: usize, mut make: impl FnMut(&mut Random) -> Vec<P>, strength: f32, shape: Shape) -> f32 {
@@ -1257,7 +1283,7 @@ mod tests {
                             Point { x, y, at: now }
                         }));
                     }
-                    stroke::draw(&canvas.factory, target, &brush, &mut shape, now, 1.0, &mut scratch);
+                    stroke::draw(&canvas.factory, target, &brush, &mut shape, now, 1.0, &mut scratch).unwrap();
                 }
             }
             target.EndDraw(None, None).unwrap();

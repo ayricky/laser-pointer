@@ -290,10 +290,10 @@
 
   function arrowheadShaped(head, start, tip, reach, tol) {
     const corners = simplify(head, tol.barbs * reach);
-    const side = p => Math.sign((tip[0] - start[0]) * (p[1] - start[1]) - (tip[1] - start[1]) * (p[0] - start[0]));
+    const side = p => Math.sign((tip[0] - start[0]) * (p[1] - start[1]) - (tip[1] - start[1]) * (p[0] - start[0])) || 0;
     const wing = end => d2(tip, end) > (tol.wing + 0.05) * reach && turnAt(start, tip, end) > tol.hook;
     if (corners.length === 2) return wing(corners[1]);
-    if (corners.length === 4) return wing(corners[1]) && wing(corners[3]) && d2(corners[2], tip) < (0.7 - tol.wing) * reach && side(corners[1]) !== side(corners[3]);
+    if (corners.length === 4) return wing(corners[1]) && wing(corners[3]) && d2(corners[2], tip) < (0.7 - tol.wing) * reach && side(corners[1]) * side(corners[3]) < 0;
     return false;
   }
 
@@ -383,8 +383,12 @@
 
   /** `points` as [[x, y]], `strength` 0..1. Returns `{shape, parts}` or null. */
   function correct(points, scale, strength) {
-    if (strength <= 0 || points.length < 4 || pathLength(points) < 40 * scale) return null;
-    const path = resample(points, SAMPLES), tol = tolerances(strength), loop = closedPart(path, tol);
+    const walked = pathLength(points);
+    if (strength <= 0 || points.length < 4 || !Number.isFinite(walked) || walked < 40 * scale) return null;
+    const path = resample(points, SAMPLES);
+    // Bends finer than the samples are lost to them; whatever goes that much further isn't a shape.
+    if (pathLength(path) < 0.5 * walked) return null;
+    const tol = tolerances(strength), loop = closedPart(path, tol);
     const ideal = loop ? polygon(loop, tol, scale) || ellipse(loop, tol, scale) : arrow(path, tol, strength, scale) || line(path, tol, strength, scale);
     return ideal;
   }
