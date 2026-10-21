@@ -145,14 +145,18 @@ fn signed_turn(previous: P, at: P, next: P) -> f32 {
     }
     let a = (at.1 - previous.1).atan2(at.0 - previous.0);
     let b = (next.1 - at.1).atan2(next.0 - at.0);
-    let mut turn = b - a;
-    while turn > PI {
-        turn -= TAU;
+    wrap(b - a)
+}
+
+/// The same angle, within -π..π.
+fn wrap(mut angle: f32) -> f32 {
+    while angle > PI {
+        angle -= TAU;
     }
-    while turn < -PI {
-        turn += TAU;
+    while angle < -PI {
+        angle += TAU;
     }
-    turn
+    angle
 }
 
 /// Sum of the signed turns along the path, in radians.
@@ -295,43 +299,115 @@ pub fn correspondence(drawn: &[P], to: &Correction) -> Vec<P> {
     resample(drawn, total.max(2))
 }
 
-/// If the end comes back to the start (or past it), the loop up to that point.
+/// The point nearest `p` on the segment from `a` to `b`.
+fn nearest_on(p: P, a: P, b: P) -> P {
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let length2 = dx * dx + dy * dy;
+    let t = if length2 > 0.0 {
+        (((p.0 - a.0) * dx + (p.1 - a.1) * dy) / length2).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    (a.0 + dx * t, a.1 + dy * t)
+}
+
+/// Where the segments `a`–`b` and `c`–`d` cross, if they do.
+fn crossing(a: P, b: P, c: P, d: P) -> Option<P> {
+    let (r, s) = ((b.0 - a.0, b.1 - a.1), (d.0 - c.0, d.1 - c.1));
+    let denominator = r.0 * s.1 - r.1 * s.0;
+    if denominator.abs() < 1e-9 {
+        return None;
+    }
+    let t = ((c.0 - a.0) * s.1 - (c.1 - a.1) * s.0) / denominator;
+    let u = ((c.0 - a.0) * r.1 - (c.1 - a.1) * r.0) / denominator;
+    ((0.0..=1.0).contains(&t) && (0.0..=1.0).contains(&u)).then_some((a.0 + r.0 * t, a.1 + r.1 * t))
+}
+
+/// Where the end of a stroke comes back to its beginning.
+struct Seam {
+    /// The segment from `path[first]` near the start, and from `path[last]` near the end.
+    first: usize,
+    last: usize,
+    /// The point on each segment nearest the other: the same point where they cross.
+    on_first: P,
+    on_last: P,
+    gap: f32,
+}
+
+/// The first place the end crosses the beginning, or else where the two come nearest. The
+/// beginning is the segments before `lead`, the end those from `from` on.
+fn seam(path: &[P], lead: usize, from: usize) -> Option<Seam> {
+    let mut best: Option<Seam> = None;
+    for last in from..path.len() - 1 {
+        let (c, d) = (path[last], path[last + 1]);
+        for first in 0..lead.min(last.saturating_sub(2)) {
+            let (a, b) = (path[first], path[first + 1]);
+            if let Some(x) = crossing(a, b, c, d) {
+                return Some(Seam { first, last, on_first: x, on_last: x, gap: 0.0 });
+            }
+            let pairs = [(nearest_on(c, a, b), c), (nearest_on(d, a, b), d), (a, nearest_on(a, c, d)), (b, nearest_on(b, c, d))];
+            for (on_first, on_last) in pairs {
+                let gap = distance(on_first, on_last);
+                if best.as_ref().is_none_or(|best| gap < best.gap) {
+                    best = Some(Seam { first, last, on_first, on_last, gap });
+                }
+            }
+        }
+    }
+    best
+}
+
+/// If the end comes back to the beginning (or past it), the loop between.
 fn closed_part(path: &[P], tolerance: &Tolerances) -> Option<Vec<P>> {
     let (_, _, major, minor) = principal_axis(path);
     let size = (major.sqrt() + minor.sqrt()) * 2.0;
-    let start = path[0];
-    // People overshoot when circling something: look for the closest return over the last part.
-    let from = path.len() * 6 / 10;
-    let (index, gap) = path[from..]
-        .iter()
-        .enumerate()
-        .map(|(i, p)| (from + i, distance(*p, start)))
-        .min_by(|a, b| a.1.total_cmp(&b.1))?;
-    if gap > tolerance.close * size {
+    let total = length(path);
+    // The loop may begin a little way in, where the end comes back to: the start can be a short
+    // lead-in, as when the end lands on the first side rather than on the very first point.
+    let (mut lead, mut walked) = (1, 0.0);
+    while lead < path.len() - 1 && walked + distance(path[lead - 1], path[lead]) <= 0.12 * total {
+        walked += distance(path[lead - 1], path[lead]);
+        lead += 1;
+    }
+    // People overshoot when circling something: the end is looked for over the last part.
+    let seam = seam(path, lead, path.len() * 6 / 10)?;
+    if seam.gap > tolerance.close * size {
         return None;
     }
+    let before: Vec<P> = path[..=seam.first].iter().copied().chain([seam.on_first]).collect();
+    let after: Vec<P> = [seam.on_last].into_iter().chain(path[seam.last + 1..].iter().copied()).collect();
     // Overshooting the start a little is how people circle things; a real tail beyond it is
     // something else, and mustn't be thrown away.
-    if length(&path[index..]) > 0.12 * length(path) {
+    if length(&after) > 0.12 * total {
         return None;
     }
-    let mut loop_ = path[..=index].to_vec();
-    // ...and stay on the loop: an overshoot retraces it, a tail heads off somewhere else.
+    // Cut at the seam, the loop has no jog where its ends meet, which would read as a corner.
+    let mut loop_: Vec<P> = Vec::with_capacity(seam.last - seam.first + 3);
+    let ring = path[seam.first + 1..=seam.last].iter().copied().chain([seam.on_last, seam.on_first]);
+    for p in [seam.on_first].into_iter().chain(ring) {
+        if loop_.last().is_none_or(|&last| distance(last, p) > 1e-3) {
+            loop_.push(p);
+        }
+    }
+    if loop_.len() < 4 {
+        return None;
+    }
+    // Beyond the seam the stroke must stay on the loop, as an overshoot retracing it does, or stop
+    // soon, as where a corner is crossed; a longer tail heads off somewhere else.
     let near_loop = |p: &P| loop_.iter().map(|q| distance(*p, *q)).fold(f32::MAX, f32::min) < 0.08 * size;
-    if !path[index..].iter().all(near_loop) {
+    let stub = |part: &[P]| length(part) <= 0.06 * total || part.iter().all(near_loop);
+    if !stub(&before) || !stub(&after) {
         return None;
     }
-    // Close it without a sliver of a last side, which would read as a sharp turn.
-    if distance(loop_[loop_.len() - 1], start) < 0.03 * size {
-        loop_.pop();
-    }
-    loop_.push(start);
-    // Once round, without the doubling back of a scribble. The doubling back is counted on the
-    // loop's outline: a hand's tremor turns a little at every sample, and along the sides of a
-    // box that adds up to more than a scribble's worth, though the box never doubles back.
-    let (signed, _) = loop_turning(&loop_);
+    // Once round, counted about the middle, so a jog where the ends meet can't flip it; and
+    // without the doubling back of a scribble. That is counted on the loop's outline: a hand's
+    // tremor turns a little at every sample, and along the sides of a box that adds up to more
+    // than a scribble's worth, though the box never doubles back.
+    let middle = centroid(&loop_);
+    let bearing = |p: P| (p.1 - middle.1).atan2(p.0 - middle.0);
+    let winding: f32 = loop_.windows(2).map(|pair| wrap(bearing(pair[1]) - bearing(pair[0]))).sum();
     let (_, absolute) = loop_turning(&simplify(&loop_, 0.03 * size));
-    let winds_once = (signed.abs() / TAU).round() == 1.0;
+    let winds_once = (winding.abs() / TAU).round() == 1.0;
     (winds_once && absolute < 3.4 * PI).then_some(loop_)
 }
 
@@ -370,9 +446,13 @@ fn line(path: &[P], tolerance: &Tolerances, strength: f32, scale: f32) -> Option
 /// tip is the point furthest from the start; everything after it is the head.
 fn arrow(path: &[P], tolerance: &Tolerances, strength: f32, scale: f32) -> Option<Correction> {
     let start = path[0];
-    // The first time the stroke gets that far: a double-winged head passes the tip twice.
+    // The first time the stroke gets that far: a double-winged head passes the tip twice, and
+    // the second pass may reach a little further than the first.
     let furthest = path.iter().map(|&p| distance(p, start)).fold(0.0, f32::max);
-    let tip_index = path.iter().position(|&p| distance(p, start) >= furthest - 1.0)?;
+    let mut tip_index = path.iter().position(|&p| distance(p, start) >= furthest - (0.05 * furthest).max(1.0))?;
+    while tip_index + 1 < path.len() && distance(path[tip_index + 1], start) >= distance(path[tip_index], start) {
+        tip_index += 1;
+    }
     let tip = path[tip_index];
     let shaft = distance(start, tip);
     let head = &path[tip_index..];
@@ -541,7 +621,7 @@ fn polygon(loop_: &[P], tolerance: &Tolerances, scale: f32) -> Option<Correction
 fn rectangle(corners: &[P], tolerance: &Tolerances, scale: f32) -> Option<Correction> {
     let right = (0..4).all(|i| {
         let turn = turn_at(corners[(i + 3) % 4], corners[i], corners[(i + 1) % 4]);
-        (turn - PI / 2.0).abs() < tolerance.angle * 2.5
+        (turn - PI / 2.0).abs() < tolerance.angle * 3.0
     });
     if !right {
         return None;
@@ -869,6 +949,58 @@ mod tests {
             let shaky = trembling(&mut random, &points, 2.5);
             assert!(correct(&shaky, 1.0, strength).is_none(), "a trembling {name} snapped");
         }
+    }
+
+    /// Where a hand ends a closed shape: on the first side a little past the start, across it,
+    /// or just short of it; and starting a little before the first corner.
+    #[test]
+    fn closes_where_the_end_meets_the_beginning() {
+        let strength = LASER_DEFAULT;
+        let closings: [(&str, P, P); 4] = [
+            // Lead-in (before the first corner), end (relative to the first corner).
+            ("ends on the first side", (-12.0, -12.0), (0.0, 0.0)),
+            ("crosses the first side", (0.0, 0.0), (-10.0, -14.0)),
+            ("pokes out at the first corner", (-14.0, -8.0), (6.0, -12.0)),
+            ("stops short", (0.0, 0.0), (5.0, 9.0)),
+        ];
+        for (name, lead, end) in closings {
+            for (shape, corners) in [
+                (Shape::Triangle, vec![(200.0, 100.0), (330.0, 320.0), (70.0, 320.0)]),
+                (Shape::Rectangle, vec![(100.0, 100.0), (360.0, 100.0), (360.0, 260.0), (100.0, 260.0)]),
+            ] {
+                let hit = rate(30, |r| {
+                    let (first, second, last) = (corners[0], corners[1], corners[corners.len() - 1]);
+                    // The end comes in along the last side and stops where `end` puts it.
+                    let along = |from: P, to: P, k: f32| (from.0 + (to.0 - from.0) * k, from.1 + (to.1 - from.1) * k);
+                    let landing = along(first, second, if name == "ends on the first side" { 0.08 } else { 0.0 });
+                    let mut ring = vec![(first.0 + lead.0, first.1 + lead.1)];
+                    ring.extend(corners.iter().map(|&(x, y)| (x + r.signed() * 5.0, y + r.signed() * 5.0)));
+                    ring.push(along(last, (landing.0 + end.0, landing.1 + end.1), 1.0));
+                    mouse(r, &polyline(&ring, 1.0), 1.0)
+                }, strength, shape);
+                assert!(hit >= 0.9, "{shape:?} that {name}: only {:.0}% recognised", hit * 100.0);
+            }
+        }
+    }
+
+    /// What the app is given: whole pixels from a trembling hand, at least 2 px apart.
+    fn mouse(random: &mut Random, outline: &[P], tremor: f32) -> Vec<P> {
+        let mut out: Vec<P> = Vec::new();
+        for (x, y) in resample(outline, length(outline) as usize) {
+            let p = ((x + random.signed() * tremor).round(), (y + random.signed() * tremor).round());
+            if out.last().is_none_or(|&last| distance(last, p) >= 2.0) {
+                out.push(p);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn an_arrow_whose_head_passes_the_tip_further_out_is_still_an_arrow() {
+        // Out to the tip, back along one wing, and past the tip on the way to the other.
+        let outline = polyline(&[(100.0, 300.0), (400.0, 300.0), (370.0, 280.0), (406.0, 302.0), (372.0, 322.0)], 1.0);
+        let hit = rate(30, |r| mouse(r, &outline, 0.8), LASER_DEFAULT, Shape::Arrow);
+        assert!(hit >= 0.9, "only {:.0}% recognised", hit * 100.0);
     }
 
     #[test]

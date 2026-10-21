@@ -163,10 +163,13 @@
 
   function signedTurn(prev, at, next) {
     if (d2(prev, at) < 1e-3 || d2(at, next) < 1e-3) return 0;
-    let turn = Math.atan2(next[1] - at[1], next[0] - at[0]) - Math.atan2(at[1] - prev[1], at[0] - prev[0]);
-    while (turn > Math.PI) turn -= TAU;
-    while (turn < -Math.PI) turn += TAU;
-    return turn;
+    return wrap(Math.atan2(next[1] - at[1], next[0] - at[0]) - Math.atan2(at[1] - prev[1], at[0] - prev[0]));
+  }
+
+  function wrap(angle) {
+    while (angle > Math.PI) angle -= TAU;
+    while (angle < -Math.PI) angle += TAU;
+    return angle;
   }
 
   function loopTurning(loop) {
@@ -209,22 +212,65 @@
     equal: lerp(0.07, 0.15, s), close: lerp(0.14, 0.26, s),
   });
 
+  function nearestOn(p, a, b) {
+    const dx = b[0] - a[0], dy = b[1] - a[1], length2 = dx * dx + dy * dy;
+    const t = length2 > 0 ? Math.min(1, Math.max(0, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / length2)) : 0;
+    return [a[0] + dx * t, a[1] + dy * t];
+  }
+
+  function crossing(a, b, c, d) {
+    const r = [b[0] - a[0], b[1] - a[1]], s = [d[0] - c[0], d[1] - c[1]], den = r[0] * s[1] - r[1] * s[0];
+    if (Math.abs(den) < 1e-9) return null;
+    const t = ((c[0] - a[0]) * s[1] - (c[1] - a[1]) * s[0]) / den, u = ((c[0] - a[0]) * r[1] - (c[1] - a[1]) * r[0]) / den;
+    return t >= 0 && t <= 1 && u >= 0 && u <= 1 ? [a[0] + r[0] * t, a[1] + r[1] * t] : null;
+  }
+
+  // Where the end of a stroke comes back to its beginning: the first place it crosses it, or else
+  // where the two come nearest. The beginning is the segments before `lead`, the end those from `from`.
+  function seam(path, lead, from) {
+    let best = null;
+    for (let last = from; last < path.length - 1; last++) {
+      const c = path[last], d = path[last + 1];
+      for (let first = 0; first < Math.min(lead, last - 2); first++) {
+        const a = path[first], b = path[first + 1], x = crossing(a, b, c, d);
+        if (x) return { first, last, onFirst: x, onLast: x, gap: 0 };
+        for (const [onFirst, onLast] of [[nearestOn(c, a, b), c], [nearestOn(d, a, b), d], [a, nearestOn(a, c, d)], [b, nearestOn(b, c, d)]]) {
+          const gap = d2(onFirst, onLast);
+          if (!best || gap < best.gap) best = { first, last, onFirst, onLast, gap };
+        }
+      }
+    }
+    return best;
+  }
+
   function closedPart(path, tol) {
     const [, , major, minor] = principalAxis(path);
-    const size = (Math.sqrt(major) + Math.sqrt(minor)) * 2, start = path[0], from = Math.floor(path.length * 6 / 10);
-    let index = from;
-    for (let i = from; i < path.length; i++) if (d2(path[i], start) < d2(path[index], start)) index = i;
-    if (d2(path[index], start) > tol.close * size) return null;
-    if (pathLength(path.slice(index)) > 0.12 * pathLength(path)) return null;
-    const loop = path.slice(0, index + 1);
+    const size = (Math.sqrt(major) + Math.sqrt(minor)) * 2, total = pathLength(path);
+    // The loop may begin a little way in, where the end comes back to: the start can be a short
+    // lead-in, as when the end lands on the first side rather than on the very first point.
+    let lead = 1, walked = 0;
+    while (lead < path.length - 1 && walked + d2(path[lead - 1], path[lead]) <= 0.12 * total) walked += d2(path[lead - 1], path[lead++]);
+    const s = seam(path, lead, Math.floor(path.length * 6 / 10));
+    if (!s || s.gap > tol.close * size) return null;
+    const before = path.slice(0, s.first + 1).concat([s.onFirst]), after = [s.onLast].concat(path.slice(s.last + 1));
+    if (pathLength(after) > 0.12 * total) return null;
+    // Cut at the seam, the loop has no jog where its ends meet, which would read as a corner.
+    const loop = [];
+    for (const p of [s.onFirst, ...path.slice(s.first + 1, s.last + 1), s.onLast, s.onFirst]) if (!loop.length || d2(loop[loop.length - 1], p) > 1e-3) loop.push(p);
+    if (loop.length < 4) return null;
+    // Beyond the seam the stroke stays on the loop, as an overshoot does, or stops soon, as where a
+    // corner is crossed; a longer tail heads off somewhere else.
     const nearLoop = p => loop.some(q => d2(p, q) < 0.08 * size);
-    if (!path.slice(index).every(nearLoop)) return null;
-    if (d2(loop[loop.length - 1], start) < 0.03 * size) loop.pop();
-    loop.push(start);
-    // The doubling back of a scribble is counted on the loop's outline, so a hand's tremor along
-    // a box's sides doesn't add up to look like it.
-    const [signed] = loopTurning(loop), [, absolute] = loopTurning(simplify(loop, 0.03 * size));
-    return Math.round(Math.abs(signed) / TAU) === 1 && absolute < 3.4 * Math.PI ? loop : null;
+    const stub = part => pathLength(part) <= 0.06 * total || part.every(nearLoop);
+    if (!stub(before) || !stub(after)) return null;
+    // Once round, counted about the middle so a jog where the ends meet can't flip it; the doubling
+    // back of a scribble is counted on the outline, so a hand's tremor along a box's sides doesn't
+    // add up to look like it.
+    const middle = centroid(loop), bearing = p => Math.atan2(p[1] - middle[1], p[0] - middle[0]);
+    let winding = 0;
+    for (let i = 1; i < loop.length; i++) winding += wrap(bearing(loop[i]) - bearing(loop[i - 1]));
+    const [, absolute] = loopTurning(simplify(loop, 0.03 * size));
+    return Math.round(Math.abs(winding) / TAU) === 1 && absolute < 3.4 * Math.PI ? loop : null;
   }
 
   function line(path, tol, strength, scale) {
@@ -253,7 +299,9 @@
 
   function arrow(path, tol, strength, scale) {
     const start = path[0], furthest = Math.max(...path.map(p => d2(p, start)));
-    const tipIndex = path.findIndex(p => d2(p, start) >= furthest - 1);
+    // The first pass at the tip: a double-winged head passes it again, maybe a little further out.
+    let tipIndex = path.findIndex(p => d2(p, start) >= furthest - Math.max(1, 0.05 * furthest));
+    while (tipIndex < path.length - 1 && d2(path[tipIndex + 1], start) >= d2(path[tipIndex], start)) tipIndex++;
     const tip = path[tipIndex], shaft = d2(start, tip), head = path.slice(tipIndex);
     const reach = Math.max(...head.map(p => d2(p, tip)));
     if (head.length < 3 || reach / shaft < 0.06 || reach / shaft > 0.45) return null;
@@ -295,7 +343,7 @@
 
   function rectangle(corners, tol, scale) {
     for (let i = 0; i < 4; i++) {
-      if (Math.abs(turnAt(corners[(i + 3) % 4], corners[i], corners[(i + 1) % 4]) - Math.PI / 2) >= tol.angle * 2.5) return null;
+      if (Math.abs(turnAt(corners[(i + 3) % 4], corners[i], corners[(i + 1) % 4]) - Math.PI / 2) >= tol.angle * 3) return null;
     }
     let sx = 0, sy = 0;
     for (let i = 0; i < 4; i++) { const a = corners[i], b = corners[(i + 1) % 4], t = 4 * Math.atan2(b[1] - a[1], b[0] - a[0]); sx += Math.cos(t); sy += Math.sin(t); }
