@@ -337,7 +337,7 @@
     const angle = snapAngle(axis, Math.PI / 2, tol.angle);
     const start = local(loop[0]), startAngle = Math.atan2(start[1] / b, start[0] / a), direction = Math.sign(loopTurning(loop)[0]) || 1;
     const perimeter = Math.PI * (3 * (a + b) - Math.sqrt((3 * a + b) * (a + 3 * b)));
-    const count = Math.max(24, Math.ceil(perimeter / (SPACING * scale))), s = Math.sin(angle), c = Math.cos(angle);
+    const count = Math.min(180, Math.max(24, Math.ceil(perimeter / (SPACING * scale)))), s = Math.sin(angle), c = Math.cos(angle);
     const points = [];
     for (let k = 0; k <= count; k++) {
       const t = startAngle + direction * TAU * k / count, x = a * Math.cos(t), y = b * Math.sin(t);

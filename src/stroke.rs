@@ -206,13 +206,21 @@ pub fn draw(
             continue;
         }
         smooth(&points[part.clone()], look.smoothing as usize, &mut scratch.path);
-        curve_through(
-            &scratch.path,
-            &scratch.radii[part],
-            CURVE_STEP * scale,
-            &mut scratch.centre,
-            &mut scratch.widths,
-        );
+        if *whole {
+            // A snapped shape is already its clean outline, kept to its corners once it settles:
+            // curving through those would round them off.
+            scratch.centre.clone_from(&scratch.path);
+            scratch.widths.clear();
+            scratch.widths.extend_from_slice(&scratch.radii[part]);
+        } else {
+            curve_through(
+                &scratch.path,
+                &scratch.radii[part],
+                CURVE_STEP * scale,
+                &mut scratch.centre,
+                &mut scratch.widths,
+            );
+        }
         let opacity = look.opacity as f32 / 100.0 * fade;
         for &(width, alpha, white) in layers(look.style) {
             scratch.layer.clear();

@@ -48,9 +48,9 @@ impl Motion {
     /// How long switching on takes, in seconds.
     pub fn ignite_secs(self) -> f32 {
         if self == Self::Spin {
-            0.26
+            0.16
         } else {
-            0.2
+            0.12
         }
     }
 

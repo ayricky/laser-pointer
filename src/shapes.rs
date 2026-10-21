@@ -296,6 +296,12 @@ pub fn correct(points: &[P], scale: f32, strength: f32) -> Option<Correction> {
     }
 }
 
+/// The same shape kept to the points that bend it, such as a box's corners, for drawing once it
+/// has stopped moving. Every frame of its fade draws each point; the morph needs them all.
+pub fn lean(parts: &[Vec<P>]) -> Vec<Vec<P>> {
+    parts.iter().map(|part| if part.len() > 2 { simplify(part, 0.1) } else { part.clone() }).collect()
+}
+
 /// For the morph animation: a point on the drawn path for each point of the shape, in order, so
 /// the stroke can slide onto it point for point.
 pub fn correspondence(drawn: &[P], to: &Correction) -> Vec<P> {
@@ -559,7 +565,8 @@ fn ellipse(loop_: &[P], tolerance: &Tolerances, scale: f32) -> Option<Correction
     let start_angle = (start.1 / b).atan2(start.0 / a);
     let direction = loop_turning(loop_).0.signum();
     let perimeter = PI * (3.0 * (a + b) - ((3.0 * a + b) * (a + 3.0 * b)).sqrt());
-    let count = ((perimeter / (SPACING * scale)).ceil() as usize).max(24);
+    // Past this many points a curve looks no rounder, but every frame of its fade costs more.
+    let count = ((perimeter / (SPACING * scale)).ceil() as usize).clamp(24, 180);
     let (sin, cos) = angle.sin_cos();
     let points = (0..=count)
         .map(|k| {
@@ -1237,9 +1244,11 @@ mod tests {
                     look.ink = true;
                     look.smoothing = 0;
                     let now = Instant::now();
+                    // As the app draws it once the morph has ended.
                     let mut shape = Stroke::new(Point { x: 0.0, y: 0.0, at: now }, look, 1.0);
+                    shape.whole = true;
                     shape.points.clear();
-                    for part in &correction.parts {
+                    for part in &lean(&correction.parts) {
                         if !shape.points.is_empty() {
                             shape.breaks.push(shape.points.len());
                         }

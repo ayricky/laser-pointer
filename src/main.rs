@@ -4,6 +4,8 @@
 //! A tray icon opens the settings panel.
 #![windows_subsystem = "windows"]
 
+#[cfg(test)]
+mod bench;
 mod constrain;
 mod cursors;
 mod games;
@@ -50,7 +52,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyCursor, DispatchMessageW, GetCursorPos,
     GetMessageTime, GetSystemMetrics, GetWindowLongPtrW, KillTimer, LoadCursorW,
-    MsgWaitForMultipleObjectsEx, PeekMessageW, PostQuitMessage, RegisterClassW, SetCursor,
+    MsgWaitForMultipleObjectsEx, PeekMessageW, PostQuitMessage, RegisterClassW, SetCursor, SetCursorPos,
     SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
     SystemParametersInfoW, TranslateMessage, GWL_EXSTYLE, HCURSOR, HICON, HWND_TOPMOST,
     IDC_ARROW, IDC_CROSS, LWA_ALPHA, MA_NOACTIVATE, MSG, MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT,
@@ -96,7 +98,7 @@ const MK_CONTROL: usize = 0x8;
 const VK_MASK: VIRTUAL_KEY = VIRTUAL_KEY(0xE8);
 
 const RIPPLE_SECS: f32 = 0.45;
-const MORPH_SECS: f32 = 0.14;
+const MORPH_SECS: f32 = 0.1;
 const TOAST_SECS: f32 = 1.4;
 const CLEAR_SECS: f32 = 0.22;
 
@@ -162,7 +164,7 @@ impl Drawn {
             point.y = fy + (ty - fy) * t;
         }
         if k >= 1.0 {
-            self.morph = None;
+            self.settle();
         }
         k < 1.0
     }
@@ -170,7 +172,7 @@ impl Drawn {
     /// Jumps a snapping stroke to its final shape, before it is put aside for undo or redo.
     fn settle(&mut self) {
         if let Some(morph) = self.morph.take() {
-            set_parts(&mut self.stroke, &morph.to.parts, morph.at);
+            set_parts(&mut self.stroke, &shapes::lean(&morph.to.parts), morph.at);
         }
     }
 }
@@ -842,6 +844,16 @@ fn monitor_scale(point: POINT) -> f32 {
     monitor_dpi(point) as f32 / 96.0
 }
 
+/// Windows chooses the cursor afresh only when the mouse moves, or a window appears or goes from
+/// under it. Turning click-through on or off does neither, so the old cursor would stay until the
+/// mouse next moved. Moving it to where it already is makes Windows ask again.
+unsafe fn repick_cursor() {
+    let mut at = POINT::default();
+    if GetCursorPos(&mut at).is_ok() {
+        let _ = SetCursorPos(at.x, at.y);
+    }
+}
+
 unsafe fn set_click_through(hwnd: HWND, on: bool) {
     let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
     let flag = WS_EX_TRANSPARENT.0 as isize;
@@ -1111,7 +1123,13 @@ impl App {
                 if !self.has_content() {
                     self.hide();
                 }
+                // The laser's cursor goes now, not when the mouse next moves.
+                if let Ok(arrow) = LoadCursorW(None, IDC_ARROW) {
+                    SetCursor(Some(arrow));
+                    INSTALLED.store(0, Ordering::Relaxed);
+                }
             }
+            repick_cursor();
         }
         self.update_ink_visible();
     }
@@ -1500,16 +1518,18 @@ impl App {
         drawn.stroke.whole = true;
         // Corners stay sharp; the shape is already smooth where it should be.
         drawn.stroke.look.smoothing = 0;
-        set_parts(&mut drawn.stroke, &correction.parts, now);
-        if animations_enabled() {
-            let from = shapes::correspondence(&self.path, &correction);
-            drawn.morph = Some(Morph {
-                from,
-                to: correction,
-                at: now,
-            });
-            drawn.advance_morph(now);
+        if !animations_enabled() {
+            set_parts(&mut drawn.stroke, &shapes::lean(&correction.parts), now);
+            return;
         }
+        set_parts(&mut drawn.stroke, &correction.parts, now);
+        let from = shapes::correspondence(&self.path, &correction);
+        drawn.morph = Some(Morph {
+            from,
+            to: correction,
+            at: now,
+        });
+        drawn.advance_morph(now);
     }
 
     fn remove_stroke(&mut self, id: u64) -> Option<Drawn> {
@@ -1946,7 +1966,7 @@ impl App {
                 if let Some((toast, at)) = &self.toast {
                     if intersects(Graphics::toast_bounds(toast), area) {
                         let age = now.duration_since(*at).as_secs_f32();
-                        let alpha = (age / 0.15).min(1.0).min((TOAST_SECS - age) / 0.3).max(0.0);
+                        let alpha = (age / 0.08).min(1.0).min((TOAST_SECS - age) / 0.3).max(0.0);
                         gfx.draw_toast(toast, color, alpha);
                     }
                 }
