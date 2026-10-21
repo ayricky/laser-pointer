@@ -2071,6 +2071,10 @@ impl App {
         if let Err(error) = baked {
             if device_lost(&error) {
                 self.lose_device();
+            } else {
+                // Strokes drawn before the failure are in the layer but not marked baked: start
+                // it again empty, so nothing ends up in it twice or stays after an undo.
+                self.rebake();
             }
             return;
         }
