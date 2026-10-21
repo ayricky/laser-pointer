@@ -763,6 +763,7 @@ impl Panel {
     /// Moves to another tab, leaving behind anything open on this one.
     fn switch_tab(&mut self, index: usize) {
         self.tab = index;
+        self.hover = None;
         self.status = None;
         self.scroll = 0.0;
         self.picking = None;
@@ -778,7 +779,7 @@ impl Panel {
             .as_ref()
             .is_some_and(|(_, at, _)| at.elapsed() < Duration::from_millis(5100));
         // A tooltip is due to show.
-        let tip_due = self.tip().is_some() && !self.tip_shown;
+        let tip_due = self.tip().is_some() && !self.tip_shown && self.hover.and_then(|hover| self.area_of(hover)).is_some();
         if self.tab != PEN {
             return self.renaming.is_some() || status_showing || tip_due;
         }
@@ -1108,6 +1109,8 @@ impl Panel {
                     return Action::Redraw;
                 }
                 self.confirm_delete = None;
+                // The icon under the pointer goes with its row.
+                self.hover = None;
                 let mut list = settings::presets();
                 let removed = list.remove(index);
                 settings::set_presets(list);
@@ -1205,8 +1208,9 @@ impl Panel {
                 let k = ((x - HUE_BAR.left) / (HUE_BAR.right - HUE_BAR.left)).clamp(0.0, 1.0);
                 if drag == Drag::Hue {
                     picked.0 = k;
-                    // A grey has no hue to move; choosing one makes it a colour.
-                    if picked.1 < 0.1 {
+                    // A pure grey has no hue to move; choosing one makes it a colour. A muted
+                    // colour keeps its own saturation.
+                    if picked.1 < 0.005 {
                         picked.1 = 1.0;
                     }
                 } else {
