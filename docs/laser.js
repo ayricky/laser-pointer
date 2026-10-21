@@ -207,9 +207,13 @@
     return turn > Math.PI ? TAU - turn : turn;
   }
 
+  // Every check loosens as the snap setting rises; see the app's Tolerances for what each one is.
   const tolerances = s => ({
-    line: lerp(0.03, 0.085, s), ellipse: lerp(0.07, 0.16, s), angle: lerp(3, 10, s) * Math.PI / 180,
-    equal: lerp(0.07, 0.15, s), close: lerp(0.14, 0.26, s),
+    line: lerp(0.03, 0.085, s), side: lerp(0.048, 0.19, s), ellipse: lerp(0.07, 0.22, s), angle: lerp(3, 12, s) * Math.PI / 180,
+    equal: lerp(0.07, 0.15, s), close: lerp(0.14, 0.3, s),
+    overrun: lerp(0.12, 0.3, s), beside: lerp(0.08, 0.14, s), outline: lerp(0.03, 0.05, s), doubling: lerp(3.4, 4.6, s) * Math.PI,
+    head: lerp(0.45, 0.6, s), hook: lerp(110, 100, s) * Math.PI / 180,
+    wing: lerp(0.35, 0.25, s), barbs: lerp(0.18, 0.22, s),
   });
 
   function nearestOn(p, a, b) {
@@ -249,18 +253,18 @@
     // The loop may begin a little way in, where the end comes back to: the start can be a short
     // lead-in, as when the end lands on the first side rather than on the very first point.
     let lead = 1, walked = 0;
-    while (lead < path.length - 1 && walked + d2(path[lead - 1], path[lead]) <= 0.12 * total) walked += d2(path[lead - 1], path[lead++]);
+    while (lead < path.length - 1 && walked + d2(path[lead - 1], path[lead]) <= tol.overrun * total) walked += d2(path[lead - 1], path[lead++]);
     const s = seam(path, lead, Math.floor(path.length * 6 / 10));
     if (!s || s.gap > tol.close * size) return null;
     const before = path.slice(0, s.first + 1).concat([s.onFirst]), after = [s.onLast].concat(path.slice(s.last + 1));
-    if (pathLength(after) > 0.12 * total) return null;
+    if (pathLength(after) > tol.overrun * total) return null;
     // Cut at the seam, the loop has no jog where its ends meet, which would read as a corner.
     const loop = [];
     for (const p of [s.onFirst, ...path.slice(s.first + 1, s.last + 1), s.onLast, s.onFirst]) if (!loop.length || d2(loop[loop.length - 1], p) > 1e-3) loop.push(p);
     if (loop.length < 4) return null;
     // Beyond the seam the stroke stays on the loop, as an overshoot does, or stops soon, as where a
     // corner is crossed; a longer tail heads off somewhere else.
-    const nearLoop = p => loop.some(q => d2(p, q) < 0.08 * size);
+    const nearLoop = p => loop.some(q => d2(p, q) < tol.beside * size);
     const stub = part => pathLength(part) <= 0.06 * total || part.every(nearLoop);
     if (!stub(before) || !stub(after)) return null;
     // Once round, counted about the middle so a jog where the ends meet can't flip it; the doubling
@@ -269,8 +273,9 @@
     const middle = centroid(loop), bearing = p => Math.atan2(p[1] - middle[1], p[0] - middle[0]);
     let winding = 0;
     for (let i = 1; i < loop.length; i++) winding += wrap(bearing(loop[i]) - bearing(loop[i - 1]));
-    const [, absolute] = loopTurning(simplify(loop, 0.03 * size));
-    return Math.round(Math.abs(winding) / TAU) === 1 && absolute < 3.4 * Math.PI ? loop : null;
+    const [, absolute] = loopTurning(simplify(loop, tol.outline * size));
+    if (Math.round(Math.abs(winding) / TAU) !== 1 || absolute >= tol.doubling) return null;
+    return loop;
   }
 
   function line(path, tol, strength, scale) {
@@ -288,12 +293,12 @@
     return { shape: 'line', parts: [polyline(ends, scale)] };
   }
 
-  function arrowheadShaped(head, start, tip, reach) {
-    const corners = simplify(head, 0.18 * reach);
+  function arrowheadShaped(head, start, tip, reach, tol) {
+    const corners = simplify(head, tol.barbs * reach);
     const side = p => Math.sign((tip[0] - start[0]) * (p[1] - start[1]) - (tip[1] - start[1]) * (p[0] - start[0]));
-    const wing = end => d2(tip, end) > 0.4 * reach && turnAt(start, tip, end) > 110 * Math.PI / 180;
+    const wing = end => d2(tip, end) > (tol.wing + 0.05) * reach && turnAt(start, tip, end) > tol.hook;
     if (corners.length === 2) return wing(corners[1]);
-    if (corners.length === 4) return wing(corners[1]) && wing(corners[3]) && d2(corners[2], tip) < 0.35 * reach && side(corners[1]) !== side(corners[3]);
+    if (corners.length === 4) return wing(corners[1]) && wing(corners[3]) && d2(corners[2], tip) < (0.7 - tol.wing) * reach && side(corners[1]) !== side(corners[3]);
     return false;
   }
 
@@ -304,13 +309,13 @@
     while (tipIndex < path.length - 1 && d2(path[tipIndex + 1], start) >= d2(path[tipIndex], start)) tipIndex++;
     const tip = path[tipIndex], shaft = d2(start, tip), head = path.slice(tipIndex);
     const reach = Math.max(...head.map(p => d2(p, tip)));
-    if (head.length < 3 || reach / shaft < 0.06 || reach / shaft > 0.45) return null;
+    if (head.length < 3 || reach / shaft < 0.06 || reach / shaft > tol.head) return null;
     let wingPoint = head[0];
     for (const p of head) if (d2(p, tip) > d2(wingPoint, tip)) wingPoint = p;
-    if (turnAt(start, tip, wingPoint) < 110 * Math.PI / 180) return null;
+    if (turnAt(start, tip, wingPoint) < tol.hook) return null;
     const ux = (tip[0] - start[0]) / shaft, uy = (tip[1] - start[1]) / shaft;
     const sideways = Math.max(...head.map(p => Math.abs((p[0] - tip[0]) * uy - (p[1] - tip[1]) * ux)));
-    if (sideways < 0.35 * reach || pathLength(head) > 4.5 * reach || !arrowheadShaped(head, start, tip, reach)) return null;
+    if (sideways < tol.wing * reach || pathLength(head) > (4 + 2 * tol.barbs) * reach || !arrowheadShaped(head, start, tip, reach, tol)) return null;
     const straight = line(path.slice(0, Math.max(tipIndex, 3) + 1), tol, strength, scale);
     if (!straight) return null;
     const sp = straight.parts[0], from = sp[0], to = sp[sp.length - 1];
@@ -371,7 +376,7 @@
     for (let k = 0; k < indices.length; k++) {
       const from = indices[k], to = indices[(k + 1) % indices.length];
       const side = from <= to ? loop.slice(from, to + 1) : loop.slice(from).concat(loop.slice(0, to + 1));
-      if (side.length >= 3 && bend(side) >= tol.line * 1.6) return null;
+      if (side.length >= 3 && bend(side) >= tol.side) return null;
     }
     if (corners.length === 3) return { shape: 'triangle', parts: [beginNear(polyline([...corners, corners[0]], scale), loop[0])] };
     if (corners.length === 4) {
@@ -381,19 +386,12 @@
     return null;
   }
 
-  function pull(drawn, ideal, strength) {
-    const amount = lerp(0.6, 1, (strength - 0.1) / 0.4);
-    if (amount >= 0.999 || ideal.parts.length > 1) return ideal;
-    const from = resample(drawn, ideal.parts[0].length);
-    return { shape: ideal.shape, parts: [ideal.parts[0].map((to, i) => [lerp(from[i][0], to[0], amount), lerp(from[i][1], to[1], amount)])] };
-  }
-
   /** `points` as [[x, y]], `strength` 0..1. Returns `{shape, parts}` or null. */
   function correct(points, scale, strength) {
     if (strength <= 0 || points.length < 4 || pathLength(points) < 40 * scale) return null;
     const path = resample(points, SAMPLES), tol = tolerances(strength), loop = closedPart(path, tol);
     const ideal = loop ? polygon(loop, tol, scale) || ellipse(loop, tol, scale) : arrow(path, tol, strength, scale) || line(path, tol, strength, scale);
-    return ideal && pull(path, ideal, strength);
+    return ideal;
   }
 
   function correspondence(drawn, correction) {

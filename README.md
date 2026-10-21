@@ -19,8 +19,8 @@ presentation.
 - **Straight lines** — hold Alt while drawing for a perfectly horizontal line, Shift+Alt for a
   vertical one.
 - **Shape snapping** — let go of a rough circle, box, triangle, line or arrow and it settles into
-  a clean one. How readily it snaps is set per preset (Off, Gentle, Medium, Strong); hold Ctrl as
-  you let go to keep a stroke freehand.
+  a clean one. How sloppy a stroke may be and still snap is set per preset, from Strict to
+  Lenient; hold Ctrl as you let go to keep a stroke freehand.
 - **Shortcuts for everything** — rebind or remove any action, including single keys. Keys that
   only make sense while drawing (Esc, Undo) are claimed only while the laser is on.
 - **Cursor styles** — a soft glow, segment ring, classic cross, cross and dot, circle and dot,

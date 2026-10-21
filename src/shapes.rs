@@ -1,10 +1,9 @@
 //! Shape snapping: when a stroke ends, it may be recognised as a line, an arrow, an ellipse or
 //! circle, a rectangle or square, or a triangle, and pulled onto the clean shape.
 //!
-//! `strength` (0–1, from the pen's "Shape snap" setting) does two things: it widens how sloppy a
-//! stroke may be and still count, and below the halfway mark it only pulls the stroke part of the
-//! way, so gentle settings tidy rather than replace. Scribbles, ticks, zig-zags, S-curves and
-//! spirals are never mistaken for shapes.
+//! `strength` (0–1, from the pen's "Shape snap" setting) is how sloppy a stroke may be and still
+//! count: every check below loosens as it rises. At the default, scribbles, ticks, zig-zags,
+//! S-curves and spirals are never mistaken for shapes; at the top, a nearly closed C is a circle.
 
 use std::f32::consts::{PI, TAU};
 
@@ -21,6 +20,7 @@ pub enum Shape {
 
 #[derive(Clone, Debug)]
 pub struct Correction {
+    #[allow(dead_code, reason = "the app draws the parts; the tests check what was recognised")]
     pub shape: Shape,
     /// Separate polylines; an arrow is its shaft and its head.
     pub parts: Vec<Vec<P>>,
@@ -231,6 +231,8 @@ fn turn_at(previous: P, at: P, next: P) -> f32 {
 struct Tolerances {
     /// Straightness: largest deviation / length.
     line: f32,
+    /// The same for a polygon's sides, which a hand bows more than it does a line.
+    side: f32,
     /// Ellipse: RMS of the normalised radius error.
     ellipse: f32,
     /// How near an angle must be to a right angle or axis to be snapped, in radians.
@@ -239,16 +241,41 @@ struct Tolerances {
     equal: f32,
     /// How near the end must come back to the start to count as closed, relative to size.
     close: f32,
+    /// How far a loop may run on past its start, or begin after a lead-in, of the stroke's length.
+    overrun: f32,
+    /// How near the loop a stub beyond it must keep, relative to size, unless it is short.
+    beside: f32,
+    /// The outline a loop's turning is counted on, relative to size: coarser ignores more tremor.
+    outline: f32,
+    /// How much a once-round loop may turn in all, before it reads as a scribble doubling back.
+    doubling: f32,
+    /// The largest arrowhead, relative to the shaft.
+    head: f32,
+    /// How sharply a wing must turn back from the shaft, in radians.
+    hook: f32,
+    /// How far out to the side a wing must reach, relative to its length.
+    wing: f32,
+    /// Wobble along an arrowhead ignored when finding its corners, relative to its size.
+    barbs: f32,
 }
 
 impl Tolerances {
     fn new(strength: f32) -> Self {
         Self {
             line: lerp(0.03, 0.085, strength),
-            ellipse: lerp(0.07, 0.16, strength),
-            angle: lerp(3.0, 10.0, strength).to_radians(),
+            side: lerp(0.048, 0.19, strength),
+            ellipse: lerp(0.07, 0.22, strength),
+            angle: lerp(3.0, 12.0, strength).to_radians(),
             equal: lerp(0.07, 0.15, strength),
-            close: lerp(0.14, 0.26, strength),
+            close: lerp(0.14, 0.3, strength),
+            overrun: lerp(0.12, 0.3, strength),
+            beside: lerp(0.08, 0.14, strength),
+            outline: lerp(0.03, 0.05, strength),
+            doubling: lerp(3.4, 4.6, strength) * PI,
+            head: lerp(0.45, 0.6, strength),
+            hook: lerp(110.0, 100.0, strength).to_radians(),
+            wing: lerp(0.35, 0.25, strength),
+            barbs: lerp(0.18, 0.22, strength),
         }
     }
 }
@@ -260,35 +287,12 @@ pub fn correct(points: &[P], scale: f32, strength: f32) -> Option<Correction> {
     }
     let path = resample(points, SAMPLES);
     let tolerance = Tolerances::new(strength);
-    let ideal = match closed_part(&path, &tolerance) {
+    match closed_part(&path, &tolerance) {
         Some(loop_) => polygon(&loop_, &tolerance, scale)
             .or_else(|| ellipse(&loop_, &tolerance, scale)),
         // An arrow's hook is short enough to pass for a wobble, so arrows are tried first.
         None => arrow(&path, &tolerance, strength, scale)
             .or_else(|| line(&path, &tolerance, strength, scale)),
-    }?;
-    Some(pull(&path, ideal, strength))
-}
-
-/// Below the halfway mark, moves the stroke only part of the way to the shape.
-fn pull(drawn: &[P], ideal: Correction, strength: f32) -> Correction {
-    let amount = lerp(0.6, 1.0, (strength - 0.1) / 0.4);
-    // A shape in pieces (an arrow) can't be blended with the one path that was drawn.
-    if amount >= 0.999 || ideal.parts.len() > 1 {
-        return ideal;
-    }
-    let mut parts = ideal.parts;
-    // The first part takes the drawn path; any extra part (an arrow's head) appears as drawn.
-    let main = &parts[0];
-    let from = resample(drawn, main.len());
-    parts[0] = main
-        .iter()
-        .zip(&from)
-        .map(|(to, from)| (lerp(from.0, to.0, amount), lerp(from.1, to.1, amount)))
-        .collect();
-    Correction {
-        shape: ideal.shape,
-        parts,
     }
 }
 
@@ -365,7 +369,7 @@ fn closed_part(path: &[P], tolerance: &Tolerances) -> Option<Vec<P>> {
     // The loop may begin a little way in, where the end comes back to: the start can be a short
     // lead-in, as when the end lands on the first side rather than on the very first point.
     let (mut lead, mut walked) = (1, 0.0);
-    while lead < path.len() - 1 && walked + distance(path[lead - 1], path[lead]) <= 0.12 * total {
+    while lead < path.len() - 1 && walked + distance(path[lead - 1], path[lead]) <= tolerance.overrun * total {
         walked += distance(path[lead - 1], path[lead]);
         lead += 1;
     }
@@ -378,7 +382,7 @@ fn closed_part(path: &[P], tolerance: &Tolerances) -> Option<Vec<P>> {
     let after: Vec<P> = [seam.on_last].into_iter().chain(path[seam.last + 1..].iter().copied()).collect();
     // Overshooting the start a little is how people circle things; a real tail beyond it is
     // something else, and mustn't be thrown away.
-    if length(&after) > 0.12 * total {
+    if length(&after) > tolerance.overrun * total {
         return None;
     }
     // Cut at the seam, the loop has no jog where its ends meet, which would read as a corner.
@@ -394,7 +398,7 @@ fn closed_part(path: &[P], tolerance: &Tolerances) -> Option<Vec<P>> {
     }
     // Beyond the seam the stroke must stay on the loop, as an overshoot retracing it does, or stop
     // soon, as where a corner is crossed; a longer tail heads off somewhere else.
-    let near_loop = |p: &P| loop_.iter().map(|q| distance(*p, *q)).fold(f32::MAX, f32::min) < 0.08 * size;
+    let near_loop = |p: &P| loop_.iter().map(|q| distance(*p, *q)).fold(f32::MAX, f32::min) < tolerance.beside * size;
     let stub = |part: &[P]| length(part) <= 0.06 * total || part.iter().all(near_loop);
     if !stub(&before) || !stub(&after) {
         return None;
@@ -406,9 +410,9 @@ fn closed_part(path: &[P], tolerance: &Tolerances) -> Option<Vec<P>> {
     let middle = centroid(&loop_);
     let bearing = |p: P| (p.1 - middle.1).atan2(p.0 - middle.0);
     let winding: f32 = loop_.windows(2).map(|pair| wrap(bearing(pair[1]) - bearing(pair[0]))).sum();
-    let (_, absolute) = loop_turning(&simplify(&loop_, 0.03 * size));
+    let (_, absolute) = loop_turning(&simplify(&loop_, tolerance.outline * size));
     let winds_once = (winding.abs() / TAU).round() == 1.0;
-    (winds_once && absolute < 3.4 * PI).then_some(loop_)
+    (winds_once && absolute < tolerance.doubling).then_some(loop_)
 }
 
 fn line(path: &[P], tolerance: &Tolerances, strength: f32, scale: f32) -> Option<Correction> {
@@ -457,7 +461,7 @@ fn arrow(path: &[P], tolerance: &Tolerances, strength: f32, scale: f32) -> Optio
     let shaft = distance(start, tip);
     let head = &path[tip_index..];
     let reach = head.iter().map(|&p| distance(p, tip)).fold(0.0, f32::max);
-    if head.len() < 3 || !(0.06..=0.45).contains(&(reach / shaft)) {
+    if head.len() < 3 || !(0.06..=tolerance.head).contains(&(reach / shaft)) {
         return None;
     }
     // The head must turn sharply back towards the start, not carry on or curl sideways.
@@ -465,7 +469,7 @@ fn arrow(path: &[P], tolerance: &Tolerances, strength: f32, scale: f32) -> Optio
         .iter()
         .map(|&p| (p, distance(p, tip)))
         .max_by(|a, b| a.1.total_cmp(&b.1))?;
-    if turn_at(start, tip, wing) < 110f32.to_radians() {
+    if turn_at(start, tip, wing) < tolerance.hook {
         return None;
     }
     // A wing sits off to the side of the shaft; running straight back along it is a retrace.
@@ -474,10 +478,10 @@ fn arrow(path: &[P], tolerance: &Tolerances, strength: f32, scale: f32) -> Optio
         .iter()
         .map(|p| ((p.0 - tip.0) * uy - (p.1 - tip.1) * ux).abs())
         .fold(0.0, f32::max);
-    if sideways < 0.35 * reach || length(head) > 4.5 * reach {
+    if sideways < tolerance.wing * reach || length(head) > (4.0 + 2.0 * tolerance.barbs) * reach {
         return None;
     }
-    if !arrowhead_shaped(head, start, tip, reach) {
+    if !arrowhead_shaped(head, start, tip, reach, tolerance) {
         return None;
     }
     let straight = line(&path[..=tip_index], tolerance, strength, scale)?;
@@ -501,15 +505,15 @@ fn arrow(path: &[P], tolerance: &Tolerances, strength: f32, scale: f32) -> Optio
 
 /// The head drawn after the tip is one straight wing back towards the start, or a wing, a
 /// return to the tip and a second wing on the other side of the shaft.
-fn arrowhead_shaped(head: &[P], start: P, tip: P, reach: f32) -> bool {
-    let corners = simplify(head, 0.18 * reach);
+fn arrowhead_shaped(head: &[P], start: P, tip: P, reach: f32, tolerance: &Tolerances) -> bool {
+    let corners = simplify(head, tolerance.barbs * reach);
     let side = |p: P| ((tip.0 - start.0) * (p.1 - start.1) - (tip.1 - start.1) * (p.0 - start.0)).signum();
-    let wing = |end: P| distance(tip, end) > 0.4 * reach && turn_at(start, tip, end) > 110f32.to_radians();
+    let wing = |end: P| distance(tip, end) > (tolerance.wing + 0.05) * reach && turn_at(start, tip, end) > tolerance.hook;
     match corners.len() {
         2 => wing(corners[1]),
         4 => {
             let (first, back, second) = (corners[1], corners[2], corners[3]);
-            wing(first) && wing(second) && distance(back, tip) < 0.35 * reach && side(first) != side(second)
+            wing(first) && wing(second) && distance(back, tip) < (0.7 - tolerance.wing) * reach && side(first) != side(second)
         }
         _ => false,
     }
@@ -596,7 +600,7 @@ fn polygon(loop_: &[P], tolerance: &Tolerances, scale: f32) -> Option<Correction
         } else {
             loop_[from..].iter().chain(&loop_[..=to]).copied().collect()
         };
-        side.len() < 3 || bend(&side) < tolerance.line * 1.6
+        side.len() < 3 || bend(&side) < tolerance.side
     });
     if !sides_straight {
         return None;
@@ -1022,6 +1026,50 @@ mod tests {
         assert!(strong > gentle, "gentle {gentle} vs strong {strong}");
     }
 
+    /// Sides bowed out by up to `bow` of their length, as a quick hand draws them.
+    fn bowed(random: &mut Random, corners: &[P], bow: f32) -> Vec<P> {
+        let mut outline = Vec::new();
+        for k in 0..corners.len() {
+            let (a, b) = (corners[k], corners[(k + 1) % corners.len()]);
+            let (side, push) = (distance(a, b), bow * random.next());
+            let (nx, ny) = ((b.1 - a.1) / side, -(b.0 - a.0) / side);
+            outline.extend((0..30).map(|i| {
+                let t = i as f32 / 30.0;
+                let out = push * side * (t * PI).sin();
+                (a.0 + (b.0 - a.0) * t + nx * out, a.1 + (b.1 - a.1) * t + ny * out)
+            }));
+        }
+        outline.push(corners[0]);
+        outline
+    }
+
+    /// Every shape, not only circles, forgives more as the setting rises.
+    #[test]
+    fn each_step_up_the_slider_forgives_more() {
+        type Make = fn(&mut Random) -> Vec<P>;
+        let cases: [(Shape, Make); 3] = [
+            (Shape::Rectangle, |r| {
+                let outline = bowed(r, &[(100.0, 100.0), (400.0, 100.0), (400.0, 300.0), (100.0, 300.0)], 0.1);
+                mouse(r, &outline, 1.0)
+            }),
+            (Shape::Triangle, |r| {
+                let outline = bowed(r, &[(250.0, 80.0), (400.0, 340.0), (100.0, 340.0)], 0.1);
+                mouse(r, &outline, 1.0)
+            }),
+            // A wide head, its wings swept out almost square to the shaft.
+            (Shape::Arrow, |r| {
+                let spread = 1.12 + 0.18 * r.next();
+                let wing = |side: f32| (400.0 + 30.0 * (PI + side * spread).cos(), 300.0 + 30.0 * (PI + side * spread).sin());
+                mouse(r, &polyline(&[(100.0, 300.0), (400.0, 300.0), wing(1.0), (400.0, 300.0), wing(-1.0)], 1.0), 1.0)
+            }),
+        ];
+        for (shape, make) in cases {
+            let rates = [0.1, LASER_DEFAULT, 0.7, 1.0].map(|strength| rate(40, make, strength, shape));
+            assert!(rates.windows(2).all(|pair| pair[1] >= pair[0]), "{shape:?} {rates:?}");
+            assert!(rates[3] >= 0.85 && rates[3] - rates[0] >= 0.25, "{shape:?} {rates:?}");
+        }
+    }
+
     #[test]
     fn leaves_handwriting_and_scribbles_alone() {
         let mut random = Random(42);
@@ -1064,19 +1112,6 @@ mod tests {
         let width = xs.clone().fold(f32::MIN, f32::max) - xs.fold(f32::MAX, f32::min);
         let height = ys.clone().fold(f32::MIN, f32::max) - ys.fold(f32::MAX, f32::min);
         assert!((width - height).abs() < 0.5, "{width} x {height}");
-    }
-
-    #[test]
-    fn gentle_settings_only_pull_part_of_the_way() {
-        let drawn = [(100.0, 200.0), (200.0, 212.0), (300.0, 208.0), (400.0, 214.0)];
-        let gentle = correct(&drawn, 1.0, 0.1).unwrap();
-        let firm = correct(&drawn, 1.0, 0.6).unwrap();
-        let spread = |c: &Correction| {
-            let ys = c.parts[0].iter().map(|p| p.1);
-            ys.clone().fold(f32::MIN, f32::max) - ys.fold(f32::MAX, f32::min)
-        };
-        assert!(spread(&firm) < 1e-3);
-        assert!(spread(&gentle) > 0.5);
     }
 
     #[test]

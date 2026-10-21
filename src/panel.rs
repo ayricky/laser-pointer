@@ -84,9 +84,9 @@ const SLIDER_TOP: f32 = 414.0;
 fn snap_name(value: i32) -> String {
     match value {
         0 => "Off",
-        1..=3 => "Gentle",
-        4..=6 => "Medium",
-        _ => "Strong",
+        1..=2 => "Strict",
+        3..=5 => "Normal",
+        _ => "Lenient",
     }
     .into()
 }
@@ -127,7 +127,7 @@ const SLIDERS: [SliderDef; 6] = [
         set: |s, v| s.smoothing = v as u32,
         show: |v| v.to_string(),
     },
-    // How readily a finished stroke straightens into a line, circle, box or arrow.
+    // How sloppy a finished stroke may be and still straighten into a line, circle, box or arrow.
     SliderDef {
         label: "Shape snap",
         range: (0, 10),
