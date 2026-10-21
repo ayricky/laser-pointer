@@ -177,7 +177,7 @@ fn layers(style: u32) -> &'static [(f32, f32, f32)] {
 }
 
 /// Drops points that have faded out, then fills what is left, `fade` times as opaque as usual.
-/// Returns the area drawn on.
+/// Fails if any of it couldn't be drawn, so a stroke isn't taken as baked when it wasn't.
 pub fn draw(
     factory: &ID2D1Factory,
     target: &ID2D1RenderTarget,
@@ -186,7 +186,7 @@ pub fn draw(
     now: Instant,
     fade: f32,
     scratch: &mut Scratch,
-) -> Option<Bounds> {
+) -> Result<()> {
     let Stroke {
         points,
         look,
@@ -209,9 +209,8 @@ pub fn draw(
         scratch.radii.drain(..drop);
     }
     if points.is_empty() {
-        return None;
+        return Ok(());
     }
-    let mut bounds = None;
     let mut start = 0;
     for end in breaks.iter().copied().chain([points.len()]) {
         let part = start..end.min(points.len());
@@ -241,16 +240,15 @@ pub fn draw(
             scratch.layer.clear();
             scratch.layer.extend(scratch.widths.iter().map(|radius| radius * width));
             outline(&scratch.centre, &scratch.layer, &mut scratch.outline);
-            bounds = union(bounds, extent(&scratch.outline));
             let mut color = rgba(look.color, alpha * opacity);
             color.r += (1.0 - color.r) * white;
             color.g += (1.0 - color.g) * white;
             color.b += (1.0 - color.b) * white;
             unsafe { brush.SetColor(&color) };
-            let _ = fill(factory, target, brush, &scratch.outline);
+            fill(factory, target, brush, &scratch.outline)?;
         }
     }
-    bounds
+    Ok(())
 }
 
 fn ease_out(k: f32) -> f32 {
@@ -525,10 +523,10 @@ fn centre_of(points: &[Point], range: std::ops::Range<usize>, look: &Look, scale
     }
 }
 
-/// Tessellates the centre line in `scratch` for each pass.
-fn tessellate(factory: &ID2D1Factory, dc: &ID2D1DeviceContext1, look: &Look, scratch: &mut Scratch) -> Option<Tessellated> {
+/// Tessellates the centre line in `scratch` for each pass. Nothing to draw is `None`.
+fn tessellate(factory: &ID2D1Factory, dc: &ID2D1DeviceContext1, look: &Look, scratch: &mut Scratch) -> Result<Option<Tessellated>> {
     if scratch.centre.is_empty() {
-        return None;
+        return Ok(None);
     }
     let mut passes = Vec::with_capacity(4);
     let mut bounds = None;
@@ -538,11 +536,10 @@ fn tessellate(factory: &ID2D1Factory, dc: &ID2D1DeviceContext1, look: &Look, scr
         outline(&scratch.centre, &scratch.layer, &mut scratch.outline);
         bounds = union(bounds, extent(&scratch.outline));
         let realization = geometry(factory, &scratch.outline)
-            .and_then(|geometry| unsafe { dc.CreateFilledGeometryRealization(&geometry, D2D1_DEFAULT_FLATTENING_TOLERANCE) })
-            .ok()?;
+            .and_then(|geometry| unsafe { dc.CreateFilledGeometryRealization(&geometry, D2D1_DEFAULT_FLATTENING_TOLERANCE) })?;
         passes.push(realization);
     }
-    Some(Tessellated { bounds: bounds?, passes })
+    Ok(bounds.map(|bounds| Tessellated { bounds, passes }))
 }
 
 fn overlap(a: Bounds, b: Bounds) -> Option<Bounds> {
@@ -558,7 +555,7 @@ fn overlap(a: Bounds, b: Bounds) -> Option<Bounds> {
 /// Draws a kept stroke as `draw` would, into `area`, from settled pieces and its newest
 /// stretch. Each pass is filled solid inside a layer of its opacity, so where pieces overlap
 /// they don't show darker. Settling makes new pieces as the stroke grows; a stroke drawn once,
-/// as when baked, needn't.
+/// as when baked, needn't. Fails if any of it couldn't be tessellated.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_kept(
     factory: &ID2D1Factory,
@@ -569,14 +566,14 @@ pub fn draw_kept(
     area: Bounds,
     settle: bool,
     scratch: &mut Scratch,
-) {
+) -> Result<()> {
     let (points, look, scale) = (&stroke.points, stroke.look, stroke.scale);
     let span = look.smoothing as usize;
     // A piece settles once every point that smooths its end, and the one after, is in.
     while settle && (pieces.done.len() + 1) * PIECE + OVERLAP + 1 + span < points.len() {
         let start = pieces.done.len() * PIECE;
         centre_of(points, start..start + PIECE + OVERLAP, &look, scale, scratch);
-        let Some(piece) = tessellate(factory, dc, &look, scratch) else { return };
+        let Some(piece) = tessellate(factory, dc, &look, scratch)? else { break };
         pieces.done.push(piece);
         pieces.tail = None;
     }
@@ -585,7 +582,7 @@ pub fn draw_kept(
         pieces.tail = None;
         if made_from.0 < made_from.1 {
             centre_of(points, made_from.0..made_from.1, &look, scale, scratch);
-            pieces.tail = tessellate(factory, dc, &look, scratch).map(|tail| (made_from, Box::new(tail)));
+            pieces.tail = tessellate(factory, dc, &look, scratch)?.map(|tail| (made_from, Box::new(tail)));
         }
     }
     let shown: Vec<&Tessellated> = pieces
@@ -594,8 +591,8 @@ pub fn draw_kept(
         .chain(pieces.tail.as_ref().map(|(_, tail)| tail.as_ref()))
         .filter(|stretch| overlap(stretch.bounds, area).is_some())
         .collect();
-    let Some(bounds) = shown.iter().map(|stretch| stretch.bounds).reduce(Bounds::union) else { return };
-    let Some(bounds) = overlap(bounds, area) else { return };
+    let Some(bounds) = shown.iter().map(|stretch| stretch.bounds).reduce(Bounds::union) else { return Ok(()) };
+    let Some(bounds) = overlap(bounds, area) else { return Ok(()) };
     let opacity = look.opacity as f32 / 100.0;
     for (pass, &(_, alpha, white)) in layers(look.style).iter().enumerate() {
         let mut color = rgba(look.color, 1.0);
@@ -621,4 +618,5 @@ pub fn draw_kept(
             dc.PopLayer();
         }
     }
+    Ok(())
 }

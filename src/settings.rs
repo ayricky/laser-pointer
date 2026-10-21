@@ -425,6 +425,7 @@ fn parse(text: &str) -> (Settings, Option<Vec<Preset>>) {
     let mut settings = Settings::default();
     let mut presets: Option<Vec<Preset>> = None;
     let mut old_hotkey = Binding::NONE;
+    let mut toggle_read = false;
     for line in text.lines() {
         let Some((key, value)) = line.split_once('=') else {
             continue;
@@ -441,6 +442,7 @@ fn parse(text: &str) -> (Settings, Option<Vec<Preset>>) {
         } else if let Some(command) = COMMANDS.iter().find(|command| command.key() == key) {
             if let Some(binding) = Binding::parse(value) {
                 settings.keys[command.index()] = binding;
+                toggle_read |= *command == Command::Toggle;
             }
         } else if let Some(value) = number(value) {
             match key {
@@ -455,7 +457,8 @@ fn parse(text: &str) -> (Settings, Option<Vec<Preset>>) {
             }
         }
     }
-    if old_hotkey.is_set() && !text.contains("key_toggle=") {
+    // The one shortcut older versions had, unless the file also says what Toggle is now.
+    if old_hotkey.is_set() && !toggle_read {
         settings.keys[Command::Toggle.index()] = old_hotkey;
     }
     (settings, presets)
@@ -680,6 +683,17 @@ mod tests {
         let presets = presets.unwrap();
         assert_eq!(presets.len(), 1);
         assert_eq!(presets[0].look.snap, LASER.snap);
+    }
+
+    /// A file with both the old shortcut and a Toggle line, however spaced, keeps the Toggle line,
+    /// even when that line says Toggle has no shortcut.
+    #[test]
+    fn a_toggle_line_wins_over_the_old_single_hotkey() {
+        let (settings, _) = parse("hotkey_mods=2
+hotkey_vk=80
+key_toggle = 0,0
+");
+        assert!(!settings.key(Command::Toggle).is_set());
     }
 
     #[test]

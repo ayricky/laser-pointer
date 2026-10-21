@@ -4,7 +4,7 @@ use std::cell::{Cell, RefCell};
 use std::time::{Duration, Instant};
 
 use windows::core::{w, Result, HSTRING, PCWSTR};
-use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
     DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_USE_IMMERSIVE_DARK_MODE,
     DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DWMWINDOWATTRIBUTE,
@@ -32,9 +32,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     LoadIconW, PostMessageW, RegisterClassW, RegisterWindowMessageW, SetForegroundWindow,
     SetTimer, SetWindowPos, ShowWindow, TrackPopupMenu, ASFW_ANY, CS_DROPSHADOW, HICON,
     HWND_TOPMOST, IDC_ARROW, IDI_APPLICATION, MENU_ITEM_FLAGS, MF_CHECKED, MF_GRAYED, MF_POPUP,
-    MF_SEPARATOR, MF_STRING, SM_CXSMICON, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_SHOW,
+    MF_SEPARATOR, MF_STRING, SM_CXSMICON, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOW,
     TPM_BOTTOMALIGN, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WA_INACTIVE, WM_ACTIVATE,
-    WM_APP, WM_CHAR, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN,
+    WM_APP, WM_CHAR, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_KEYDOWN,
     WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NULL, WM_PAINT,
     WM_SETTINGCHANGE, WM_SYSCHAR, WM_SYSKEYDOWN, WM_THEMECHANGED, WM_TIMER, WNDCLASSW,
     WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
@@ -565,6 +565,18 @@ extern "system" fn panel_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
                 LRESULT(0)
             }
             WM_SYSCHAR => LRESULT(0),
+            // Moved to a monitor at another scale: Windows suggests where and how big.
+            WM_DPICHANGED => {
+                let dpi = (wparam.0 & 0xffff) as u32;
+                let area = &*(lparam.0 as *const RECT);
+                let (width, height) = (area.right - area.left, area.bottom - area.top);
+                let _ = SetWindowPos(hwnd, None, area.left, area.top, width, height, SWP_NOACTIVATE | SWP_NOZORDER);
+                if let Some(Err(_)) = with_panel(|panel| panel.resize(dpi, width as u32, height as u32)) {
+                    let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+                }
+                let _ = InvalidateRect(Some(hwnd), None, false);
+                LRESULT(0)
+            }
             WM_SETTINGCHANGE | WM_THEMECHANGED => {
                 with_panel(|panel| {
                     panel.reload_theme();
@@ -602,6 +614,8 @@ unsafe fn act(hwnd: HWND, action: Option<Action>) {
         }
         Some(Action::SettingsChanged) => {
             crate::settings_changed();
+            // A shortcut cleared, or a preset removed so the ones after it moved up.
+            crate::sync_hotkeys();
             let _ = InvalidateRect(Some(hwnd), None, false);
         }
         Some(Action::Toggle(on)) => crate::set_laser(on),

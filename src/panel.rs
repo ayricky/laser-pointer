@@ -563,6 +563,14 @@ impl Panel {
         .cast()
     }
 
+    /// Moved to a monitor at another scale: draw for it, the window now `width` by `height`.
+    pub unsafe fn resize(&mut self, dpi: u32, width: u32, height: u32) -> Result<()> {
+        let Some((hwnd, ..)) = self.window else { return Ok(()) };
+        self.window = Some((hwnd, dpi, width, height));
+        self.scale = dpi as f32 / 96.0;
+        self.rebuild_target()
+    }
+
     /// The GPU was reset: draw into a fresh target, keeping everything else about the panel.
     unsafe fn rebuild_target(&mut self) -> Result<()> {
         let Some((hwnd, dpi, width, height)) = self.window else {
@@ -1251,7 +1259,7 @@ impl Panel {
             whole: false,
             breaks: Vec::new(),
         };
-        stroke::draw(
+        let _ = stroke::draw(
             &self.factory,
             &self.target,
             &self.brush,

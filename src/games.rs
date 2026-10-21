@@ -118,8 +118,11 @@ pub fn restore_if_minimised(overlay: HWND, game: HWND) -> bool {
             return false;
         }
         set_activatable(overlay, false);
-        let _ = ShowWindow(game, SW_RESTORE);
-        let _ = SetForegroundWindow(game);
+        // Unless the user has moved on to something else meanwhile, which stays in front.
+        if GetForegroundWindow() == overlay {
+            let _ = ShowWindow(game, SW_RESTORE);
+            let _ = SetForegroundWindow(game);
+        }
         true
     }
 }

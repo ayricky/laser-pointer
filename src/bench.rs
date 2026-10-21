@@ -125,14 +125,14 @@ fn kept_pieces_look_like_the_whole_stroke() {
                 })
                 .collect();
             let whole = pixels(&|| {
-                stroke::draw_kept(&gfx.factory, &gfx.dc1, &gfx.brush, &stroke, &mut Pieces::default(), everywhere, false, &mut Scratch::default());
+                stroke::draw_kept(&gfx.factory, &gfx.dc1, &gfx.brush, &stroke, &mut Pieces::default(), everywhere, false, &mut Scratch::default()).unwrap();
             });
             let plain = pixels(&|| {
                 let mut copy = stroke.clone();
-                stroke::draw(&gfx.factory, &gfx.dc, &gfx.brush, &mut copy, now, 1.0, &mut Scratch::default());
+                stroke::draw(&gfx.factory, &gfx.dc, &gfx.brush, &mut copy, now, 1.0, &mut Scratch::default()).unwrap();
             });
             let pieced = pixels(&|| {
-                stroke::draw_kept(&gfx.factory, &gfx.dc1, &gfx.brush, &stroke, &mut Pieces::default(), everywhere, true, &mut Scratch::default());
+                stroke::draw_kept(&gfx.factory, &gfx.dc1, &gfx.brush, &stroke, &mut Pieces::default(), everywhere, true, &mut Scratch::default()).unwrap();
             });
             if let Ok(directory) = std::env::var("PIECES_DUMP") {
                 for (name, data) in [("whole", &whole), ("plain", &plain), ("pieced", &pieced)] {
@@ -311,6 +311,15 @@ fn a_clear_fades_away_and_undoes() {
         let painted = |pixels: &[u8]| pixels.chunks(4).filter(|p| p[3] > 0).count();
         let before = shown(&mut app);
         assert!(app.strokes.iter().all(|drawn| drawn.baked));
+
+        // A clear whose fade gets no frames at all, as when a menu holds the thread, still
+        // leaves nothing once frames come again.
+        app.clear(|_| true);
+        std::thread::sleep(Duration::from_secs_f32(crate::CLEAR_SECS + 0.05));
+        assert_eq!(painted(&shown(&mut app)), 0, "ink left after a clear with no frames");
+        app.undo();
+        let _ = shown(&mut app);
+
         app.clear(|_| true);
         // The back buffer holds the frame before last.
         frame(&mut app);

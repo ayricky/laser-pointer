@@ -1183,7 +1183,7 @@ impl App {
         // A stroke cut short by switching off isn't a shape the user finished.
         self.finish_stroke(true);
         self.ripples.clear();
-        self.toast = None;
+        self.replace_toast(None);
         self.dirty = true;
         unsafe {
             set_click_through(self.hwnd, !on);
@@ -1304,8 +1304,10 @@ impl App {
     /// up a refresh behind input. Idle, the turn is already there, so this doesn't wait.
     fn render_now(&mut self) {
         if let Some(gfx) = self.gfx.as_ref().filter(|gfx| !gfx.trimmed) {
-            unsafe {
-                WaitForSingleObject(gfx.waitable(), 20);
+            // Without a turn, the message loop draws it once one comes.
+            if unsafe { WaitForSingleObject(gfx.waitable(), 100) } != WAIT_OBJECT_0 {
+                self.dirty = true;
+                return;
             }
         }
         self.render();
@@ -1391,9 +1393,20 @@ impl App {
         // A notice replacing one already up (scrolling the thickness, say) stays up.
         let showing = self.toast.as_ref().is_some_and(|(_, at)| now.duration_since(*at).as_secs_f32() >= TOAST_IN);
         let at = if showing { now.checked_sub(Duration::from_secs_f32(TOAST_IN)).unwrap_or(now) } else { now };
-        self.toast = unsafe { gfx.make_toast(text, centre, bottom, scale) }.map(|toast| (toast, at));
-        self.dirty = true;
+        let toast = unsafe { gfx.make_toast(text, centre, bottom, scale) }.map(|toast| (toast, at));
+        self.replace_toast(toast);
         self.show();
+    }
+
+    /// A notice holding still is repainted only where something else changes, so putting up
+    /// another, or taking it down, repaints where each one is.
+    fn replace_toast(&mut self, toast: Option<(Toast, Instant)>) {
+        let bounds: Vec<Bounds> = self.toast.iter().chain(&toast).map(|(shown, _)| Graphics::toast_bounds(shown)).collect();
+        for bounds in bounds {
+            self.damage_ink(bounds);
+        }
+        self.toast = toast;
+        self.dirty = true;
     }
 
     fn screen_point(&self, (x, y): (f32, f32)) -> POINT {
@@ -1619,6 +1632,13 @@ impl App {
             return;
         };
         let now = Instant::now();
+        // While it grew, only its newest stretch was repainted; snapping changes all of it.
+        if let Some(bounds) = drawn.stroke.bounds() {
+            for region in &mut self.ink_damage {
+                region.add(bounds);
+            }
+            self.present_damage.add(bounds);
+        }
         drawn.stroke.whole = true;
         // Corners stay sharp; the shape is already smooth where it should be.
         drawn.stroke.look.smoothing = 0;
@@ -1657,6 +1677,7 @@ impl App {
     fn repair_ink(&mut self, area: Bounds) {
         let Some(gfx) = &mut self.gfx else { return };
         let (strokes, scratch) = (&mut self.strokes, &mut self.scratch);
+        let mut drawn_all = Ok(());
         let repaired = unsafe {
             gfx.bake(|gfx| {
                 gfx.dc.PushAxisAlignedClip(&graphics::rect_f(area), D2D1_ANTIALIAS_MODE_ALIASED);
@@ -1665,17 +1686,21 @@ impl App {
                     if !drawn.stroke.bounds().is_some_and(|bounds| intersects(bounds, area)) {
                         continue;
                     }
-                    if stroke::grows(&drawn.stroke) {
-                        stroke::draw_kept(&gfx.factory, &gfx.dc1, &gfx.brush, &drawn.stroke, &mut drawn.pieces, area, false, scratch);
+                    let redrawn = if stroke::grows(&drawn.stroke) {
+                        let redrawn = stroke::draw_kept(&gfx.factory, &gfx.dc1, &gfx.brush, &drawn.stroke, &mut drawn.pieces, area, false, scratch);
                         drawn.pieces.clear();
+                        redrawn
                     } else {
-                        stroke::draw(&gfx.factory, &gfx.dc, &gfx.brush, &mut drawn.stroke, Instant::now(), 1.0, scratch);
+                        stroke::draw(&gfx.factory, &gfx.dc, &gfx.brush, &mut drawn.stroke, Instant::now(), 1.0, scratch)
+                    };
+                    if redrawn.is_err() {
+                        drawn_all = redrawn;
                     }
                 }
                 gfx.dc.PopAxisAlignedClip();
             })
         };
-        if repaired.is_err() {
+        if repaired.and(drawn_all).is_err() {
             self.rebake();
         }
         self.damage_ink(area);
@@ -1794,6 +1819,10 @@ impl App {
                 gfx.fade_ink();
             }
             self.fading_ink = gone.iter().filter(|drawn| drawn.baked).filter_map(|drawn| drawn.stroke.bounds()).reduce(Bounds::union);
+            // Repainted even if the fade gets no frames at all, as when a menu holds the thread.
+            if let Some(area) = self.fading_ink {
+                self.damage_ink(area);
+            }
             self.clearing = gone.iter().filter(|drawn| !drawn.baked).map(|drawn| drawn.stroke.clone()).collect();
         } else {
             if ink_gone {
@@ -2008,18 +2037,25 @@ impl App {
         // All in one pass: each pass has a cost of its own, which an undo baking every kept
         // stroke again would pay once per stroke.
         let (strokes, scratch) = (&mut self.strokes, &mut self.scratch);
+        let mut drawn_all = Ok(());
         let baked = unsafe {
             gfx.bake(|gfx| {
                 for &index in &ready {
                     let Drawn { stroke, pieces, .. } = &mut strokes[index];
-                    if stroke::grows(stroke) {
-                        stroke::draw_kept(&gfx.factory, &gfx.dc1, &gfx.brush, stroke, pieces, everywhere, false, scratch);
+                    let drawn = if stroke::grows(stroke) {
+                        stroke::draw_kept(&gfx.factory, &gfx.dc1, &gfx.brush, stroke, pieces, everywhere, false, scratch)
                     } else {
-                        stroke::draw(&gfx.factory, &gfx.dc, &gfx.brush, stroke, Instant::now(), 1.0, scratch);
+                        stroke::draw(&gfx.factory, &gfx.dc, &gfx.brush, stroke, Instant::now(), 1.0, scratch)
+                    };
+                    if drawn.is_err() {
+                        drawn_all = drawn;
+                        break;
                     }
                 }
             })
         };
+        // A stroke that didn't all draw isn't baked: the ink layer is made again with it in.
+        let baked = baked.and(drawn_all);
         let mut damaged = Region::default();
         for &index in &ready {
             let drawn = &mut strokes[index];
@@ -2056,14 +2092,15 @@ impl App {
             .as_ref()
             .is_some_and(|(_, at)| now.duration_since(*at).as_secs_f32() >= TOAST_SECS)
         {
-            self.toast = None;
+            self.replace_toast(None);
         }
         if now.duration_since(self.cleared_at).as_secs_f32() >= CLEAR_SECS {
             self.clearing.clear();
-            if self.fading_ink.take().is_some() {
+            if let Some(area) = self.fading_ink.take() {
                 if let Some(gfx) = &mut self.gfx {
                     gfx.end_fade();
                 }
+                self.damage_ink(area);
             }
         }
         let last = self.strokes.len().wrapping_sub(1);
@@ -2185,15 +2222,15 @@ impl App {
                     }
                     let (stroke, pieces) = (&mut drawn.stroke, &mut drawn.pieces);
                     if stroke::grows(stroke) {
-                        stroke::draw_kept(&gfx.factory, &gfx.dc1, &gfx.brush, stroke, pieces, area, true, &mut self.scratch);
+                        let _ = stroke::draw_kept(&gfx.factory, &gfx.dc1, &gfx.brush, stroke, pieces, area, true, &mut self.scratch);
                     } else {
-                        stroke::draw(&gfx.factory, &gfx.dc, &gfx.brush, stroke, now, 1.0, &mut self.scratch);
+                        let _ = stroke::draw(&gfx.factory, &gfx.dc, &gfx.brush, stroke, now, 1.0, &mut self.scratch);
                     }
                 }
                 for stroke in &mut self.clearing {
                     if stroke.bounds().is_some_and(|bounds| intersects(bounds, area)) {
                         let ease = clear_fade * clear_fade;
-                        stroke::draw(&gfx.factory, &gfx.dc, &gfx.brush, stroke, self.cleared_at, ease, &mut self.scratch);
+                        let _ = stroke::draw(&gfx.factory, &gfx.dc, &gfx.brush, stroke, self.cleared_at, ease, &mut self.scratch);
                     }
                 }
                 for ripple in &self.ripples {
