@@ -1186,7 +1186,8 @@ impl Panel {
             let label = rect(area.left, area.top, area.right - area.left, 30.0);
             self.text(TABS[index].0, format, label, color);
             if selected {
-                let cx = (area.left + area.right) / 2.0;
+                // Under the label, which sits at the left of its tab, not the tab's middle.
+                let cx = area.left + self.measure(TABS[index].0, format) / 2.0;
                 self.fill_round(rect(cx - 8.0, area.bottom - 7.0, 16.0, 3.0), 1.5, theme.accent);
             }
         }
