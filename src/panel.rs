@@ -1106,15 +1106,18 @@ impl Panel {
                 // The first click only asks; the tooltip says to click again.
                 if self.confirm_delete != Some(index) {
                     self.confirm_delete = Some(index);
+                    self.hover = Some(widget);
                     return Action::Redraw;
                 }
                 self.confirm_delete = None;
-                // The icon under the pointer goes with its row.
-                self.hover = None;
                 let mut list = settings::presets();
                 let removed = list.remove(index);
                 settings::set_presets(list);
                 settings::save();
+                // The rows below moved up, so something else may be under the pointer now.
+                self.hover = self.hit(x, y);
+                self.hover_since = Instant::now();
+                self.tip_shown = false;
                 self.say(format!("Deleted \u{201c}{}\u{201d}", removed.name), false);
                 return Action::SettingsChanged;
             }
