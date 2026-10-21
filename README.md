@@ -9,9 +9,9 @@ presentation.
 
 ## Features
 
-- **Smooth laser trail** that tapers by distance and fades over time, drawn as one anti-aliased
-  shape per stroke. Solid, Glow and Neon styles; any colour; adjustable thickness, opacity, fade
-  and trail length.
+- **Smooth laser trail** that tapers and fades over time, drawn as one anti-aliased
+  shape per stroke. Solid, Glow and Neon styles; any colour; adjustable thickness, opacity and
+  fade time.
 - **Presets** — Laser, Highlighter and Pen to start with; create, rename, update and delete your
   own (up to eight).
 - **Keep strokes** — annotations stay on screen, even with the laser off and clicks passing

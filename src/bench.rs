@@ -134,7 +134,7 @@ fn kept_pieces_look_like_the_whole_stroke() {
                 stroke::draw_kept(&gfx.factory, &gfx.dc1, &gfx.brush, &stroke, &mut Pieces::default(), &mut Scratch::default());
             });
             if let Ok(directory) = std::env::var("PIECES_DUMP") {
-                for (name, data) in [("whole", &whole), ("pieced", &pieced)] {
+                for (name, data) in [("whole", &whole), ("plain", &plain), ("pieced", &pieced)] {
                     std::fs::write(format!("{directory}/{name}-{style}.raw"), data).unwrap();
                 }
             }
@@ -383,6 +383,31 @@ fn perf_report() {
             app.dirty = true;
             frame(&mut app)
         });
+
+        // The longest trails a fast hand leaves: a 1000 Hz mouse moving 4,000 px a second the
+        // whole time, for a Laser's one-second fade and a Highlighter's three.
+        for (preset, count) in [(0usize, 1000usize), (1, 3000)] {
+            let look = settings::presets()[preset].look;
+            app.strokes.clear();
+            let started = Instant::now();
+            let mut stroke = Stroke::new(Point { x: 900.0, y: 600.0, at: started }, look, 1.0);
+            stroke.points = (0..count)
+                .map(|i| {
+                    let t = i as f32 * 0.0034;
+                    let at = started + Duration::from_millis(i as u64);
+                    Point { x: 1500.0 + 700.0 * (t * 1.7).sin(), y: 1200.0 + 500.0 * (t * 2.3).cos(), at }
+                })
+                .collect();
+            app.strokes.push(Drawn::new(40, stroke));
+            app.drawing = true;
+            let label = format!("frame with a {count}-point trail ({})", settings::presets()[preset].name);
+            report(&label, 20, || {
+                app.dirty = true;
+                frame(&mut app)
+            });
+            app.drawing = false;
+        }
+        app.strokes.clear();
 
         // Snapped shapes fading out whole: three circles and three boxes across the screen, with a
         // laser trail crossing them. First with every point the morph used, then thinned to the

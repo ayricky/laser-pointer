@@ -19,8 +19,10 @@ use crate::settings::{Look, STYLE_GLOW, STYLE_NEON};
 
 // Dropping tiny moves keeps a slow hand from leaving a jittery cluster of points.
 pub const MIN_STEP: f32 = 2.0;
-// Longest straight segment left after curving between samples, in DIPs.
-const CURVE_STEP: f32 = 3.0;
+// How far the curve between samples may stray from true once flattened, in DIPs, and how far
+// each flat piece may turn, so a wide glow's outer edge stays round as well.
+const CURVE_TOLERANCE: f32 = 0.1;
+const CURVE_TURN: f32 = 5.0 * PI / 180.0;
 const CAP_STEPS: usize = 8;
 
 #[derive(Clone, Copy, Debug)]
@@ -193,7 +195,7 @@ pub fn draw(
     } = stroke;
     let (look, scale) = (*look, *scale);
     let base = look.width as f32 / 2.0 * scale;
-    radii(points, now, base, &look, scale, *whole, &mut scratch.radii);
+    radii(points, now, base, &look, *whole, &mut scratch.radii);
     if !look.ink && !*whole {
         let faded = scratch.radii.iter().take_while(|&&radius| radius < 0.1).count();
         // Keep one faded point so the tail still tapers all the way to nothing.
@@ -227,7 +229,7 @@ pub fn draw(
             curve_through(
                 &scratch.path,
                 &scratch.radii[part],
-                CURVE_STEP * scale,
+                CURVE_TOLERANCE * scale,
                 &mut scratch.centre,
                 &mut scratch.widths,
             );
@@ -253,15 +255,13 @@ fn ease_out(k: f32) -> f32 {
     1.0 - (1.0 - k).powi(4)
 }
 
-/// Thinner the older a point is and the further it sits behind the head, whichever is smaller.
-/// Measured in distance rather than point count, so the tail is the same length however fast
-/// the mouse reports. A whole shape thins evenly, by the age of its newest point.
+/// Thinner the older a point is, so the trail lasts as long as the fade however far the hand
+/// went. A whole shape thins evenly, by the age of its newest point.
 fn radii(
     points: &[Point],
     now: Instant,
     base: f32,
     look: &Look,
-    scale: f32,
     whole: bool,
     radii: &mut Vec<f32>,
 ) {
@@ -277,16 +277,9 @@ fn radii(
         radii.fill(base * ease_out(age.max(0.0)));
         return;
     }
-    let trail = look.trail as f32 * scale;
-    let mut behind = 0.0;
-    for index in (0..points.len()).rev() {
-        let point = &points[index];
-        if let Some(next) = points.get(index + 1) {
-            behind += (next.x - point.x).hypot(next.y - point.y);
-        }
+    for (radius, point) in radii.iter_mut().zip(points) {
         let age = 1.0 - now.duration_since(point.at).as_secs_f32() / fade;
-        let length = 1.0 - behind / trail;
-        radii[index] = base * ease_out(length.max(0.0)).min(ease_out(age.max(0.0)));
+        *radius = base * ease_out(age.max(0.0));
     }
 }
 
@@ -321,11 +314,12 @@ fn distance(a: Vector2, b: Vector2) -> f32 {
 }
 
 /// Quadratic curves midpoint to midpoint with each sample as the control, flattened finely
-/// enough that sparse samples from a fast flick still come out round.
+/// enough that sparse samples from a fast flick still come out round, and no finer: nearly
+/// straight stretches stay as one piece, since every point is drawn again each frame.
 fn curve_through(
     path: &[Vector2],
     radii: &[f32],
-    step: f32,
+    tolerance: f32,
     points: &mut Vec<Vector2>,
     widths: &mut Vec<f32>,
 ) {
@@ -344,8 +338,12 @@ fn curve_through(
     for index in 1..count - 1 {
         let (from, control, to) = (mid(index - 1), path[index], mid(index));
         let (r0, r1, r2) = (mid_radius(index - 1), radii[index], mid_radius(index));
-        let length = distance(from, control) + distance(control, to);
-        let steps = ((length / step).ceil() as usize).clamp(1, 16);
+        // Cut into n pieces, a quadratic strays |from - 2 control + to| / 4n² from its chords.
+        let bend = distance(Vector2 { X: from.X - control.X, Y: from.Y - control.Y }, Vector2 { X: control.X - to.X, Y: control.Y - to.Y });
+        let by_error = (bend / (4.0 * tolerance)).sqrt();
+        let (u, v) = ((control.X - from.X, control.Y - from.Y), (to.X - control.X, to.Y - control.Y));
+        let turn = (u.0 * v.1 - u.1 * v.0).atan2(u.0 * v.0 + u.1 * v.1).abs();
+        let steps = (by_error.max(turn / CURVE_TURN).ceil() as usize).clamp(1, 16);
         for k in 1..=steps {
             let t = k as f32 / steps as f32;
             let (a, b, c) = ((1.0 - t) * (1.0 - t), 2.0 * (1.0 - t) * t, t * t);
@@ -488,7 +486,7 @@ fn centre_of(points: &[Point], range: std::ops::Range<usize>, look: &Look, scale
     scratch.path.drain(..range.start - from);
     scratch.radii.clear();
     scratch.radii.resize(scratch.path.len(), look.width as f32 / 2.0 * scale);
-    curve_through(&scratch.path, &scratch.radii, CURVE_STEP * scale, &mut scratch.centre, &mut scratch.widths);
+    curve_through(&scratch.path, &scratch.radii, CURVE_TOLERANCE * scale, &mut scratch.centre, &mut scratch.widths);
 }
 
 /// Draws a kept stroke as `draw` would, from settled pieces and its newest stretch. Each pass is

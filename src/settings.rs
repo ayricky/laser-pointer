@@ -59,8 +59,6 @@ pub struct Look {
     /// Percent.
     pub opacity: u32,
     pub fade_ms: u32,
-    /// Distance behind the head over which the stroke tapers away, in DIPs.
-    pub trail: u32,
     pub smoothing: u32,
     pub style: u32,
     /// Strokes stay until cleared instead of fading.
@@ -76,7 +74,6 @@ impl Look {
         width: u32,
         opacity: u32,
         fade_ms: u32,
-        trail: u32,
         style: u32,
         ink: bool,
         snap: u32,
@@ -86,7 +83,6 @@ impl Look {
             width,
             opacity,
             fade_ms,
-            trail,
             smoothing: 2,
             style,
             ink,
@@ -99,7 +95,6 @@ impl Look {
         self.width = self.width.clamp(2, 24);
         self.opacity = self.opacity.clamp(10, 100);
         self.fade_ms = self.fade_ms.clamp(200, 5000);
-        self.trail = self.trail.clamp(100, 2000);
         self.smoothing = self.smoothing.min(8);
         self.style = self.style.min(STYLE_NEON);
         self.snap = self.snap.min(100);
@@ -121,7 +116,7 @@ impl Look {
     }
 }
 
-const LASER: Look = Look::new(0xff2a2a, 4, 100, 1000, 500, STYLE_GLOW, false, 35);
+const LASER: Look = Look::new(0xff2a2a, 4, 100, 1000, STYLE_GLOW, false, 35);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Command {
@@ -255,11 +250,11 @@ fn default_presets() -> Vec<Preset> {
         preset("Laser", LASER),
         preset(
             "Highlighter",
-            Look::new(0xffd400, 18, 40, 3000, 2000, STYLE_SOLID, false, 60),
+            Look::new(0xffd400, 18, 40, 3000, STYLE_SOLID, false, 60),
         ),
         preset(
             "Pen",
-            Look::new(0x1e90ff, 4, 100, 1000, 500, STYLE_SOLID, true, 50),
+            Look::new(0x1e90ff, 4, 100, 1000, STYLE_SOLID, true, 50),
         ),
     ]
 }
@@ -367,12 +362,11 @@ pub fn set_binding(slot: Slot, binding: Binding) {
 
 type Field = (&'static str, fn(&Settings) -> u32, fn(&mut Settings, u32));
 
-const FIELDS: [Field; 12] = [
+const FIELDS: [Field; 11] = [
     ("color", |s| s.look.color, |s, v| s.look.color = v),
     ("width", |s| s.look.width, |s, v| s.look.width = v),
     ("opacity", |s| s.look.opacity, |s, v| s.look.opacity = v),
     ("fade_ms", |s| s.look.fade_ms, |s, v| s.look.fade_ms = v),
-    ("trail", |s| s.look.trail, |s, v| s.look.trail = v),
     ("smoothing", |s| s.look.smoothing, |s, v| s.look.smoothing = v),
     ("style", |s| s.look.style, |s, v| s.look.style = v),
     ("ink", |s| s.look.ink.into(), |s, v| s.look.ink = v != 0),
@@ -395,7 +389,8 @@ fn number(value: &str) -> Option<u32> {
 }
 
 /// name|#rrggbb|width|opacity|fade|trail|smoothing|style|ink|mods|vk[|snap]
-/// Snap came later, so it goes last and files without it still load.
+/// Snap came later, so it goes last and files without it still load. Trail length is gone (the
+/// trail lasts as long as its fade), but its column stays so the others don't move.
 fn parse_preset(value: &str) -> Option<Preset> {
     let parts: Vec<&str> = value.split('|').collect();
     let (fields, snap) = match parts.len() {
@@ -403,7 +398,7 @@ fn parse_preset(value: &str) -> Option<Preset> {
         12 => (&parts[..11], Some(number(parts[11])?)),
         _ => return None,
     };
-    let [name, color, width, opacity, fade, trail, smoothing, style, ink, mods, vk] = fields else {
+    let [name, color, width, opacity, fade, _trail, smoothing, style, ink, mods, vk] = fields else {
         return None;
     };
     let name = clean_name(name);
@@ -417,7 +412,6 @@ fn parse_preset(value: &str) -> Option<Preset> {
             width: number(width)?,
             opacity: number(opacity)?,
             fade_ms: number(fade)?,
-            trail: number(trail)?,
             smoothing: number(smoothing)?,
             style: number(style)?,
             ink: number(ink)? != 0,
@@ -493,7 +487,7 @@ fn serialize(settings: &Settings, presets: &[Preset]) -> String {
             look.width,
             look.opacity,
             look.fade_ms,
-            look.trail,
+            0,
             look.smoothing,
             look.style,
             u32::from(look.ink),

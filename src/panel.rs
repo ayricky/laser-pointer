@@ -78,7 +78,6 @@ struct SliderDef {
 }
 
 const FADE: usize = 2;
-const TRAIL: usize = 3;
 const SLIDER_TOP: f32 = 414.0;
 
 fn snap_name(value: i32) -> String {
@@ -91,7 +90,7 @@ fn snap_name(value: i32) -> String {
     .into()
 }
 
-const SLIDERS: [SliderDef; 6] = [
+const SLIDERS: [SliderDef; 5] = [
     SliderDef {
         label: "Thickness",
         range: (2, 24),
@@ -112,13 +111,6 @@ const SLIDERS: [SliderDef; 6] = [
         get: |s| (s.fade_ms / 100) as i32,
         set: |s, v| s.fade_ms = v as u32 * 100,
         show: |v| format!("{:.1} s", v as f32 / 10.0),
-    },
-    SliderDef {
-        label: "Trail length",
-        range: (2, 40),
-        get: |s| (s.trail / 50) as i32,
-        set: |s, v| s.trail = v as u32 * 50,
-        show: |v| format!("{} px", v * 50),
     },
     SliderDef {
         label: "Smoothing",
@@ -1003,7 +995,7 @@ impl Panel {
 
     fn slider_enabled(index: usize, settings: &Settings) -> bool {
         match index {
-            FADE | TRAIL => !settings.look.ink,
+            FADE => !settings.look.ink,
             _ => true,
         }
     }

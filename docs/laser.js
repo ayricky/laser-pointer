@@ -71,12 +71,7 @@
       const newest = Math.max(...pts.map(p => p.t));
       radii.fill(base * easeOut4(Math.max(0, 1 - (now - newest) / s.fade)));
     } else if (!s.ink) {
-      let behind = 0;
-      for (let i = n - 1; i >= 0; i--) {
-        if (i + 1 < n) behind += dist(pts[i], pts[i + 1]);
-        const age = 1 - (now - pts[i].t) / s.fade, len = 1 - behind / s.trail;
-        radii[i] = base * Math.min(easeOut4(Math.max(0, len)), easeOut4(Math.max(0, age)));
-      }
+      for (let i = 0; i < n; i++) radii[i] = base * easeOut4(Math.max(0, 1 - (now - pts[i].t) / s.fade));
       let faded = 0;
       while (faded < n && radii[faded] < 0.1) faded++;
       const drop = faded === n ? n : Math.max(0, faded - 1);
@@ -470,9 +465,9 @@
 
   // ---- The stage: an overlay over part of the page ------------------------------------------------
   const PRESETS = {
-    Laser: { color: '#ff2a2a', width: 4, opacity: 100, fade: 1000, trail: 500, smoothing: 2, style: 'glow', ink: false, snap: 35 },
-    Highlighter: { color: '#ffd400', width: 18, opacity: 40, fade: 3000, trail: 2000, smoothing: 2, style: 'solid', ink: false, snap: 60 },
-    Pen: { color: '#1e90ff', width: 4, opacity: 100, fade: 1000, trail: 500, smoothing: 2, style: 'solid', ink: true, snap: 50 },
+    Laser: { color: '#ff2a2a', width: 4, opacity: 100, fade: 1000, smoothing: 2, style: 'glow', ink: false, snap: 35 },
+    Highlighter: { color: '#ffd400', width: 18, opacity: 40, fade: 3000, smoothing: 2, style: 'solid', ink: false, snap: 60 },
+    Pen: { color: '#1e90ff', width: 4, opacity: 100, fade: 1000, smoothing: 2, style: 'solid', ink: true, snap: 50 },
   };
   const MORPH_MS = 140, CLEAR_MS = 220, RIPPLE_MS = 450, TOAST_MS = 1400;
 
