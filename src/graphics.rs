@@ -109,7 +109,7 @@ pub struct Graphics {
     size: (u32, u32),
     pub trimmed: bool,
     // Kept alive for the lifetime of the window; dropping them detaches the visual tree.
-    _composition: (
+    composition: (
         IDCompositionDevice,
         IDCompositionTarget,
         IDCompositionVisual,
@@ -213,7 +213,7 @@ impl Graphics {
             dxgi,
             size: (width, height),
             trimmed: false,
-            _composition: (composition, target, visual),
+            composition: (composition, target, visual),
         };
         gfx.bind_target()?;
         Ok(gfx)
@@ -225,6 +225,19 @@ impl Graphics {
 
     pub fn size(&self) -> (u32, u32) {
         self.size
+    }
+
+    /// How long until Windows next composes the screen, and how long apart its frames are, in
+    /// seconds.
+    pub fn next_frame(&self) -> Option<(f32, f32)> {
+        let stats = unsafe { self.composition.0.GetFrameStatistics() }.ok()?;
+        let rate = stats.currentCompositionRate;
+        if rate.Numerator == 0 || rate.Denominator == 0 || stats.timeFrequency <= 0 {
+            return None;
+        }
+        let period = rate.Denominator as f32 / rate.Numerator as f32;
+        let until = (stats.nextEstimatedFrameTime - stats.currentTime) as f32 / stats.timeFrequency as f32;
+        Some((until, period))
     }
 
     unsafe fn bind_target(&mut self) -> Result<()> {

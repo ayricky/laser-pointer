@@ -25,6 +25,12 @@ const CURVE_TOLERANCE: f32 = 0.1;
 const CURVE_TURN: f32 = 5.0 * PI / 180.0;
 const MAX_CURVE_TURN: f32 = 20.0 * PI / 180.0;
 const CAP_STEPS: usize = 8;
+/// A snapped shape glows brighter once as it settles, for this long.
+pub const FLASH_SECS: f32 = 0.4;
+/// The flash at its brightest: (width multiplier, opacity, mix towards white), drawn beneath.
+const FLASH: (f32, f32, f32) = (3.0, 0.45, 0.35);
+/// A snapped shape that fades holds still for its fade time, then fades out over this long.
+pub const SHAPE_FADE_MS: u32 = 500;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Point {
@@ -44,6 +50,8 @@ pub struct Stroke {
     pub whole: bool,
     /// Where each part after the first begins, for shapes drawn in pieces like an arrow.
     pub breaks: Vec<usize>,
+    /// When it snapped to a shape, while that shape still glows from it.
+    pub flash: Option<Instant>,
 }
 
 impl Stroke {
@@ -54,6 +62,7 @@ impl Stroke {
             scale,
             whole: false,
             breaks: Vec::new(),
+            flash: None,
         }
     }
 
@@ -66,7 +75,11 @@ impl Stroke {
     pub fn bounds_from(&self, start: usize) -> Option<Bounds> {
         let points = self.points.get(start..)?;
         let first = points.first()?;
-        let reach = self.look.width as f32 / 2.0 * self.scale * layers(self.look.style)[0].0 + 2.0;
+        let mut widest = layers(self.look.style)[0].0;
+        if self.flash.is_some() {
+            widest = widest.max(FLASH.0);
+        }
+        let reach = self.look.width as f32 / 2.0 * self.scale * widest + 2.0;
         let mut bounds = Bounds::around(first.x, first.y, reach);
         for point in points {
             bounds = bounds.union(Bounds::around(point.x, point.y, reach));
@@ -74,12 +87,23 @@ impl Stroke {
         Some(bounds)
     }
 
-    /// Fading strokes are done once every point has aged out.
+    /// Fading strokes are done once every point has aged out, and a shape once it has held and
+    /// faded.
     pub fn expired(&self, now: Instant) -> bool {
+        let life = self.look.fade_ms + if self.whole { SHAPE_FADE_MS } else { 0 };
         !self.look.ink
             && self.points.last().is_none_or(|last| {
-                now.duration_since(last.at).as_millis() >= u128::from(self.look.fade_ms)
+                now.duration_since(last.at).as_millis() >= u128::from(life)
             })
+    }
+
+    /// The flash is over by `now`; drops it, so the stroke can be baked and stop repainting.
+    /// Returns whether it is still glowing.
+    pub fn settle_flash(&mut self, now: Instant) -> bool {
+        if self.flash.is_some_and(|at| now.duration_since(at).as_secs_f32() >= FLASH_SECS) {
+            self.flash = None;
+        }
+        self.flash.is_some()
     }
 
     /// Drops points that have aged out, keeping the newest faded one so the tail still tapers.
@@ -165,7 +189,8 @@ pub fn rgba(rgb: u32, alpha: f32) -> D2D1_COLOR_F {
 /// (width multiplier, opacity, mix towards white) for each pass, widest first.
 fn layers(style: u32) -> &'static [(f32, f32, f32)] {
     match style {
-        STYLE_GLOW => &[(3.4, 0.10, 0.0), (2.1, 0.20, 0.0), (1.0, 1.0, 0.0)],
+        // A thin near-white core, so the trail reads as light rather than paint.
+        STYLE_GLOW => &[(3.4, 0.10, 0.0), (2.1, 0.20, 0.0), (1.0, 1.0, 0.0), (0.38, 0.85, 0.6)],
         STYLE_NEON => &[
             (3.8, 0.12, 0.0),
             (2.3, 0.26, 0.0),
@@ -193,10 +218,15 @@ pub fn draw(
         scale,
         whole,
         breaks,
+        flash,
     } = stroke;
     let (look, scale) = (*look, *scale);
     let base = look.width as f32 / 2.0 * scale;
-    radii(points, now, base, &look, *whole, &mut scratch.radii);
+    let life = radii(points, now, base, &look, *whole, &mut scratch.radii);
+    let flash = flash
+        .map(|at| 1.0 - now.duration_since(at).as_secs_f32() / FLASH_SECS)
+        .filter(|left| *left > 0.0)
+        .map(|left| (FLASH.0, FLASH.1 * left * left, FLASH.2));
     if !look.ink && !*whole {
         let faded = scratch.radii.iter().take_while(|&&radius| radius < 0.1).count();
         // Keep one faded point so the tail still tapers all the way to nothing.
@@ -235,8 +265,8 @@ pub fn draw(
                 &mut scratch.widths,
             );
         }
-        let opacity = look.opacity as f32 / 100.0 * fade;
-        for &(width, alpha, white) in layers(look.style) {
+        let opacity = look.opacity as f32 / 100.0 * fade * life;
+        for &(width, alpha, white) in flash.iter().chain(layers(look.style)) {
             scratch.layer.clear();
             scratch.layer.extend(scratch.widths.iter().map(|radius| radius * width));
             outline(&scratch.centre, &scratch.layer, &mut scratch.outline);
@@ -255,8 +285,21 @@ fn ease_out(k: f32) -> f32 {
     1.0 - (1.0 - k).powi(4)
 }
 
+/// How opaque a whole shape is: fully, for its fade time after its newest point, then fading
+/// out over SHAPE_FADE_MS.
+fn shape_life(points: &[Point], now: Instant, look: &Look) -> f32 {
+    if look.ink {
+        return 1.0;
+    }
+    let newest = points.iter().map(|point| point.at).max();
+    let age = newest.map_or(0.0, |at| now.duration_since(at).as_secs_f32());
+    let k = ((age - look.fade_ms as f32 / 1000.0) / (SHAPE_FADE_MS as f32 / 1000.0)).clamp(0.0, 1.0);
+    1.0 - k * k * (3.0 - 2.0 * k)
+}
+
 /// Thinner the older a point is, so the trail lasts as long as the fade however far the hand
-/// went. A whole shape thins evenly, by the age of its newest point.
+/// went. A whole shape keeps its width, so its outline never changes once it settles; returns
+/// how opaque it is.
 fn radii(
     points: &[Point],
     now: Instant,
@@ -264,23 +307,21 @@ fn radii(
     look: &Look,
     whole: bool,
     radii: &mut Vec<f32>,
-) {
+) -> f32 {
     radii.clear();
     radii.resize(points.len(), base);
     if look.ink {
-        return;
+        return 1.0;
     }
     let fade = look.fade_ms as f32 / 1000.0;
     if whole {
-        let newest = points.iter().map(|point| point.at).max();
-        let age = newest.map_or(0.0, |at| 1.0 - now.duration_since(at).as_secs_f32() / fade);
-        radii.fill(base * ease_out(age.max(0.0)));
-        return;
+        return shape_life(points, now, look);
     }
     for (radius, point) in radii.iter_mut().zip(points) {
         let age = 1.0 - now.duration_since(point.at).as_secs_f32() / fade;
         *radius = base * ease_out(age.max(0.0));
     }
+    1.0
 }
 
 /// Symmetric window that shrinks to nothing at both ends, so the head stays under the cursor.
@@ -452,6 +493,8 @@ fn geometry(factory: &ID2D1Factory, outline: &[Vector2]) -> Result<ID2D1PathGeom
 const PIECE: usize = 192;
 const OVERLAP: usize = 6;
 
+type TailKey = (usize, usize, (u32, u32));
+
 /// A stretch of stroke tessellated for each pass, and where it paints.
 struct Tessellated {
     bounds: Bounds,
@@ -464,14 +507,19 @@ struct Tessellated {
 #[derive(Default)]
 pub struct Pieces {
     done: Vec<Tessellated>,
+    /// A settled shape's parts, each tessellated for every pass.
+    shape: Vec<Tessellated>,
     /// The stretch after them, kept for as long as the same points make it: a frame draws it
-    /// into each rectangle it repaints, and a stroke waiting to be baked doesn't change.
-    tail: Option<((usize, usize), Box<Tessellated>)>,
+    /// into each rectangle it repaints, and a stroke waiting to be baked doesn't change. Known by
+    /// where it starts, how many points it has, and where the last is, since the head drawn at
+    /// the cursor moves without adding a point.
+    tail: Option<(TailKey, Box<Tessellated>)>,
 }
 
 impl Pieces {
     pub fn clear(&mut self) {
         self.done.clear();
+        self.shape.clear();
         self.tail = None;
     }
 
@@ -542,6 +590,51 @@ fn tessellate(factory: &ID2D1Factory, dc: &ID2D1DeviceContext1, look: &Look, scr
     Ok(bounds.map(|bounds| Tessellated { bounds, passes }))
 }
 
+/// Draws a shape that has settled, as `draw` would, from its parts tessellated the first time:
+/// its outline stays the same while it holds and fades, so only the opacity changes per frame.
+pub fn draw_shape(
+    factory: &ID2D1Factory,
+    dc: &ID2D1DeviceContext1,
+    brush: &ID2D1SolidColorBrush,
+    stroke: &Stroke,
+    pieces: &mut Pieces,
+    now: Instant,
+    scratch: &mut Scratch,
+) -> Result<()> {
+    let (points, look) = (&stroke.points, stroke.look);
+    if pieces.shape.is_empty() {
+        let base = look.width as f32 / 2.0 * stroke.scale;
+        let mut start = 0;
+        for end in stroke.breaks.iter().copied().chain([points.len()]) {
+            let part = start..end.min(points.len());
+            start = end;
+            if part.is_empty() {
+                continue;
+            }
+            smooth(&points[part], look.smoothing as usize, &mut scratch.centre);
+            scratch.widths.clear();
+            scratch.widths.resize(scratch.centre.len(), base);
+            if let Some(part) = tessellate(factory, dc, &look, scratch)? {
+                pieces.shape.push(part);
+            }
+        }
+    }
+    let opacity = look.opacity as f32 / 100.0 * shape_life(points, now, &look);
+    for part in &pieces.shape {
+        for (pass, &(_, alpha, white)) in layers(look.style).iter().enumerate() {
+            let mut color = rgba(look.color, alpha * opacity);
+            color.r += (1.0 - color.r) * white;
+            color.g += (1.0 - color.g) * white;
+            color.b += (1.0 - color.b) * white;
+            unsafe {
+                brush.SetColor(&color);
+                dc.DrawGeometryRealization(&part.passes[pass], brush);
+            }
+        }
+    }
+    Ok(())
+}
+
 fn overlap(a: Bounds, b: Bounds) -> Option<Bounds> {
     let both = Bounds {
         left: a.left.max(b.left),
@@ -577,7 +670,8 @@ pub fn draw_kept(
         pieces.done.push(piece);
         pieces.tail = None;
     }
-    let made_from = (pieces.settled(), points.len());
+    let head = points.last().map_or((0, 0), |point| (point.x.to_bits(), point.y.to_bits()));
+    let made_from = (pieces.settled(), points.len(), head);
     if pieces.tail.as_ref().is_none_or(|(from, _)| *from != made_from) {
         pieces.tail = None;
         if made_from.0 < made_from.1 {

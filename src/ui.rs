@@ -4,7 +4,7 @@ use std::cell::{Cell, RefCell};
 use std::time::{Duration, Instant};
 
 use windows::core::{w, Result, HSTRING, PCWSTR};
-use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
     DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_USE_IMMERSIVE_DARK_MODE,
     DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DWMWINDOWATTRIBUTE,
@@ -13,7 +13,6 @@ use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, InvalidateRect, MonitorFromPoint, ValidateRect, MONITORINFO,
     MONITOR_DEFAULTTONEAREST,
 };
-use windows::Win32::UI::Controls::Dialogs::{ChooseColorW, CC_FULLOPEN, CC_RGBINIT, CHOOSECOLORW};
 use windows::Win32::UI::HiDpi::{
     GetDpiForMonitor, GetDpiForSystem, GetSystemMetricsForDpi, MDT_EFFECTIVE_DPI,
 };
@@ -22,7 +21,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN, TME_LEAVE, TRACKMOUSEEVENT,
 };
 use windows::Win32::UI::Shell::{
-    Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIIF_INFO,
+    ShellExecuteW, Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIIF_INFO,
     NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NINF_KEY, NIN_SELECT, NOTIFYICONDATAW,
     NOTIFYICON_VERSION_4,
 };
@@ -33,6 +32,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetTimer, SetWindowPos, ShowWindow, TrackPopupMenu, ASFW_ANY, CS_DROPSHADOW, HICON,
     HWND_TOPMOST, IDC_ARROW, IDI_APPLICATION, MENU_ITEM_FLAGS, MF_CHECKED, MF_GRAYED, MF_POPUP,
     MF_SEPARATOR, MF_STRING, SM_CXSMICON, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOW,
+    SW_SHOWNORMAL,
     TPM_BOTTOMALIGN, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WA_INACTIVE, WM_ACTIVATE,
     WM_APP, WM_CHAR, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_KEYDOWN,
     WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NULL, WM_PAINT,
@@ -68,7 +68,6 @@ struct State {
     /// Rendered by the app, so ours to destroy; the stock fallback is shared and must not be.
     icon_owned: Cell<bool>,
     closed_at: Cell<Option<Instant>>,
-    modal: Cell<bool>,
     tracking: Cell<bool>,
     taskbar_created: Cell<u32>,
     show_message: Cell<u32>,
@@ -502,7 +501,7 @@ extern "system" fn panel_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
         match msg {
             WM_ACTIVATE => {
                 // Clicking anywhere else dismisses it, like the system tray flyouts.
-                if (wparam.0 & 0xffff) as u32 == WA_INACTIVE && !state(|s| s.modal.get()) {
+                if (wparam.0 & 0xffff) as u32 == WA_INACTIVE {
                     let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
                 }
                 DefWindowProcW(hwnd, msg, wparam, lparam)
@@ -620,42 +619,13 @@ unsafe fn act(hwnd: HWND, action: Option<Action>) {
         }
         Some(Action::Toggle(on)) => crate::set_laser(on),
         Some(Action::Run(command)) => crate::run_command(command),
-        Some(Action::PickColor) => pick_color(hwnd),
+        Some(Action::Open(target)) => {
+            let _ = ShellExecuteW(Some(hwnd), w!("open"), &HSTRING::from(target), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL);
+        }
         Some(Action::Quit) => crate::quit(),
         Some(Action::Close) => {
             let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
         }
         Some(Action::None) | None => {}
     }
-}
-
-fn colorref(rgb: u32) -> COLORREF {
-    COLORREF((rgb & 0xff) << 16 | (rgb & 0xff00) | (rgb >> 16) & 0xff)
-}
-
-unsafe fn pick_color(flyout: HWND) {
-    let mut custom = [COLORREF(0xffffff); 16];
-    for (slot, color) in custom.iter_mut().zip(panel::SWATCHES) {
-        *slot = colorref(color);
-    }
-    let mut dialog = CHOOSECOLORW {
-        lStructSize: std::mem::size_of::<CHOOSECOLORW>() as u32,
-        hwndOwner: flyout,
-        rgbResult: colorref(settings::get().look.color),
-        lpCustColors: custom.as_mut_ptr(),
-        Flags: CC_FULLOPEN | CC_RGBINIT,
-        ..Default::default()
-    };
-    // The dialog takes activation; that mustn't dismiss the panel.
-    state(|s| s.modal.set(true));
-    let picked = ChooseColorW(&mut dialog).as_bool();
-    state(|s| s.modal.set(false));
-    if picked {
-        let mut current = settings::get();
-        current.look.color = colorref(dialog.rgbResult.0).0;
-        settings::set(current);
-        settings::save();
-        crate::settings_changed();
-    }
-    let _ = SetForegroundWindow(flyout);
 }

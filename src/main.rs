@@ -11,6 +11,7 @@ mod cursors;
 mod games;
 mod graphics;
 mod panel;
+mod predict;
 mod region;
 mod settings;
 mod shapes;
@@ -23,19 +24,22 @@ use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
-use windows::core::{w, Result, BOOL};
+use windows::core::{s, w, Result, BOOL, HRESULT, PCWSTR};
 use windows::Win32::Foundation::{
-    GetLastError, COLORREF, ERROR_ALREADY_EXISTS, HANDLE, HWND, LPARAM, LRESULT, POINT, RECT,
-    WAIT_OBJECT_0, WPARAM,
+    CloseHandle, GetLastError, COLORREF, ERROR_ALREADY_EXISTS, HANDLE, HWND, LPARAM, LRESULT, POINT,
+    RECT, WAIT_OBJECT_0, WPARAM,
 };
 use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D_RECT_F};
 use windows::Win32::Graphics::Direct2D::{D2D1_ANTIALIAS_MODE_ALIASED, D2D1_ELLIPSE};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows::Win32::System::SystemInformation::GetTickCount;
-use windows::Win32::System::Threading::{CreateMutexW, WaitForSingleObject, INFINITE};
+use windows::Win32::System::Threading::{
+    CreateMutexW, CreateWaitableTimerExW, SetWaitableTimer, WaitForSingleObject,
+    CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, INFINITE, TIMER_ALL_ACCESS,
+};
 use windows::Win32::UI::Accessibility::HWINEVENTHOOK;
 use windows::Win32::UI::HiDpi::{
     GetDpiForMonitor, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
@@ -50,11 +54,11 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     MOUSE_EVENT_FLAGS, VIRTUAL_KEY, VK_MENU, VK_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyCursor, DispatchMessageW, GetCursorPos,
+    CreateWindowExW, DefWindowProcW, DestroyCursor, DispatchMessageW, GetCursorInfo, GetCursorPos,
     GetMessageTime, GetSystemMetrics, GetWindowLongPtrW, KillTimer, LoadCursorW,
     MsgWaitForMultipleObjectsEx, PeekMessageW, PostQuitMessage, RegisterClassW, SetCursor, SetCursorPos,
     SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-    SystemParametersInfoW, TranslateMessage, GWL_EXSTYLE, HCURSOR, HICON, HWND_TOPMOST,
+    SystemParametersInfoW, TranslateMessage, CURSORINFO, GWL_EXSTYLE, HCURSOR, HICON, HWND_TOPMOST,
     IDC_ARROW, IDC_CROSS, LWA_ALPHA, MA_NOACTIVATE, MSG, MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT,
     SC_CLOSE, SC_KEYMENU, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
     SM_YVIRTUALSCREEN, SPI_GETCLIENTAREAANIMATION, SWP_NOACTIVATE, SWP_NOMOVE,
@@ -62,13 +66,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_CAPTURECHANGED, WM_CHAR, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_HOTKEY, WM_KEYDOWN,
     WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEACTIVATE,
     WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP,
-    WM_SETCURSOR, WM_SYSCHAR, WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER,
+    WM_SETCURSOR, WM_SETTINGCHANGE, WM_SYSCHAR, WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER,
     WM_XBUTTONDOWN, WM_XBUTTONUP, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
     WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 use windows_numerics::Vector2;
 
 use constrain::{Change, Lock};
+use predict::Predictor;
 use graphics::{device_lost, Graphics, Toast};
 use region::Region;
 use shapes::Correction;
@@ -99,13 +104,24 @@ const MK_CONTROL: usize = 0x8;
 // foreground app's menu or switching keyboard layouts.
 const VK_MASK: VIRTUAL_KEY = VIRTUAL_KEY(0xE8);
 
-const RIPPLE_SECS: f32 = 0.45;
-const MORPH_SECS: f32 = 0.1;
+// Motion follows Windows 11's own timings: 83, 167 and 250 ms, and PowerToys' click ripple.
+const RIPPLE_SECS: f32 = 0.4;
+/// How far a click ripple grows, in pixels at 100 % scale.
+const RIPPLE_REACH: f32 = 60.0;
 const TOAST_SECS: f32 = 1.4;
-/// How long a notice takes to fade in, and to fade out at the end of TOAST_SECS.
-const TOAST_IN: f32 = 0.08;
-const TOAST_OUT: f32 = 0.3;
+/// How long a notice takes to fade in, and to fade out at the end of its time.
+const TOAST_IN: f32 = 0.25;
+const TOAST_OUT: f32 = 0.167;
+/// The first notice also says how to draw and stop, so it stays up longer.
+const HINT_SECS: f32 = 3.0;
 const CLEAR_SECS: f32 = 0.22;
+/// The ring that closes in on the cursor as the laser turns on: how long, and from how far out
+/// in pixels at 100 % scale.
+const PULSE_SECS: f32 = 0.45;
+const PULSE_REACH: f32 = 90.0;
+/// Before Windows next composes the screen, a frame is started this much earlier than it takes
+/// to draw, so it is never late.
+const FRAME_MARGIN: f32 = 0.002;
 
 static LASER_ON: AtomicBool = AtomicBool::new(false);
 /// Kept strokes are on screen, so the clear shortcut has something to do.
@@ -117,6 +133,8 @@ static CURSOR: AtomicIsize = AtomicIsize::new(0);
 /// is never destroyed until something replaces it.
 static INSTALLED: AtomicIsize = AtomicIsize::new(0);
 static OVERLAY: AtomicIsize = AtomicIsize::new(0);
+/// Windows' Animation effects setting, read at startup and whenever settings change.
+static ANIMATIONS: AtomicBool = AtomicBool::new(true);
 
 thread_local! {
     static APP: RefCell<Option<App>> = const { RefCell::new(None) };
@@ -174,25 +192,46 @@ impl Drawn {
         let Some(morph) = &self.morph else {
             return false;
         };
-        let k = (now.duration_since(morph.at).as_secs_f32() / MORPH_SECS).min(1.0);
-        let t = ease_out(k);
+        let elapsed = now.duration_since(morph.at).as_secs_f32();
+        let t = spring(elapsed);
         let targets = morph.to.parts.iter().flatten();
         for ((point, &(fx, fy)), &(tx, ty)) in self.stroke.points.iter_mut().zip(&morph.from).zip(targets) {
             point.x = fx + (tx - fx) * t;
             point.y = fy + (ty - fy) * t;
         }
-        if k >= 1.0 {
+        let moving = elapsed < SNAP_SECS;
+        if !moving {
             self.settle();
         }
-        k < 1.0
+        moving
     }
 
     /// Jumps a snapping stroke to its final shape, before it is put aside for undo or redo.
     fn settle(&mut self) {
+        self.stroke.flash = None;
         if let Some(morph) = self.morph.take() {
             set_parts(&mut self.stroke, &shapes::lean(&morph.to.parts), morph.at);
         }
     }
+}
+
+/// How long a stroke takes to settle onto the shape it snapped to.
+const SNAP_SECS: f32 = 0.25;
+
+/// How far a snapping stroke has moved towards its shape, `t` seconds in: a spring that sets off
+/// at once, overshoots by a few percent and has all but stopped by SNAP_SECS, where it lands
+/// exactly. A plain ease of the same length reads as a jump; this reads as quicker.
+fn spring(t: f32) -> f32 {
+    // Damped at 0.72 of critical, at 28 radians a second.
+    const DECAY: f32 = 20.2;
+    const FREQUENCY: f32 = 19.4;
+    // Its speed as it sets off, in shapes a second.
+    const START: f32 = 12.0;
+    if t >= SNAP_SECS {
+        return 1.0;
+    }
+    let (sin, cos) = (FREQUENCY * t).sin_cos();
+    1.0 - (-DECAY * t).exp() * (cos + (DECAY - START) / FREQUENCY * sin)
 }
 
 /// Replaces a stroke's points with `parts`, all stamped `at` so a shape fades as one.
@@ -216,7 +255,7 @@ enum Edit {
 }
 
 enum Redo {
-    Stroke(Drawn),
+    Stroke(Box<Drawn>),
     /// Clears exactly the strokes the undone clear had removed.
     Clear(Vec<u64>),
 }
@@ -262,6 +301,8 @@ struct Pointer {
     pressed: Option<(bool, Instant)>,
     /// Still igniting or pressing, as of the last pose: frames keep coming until it settles.
     moving: bool,
+    /// The laser was turned off then, and its cursor is shrinking away.
+    extinguished: Option<Instant>,
 }
 
 /// Puts the laser's current cursor on screen, recording it as in use.
@@ -282,6 +323,10 @@ impl Pointer {
     fn pose(&mut self, motion: cursors::Motion, now: Instant) -> (f32, f32, bool) {
         if !animations_enabled() {
             return (1.0, 0.0, false);
+        }
+        if let Some(at) = self.extinguished {
+            let k = now.duration_since(at).as_secs_f32() / cursors::EXTINGUISH_SECS;
+            return (cursors::extinguish(k), 0.0, k < 1.0);
         }
         let mut animating = false;
         let mut ignite = 1.0;
@@ -308,10 +353,11 @@ impl Pointer {
         (scale, turn, animating)
     }
 
-    /// Shows a cursor now if the laser is on, and hands it to WM_SETCURSOR for later.
+    /// Shows a cursor now if the laser is on or its cursor is on the way out, and hands it to
+    /// WM_SETCURSOR for later.
     fn publish(&mut self, cursor: HCURSOR) {
         CURSOR.store(cursor.0 as isize, Ordering::Relaxed);
-        if laser_on() {
+        if laser_on() || self.extinguished.is_some() {
             install_cursor();
         }
     }
@@ -345,6 +391,11 @@ impl Pointer {
 }
 
 fn animations_enabled() -> bool {
+    ANIMATIONS.load(Ordering::Relaxed)
+}
+
+/// Reads Windows' Animation effects setting again, as it may have just changed.
+fn read_animations() {
     let mut enabled = BOOL(1);
     unsafe {
         let _ = SystemParametersInfoW(
@@ -354,7 +405,54 @@ fn animations_enabled() -> bool {
             SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
         );
     }
-    enabled.as_bool()
+    ANIMATIONS.store(enabled.as_bool(), Ordering::Relaxed);
+}
+
+/// Whether the cursor on screen is still the one the laser put there, rather than one another
+/// window has put up since.
+fn cursor_is_ours() -> bool {
+    let mut info = CURSORINFO {
+        cbSize: std::mem::size_of::<CURSORINFO>() as u32,
+        ..Default::default()
+    };
+    let installed = INSTALLED.load(Ordering::Relaxed);
+    installed != 0 && unsafe { GetCursorInfo(&mut info) }.is_ok() && info.hCursor.0 as isize == installed
+}
+
+/// Puts the arrow up in place of the laser's cursor, and lets Windows pick the cursor for
+/// whatever is under it.
+fn restore_arrow() {
+    unsafe {
+        if let Ok(arrow) = LoadCursorW(None, IDC_ARROW) {
+            SetCursor(Some(arrow));
+            INSTALLED.store(0, Ordering::Relaxed);
+        }
+        repick_cursor();
+    }
+}
+
+/// Where the mouse is, in screen coordinates.
+fn cursor_position() -> Option<POINT> {
+    let mut at = POINT::default();
+    unsafe { GetCursorPos(&mut at) }.ok().map(|()| at)
+}
+
+/// Asks Windows 11 to compose the screen at its fastest rate for as long as a stroke is drawn,
+/// so a laptop that drops to 60 Hz when idle draws at 120. Looked up rather than linked:
+/// Windows 10 doesn't have it.
+fn boost_compositor(on: bool) {
+    type Boost = unsafe extern "system" fn(BOOL) -> HRESULT;
+    static BOOST: std::sync::OnceLock<Option<Boost>> = std::sync::OnceLock::new();
+    let boost = BOOST.get_or_init(|| unsafe {
+        let module = GetModuleHandleW(w!("dcomp.dll")).ok()?;
+        let found = GetProcAddress(module, s!("DCompositionBoostCompositorClock"))?;
+        Some(std::mem::transmute::<unsafe extern "system" fn() -> isize, Boost>(found))
+    });
+    if let Some(boost) = boost {
+        unsafe {
+            let _ = boost(on.into());
+        }
+    }
 }
 
 struct App {
@@ -386,6 +484,10 @@ struct App {
     cleared_at: Instant,
     ripples: Vec<Ripple>,
     toast: Option<(Toast, Instant)>,
+    /// How long the notice up now stays.
+    toast_secs: f32,
+    /// When the laser turned on, while a ring closes in on the cursor to show where it is.
+    pulse: Option<Instant>,
     dirty: bool,
     /// Virtual-screen position of the window, to map screen coordinates into it.
     origin: (i32, i32),
@@ -403,6 +505,18 @@ struct App {
     presented: bool,
     scratch: Scratch,
     pointer: Pointer,
+    /// Where the hand is heading, so the head of the stroke can be drawn ahead of it.
+    predictor: Predictor,
+    /// Where the mouse is now, for the head of the stroke; tests set their own.
+    live_cursor: fn() -> Option<POINT>,
+    /// The compositor runs at its fastest while this stroke is drawn.
+    boosted: bool,
+    /// The last frame drew the head ahead of the cursor, so another must follow to bring it
+    /// back once the hand stops.
+    led: bool,
+    /// How long a frame has been taking to draw and present, rising at once and falling slowly,
+    /// so a frame can start as late as is safe.
+    frame_cost: f32,
     /// The game the overlay took the mouse from while the laser is on.
     game: Option<HWND>,
     /// Games that minimised when the laser took the foreground; never taken from again.
@@ -419,6 +533,7 @@ fn main() -> Result<()> {
             return Ok(());
         }
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        read_animations();
         let first_run = settings::load();
         let instance = GetModuleHandleW(None)?;
         let class = w!("LaserPointerOverlay");
@@ -477,10 +592,33 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+/// Handles every message waiting. Returns false once the app is to quit.
+unsafe fn pump(msg: &mut MSG) -> bool {
+    while PeekMessageW(msg, None, 0, 0, PM_REMOVE).as_bool() {
+        if msg.message == WM_QUIT {
+            return false;
+        }
+        let _ = TranslateMessage(msg);
+        DispatchMessageW(msg);
+    }
+    true
+}
+
 /// Sleeps in the kernel when nothing is moving, and paces frames off the swap chain's latency
-/// waitable while something is, so input is read as late as possible before each frame.
+/// waitable while something is, so input is read as late as possible before each frame. While
+/// a stroke is drawn, each frame waits further, until just before Windows composes the screen,
+/// taking input all the while. Returns once the app is to quit.
 unsafe fn run() {
     let mut msg = MSG::default();
+    // Sleeps to a fraction of a millisecond, where an ordinary timer rounds to the tick.
+    let pacer = CreateWaitableTimerExW(None, PCWSTR::null(), CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS.0).ok();
+    paced(&mut msg, pacer);
+    if let Some(pacer) = pacer {
+        let _ = CloseHandle(pacer);
+    }
+}
+
+unsafe fn paced(msg: &mut MSG, pacer: Option<HANDLE>) {
     loop {
         let waitable = with_app(|app| app.needs_frame().then(|| app.waitable()).flatten()).flatten();
         let handles: &[HANDLE] = match &waitable {
@@ -499,15 +637,24 @@ unsafe fn run() {
         };
         let woke =
             MsgWaitForMultipleObjectsEx(Some(handles), timeout, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
-        while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
-            if msg.message == WM_QUIT {
-                return;
-            }
-            let _ = TranslateMessage(&msg);
-            DispatchMessageW(&msg);
+        if !pump(msg) {
+            return;
         }
         let rendered = waitable.is_some() && woke == WAIT_OBJECT_0;
         if rendered {
+            let delay = with_app(|app| app.frame_delay()).flatten();
+            if let (Some(pacer), Some(delay)) = (pacer, delay) {
+                // Negative: relative, in 100 ns units.
+                let due = -((delay * 1e7) as i64);
+                if SetWaitableTimer(pacer, &due, 0, None, None, false).is_ok() {
+                    let limit = (delay * 1000.0) as u32 + 5;
+                    while MsgWaitForMultipleObjectsEx(Some(&[pacer]), limit, QS_ALLINPUT, MWMO_INPUTAVAILABLE).0 == WAIT_OBJECT_0.0 + 1 {
+                        if !pump(msg) {
+                            return;
+                        }
+                    }
+                }
+            }
             with_app(App::render);
         }
         // Explorer can be slow to answer, so the tray waits until any frame is out.
@@ -854,6 +1001,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 }
                 LRESULT(0)
             }
+            WM_SETTINGCHANGE => {
+                read_animations();
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
             // The overlay spans every monitor, so it ignores the suggested rectangle.
             WM_DISPLAYCHANGE | WM_DPICHANGED => {
                 with_app(App::fit_to_screen);
@@ -995,7 +1146,23 @@ fn pixel_rect(bounds: Bounds, (width, height): (u32, u32)) -> Option<RECT> {
 }
 
 fn ripple_bounds(ripple: &Ripple) -> Bounds {
-    Bounds::around(ripple.x, ripple.y, 40.0 * ripple.scale)
+    Bounds::around(ripple.x, ripple.y, (RIPPLE_REACH + 6.0) * ripple.scale)
+}
+
+/// The ring closing in on the cursor: where it is, its radius and how opaque, with the scale
+/// it's drawn at.
+struct Pulse {
+    x: f32,
+    y: f32,
+    radius: f32,
+    alpha: f32,
+    scale: f32,
+}
+
+impl Pulse {
+    fn bounds(&self) -> Bounds {
+        Bounds::around(self.x, self.y, self.radius + 4.0 * self.scale)
+    }
 }
 
 /// Converts a time from the mouse's history into an Instant, clamped so a stale stamp can't
@@ -1038,6 +1205,8 @@ impl App {
             cleared_at: Instant::now(),
             ripples: Vec::new(),
             toast: None,
+            toast_secs: TOAST_SECS,
+            pulse: None,
             dirty: false,
             origin,
             size,
@@ -1049,6 +1218,11 @@ impl App {
             presented: false,
             scratch: Scratch::default(),
             pointer: Pointer::default(),
+            predictor: Predictor::default(),
+            live_cursor: cursor_position,
+            boosted: false,
+            led: false,
+            frame_cost: 0.0,
             game: None,
             restless_games: Vec::new(),
             warned_exclusive: false,
@@ -1099,20 +1273,24 @@ impl App {
     fn animating(&self) -> bool {
         // Expired strokes still count until a frame removes them and erases what they left.
         self.strokes.iter().any(|drawn| {
-            drawn.morph.is_some() || (!drawn.stroke.look.ink && !drawn.stroke.points.is_empty())
+            drawn.morph.is_some()
+                || drawn.stroke.flash.is_some()
+                || (!drawn.stroke.look.ink && !drawn.stroke.points.is_empty())
         })
             || !self.ripples.is_empty()
             || self.toast_fading(Instant::now())
             || !self.clearing.is_empty()
             || self.fading_ink.is_some()
-            || (self.pointer.moving && laser_on())
+            || self.pulse.is_some()
+            || (self.drawing && self.led)
+            || (self.pointer.moving && (laser_on() || self.pointer.extinguished.is_some()))
     }
 
     /// A notice changes only as it fades in and out; while it holds, nothing needs drawing.
     fn toast_fading(&self, now: Instant) -> bool {
         self.toast.as_ref().is_some_and(|(_, at)| {
             let age = now.duration_since(*at).as_secs_f32();
-            !(TOAST_IN..TOAST_SECS - TOAST_OUT).contains(&age)
+            !(TOAST_IN..self.toast_secs - TOAST_OUT).contains(&age)
         })
     }
 
@@ -1120,18 +1298,32 @@ impl App {
     /// still begins to fade out.
     fn wake_in(&self) -> Option<Duration> {
         let (_, at) = self.toast.as_ref()?;
-        let hold = Duration::from_secs_f32(TOAST_SECS - TOAST_OUT);
+        let hold = Duration::from_secs_f32(self.toast_secs - TOAST_OUT);
         // Once fading, frames come by themselves.
         hold.checked_sub(at.elapsed()).filter(|wait| !wait.is_zero())
     }
 
-    /// Anything left to show once the laser is off: kept strokes, a fading tail, a notice.
+    /// Anything left to show once the laser is off: kept strokes, a fading tail, a notice, or
+    /// the cursor shrinking away, which only frames can drive.
     fn has_content(&self) -> bool {
         !self.strokes.is_empty()
             || !self.ripples.is_empty()
             || self.toast.is_some()
             || !self.clearing.is_empty()
             || self.fading_ink.is_some()
+            || self.pointer.extinguished.is_some()
+    }
+
+    /// How much longer the next frame should wait before it starts, in seconds: until just
+    /// before Windows next composes the screen, less what a frame takes, so the stroke being
+    /// drawn shows the newest input. Only while drawing; any other frame starts at once.
+    fn frame_delay(&self) -> Option<f32> {
+        if !self.drawing {
+            return None;
+        }
+        let (until, period) = self.gfx.as_ref()?.next_frame()?;
+        let delay = until.min(period) - self.frame_cost - FRAME_MARGIN;
+        (delay > 0.0005).then_some(delay)
     }
 
     fn update_ink_visible(&self) {
@@ -1184,38 +1376,88 @@ impl App {
         self.finish_stroke(true);
         self.ripples.clear();
         self.replace_toast(None);
+        self.pulse = None;
         self.dirty = true;
+        let now = Instant::now();
         unsafe {
             set_click_through(self.hwnd, !on);
             if on {
                 // The cursor is the first thing to show, so it's made while the GPU is idle,
                 // before the notice's frame.
-                self.pointer.ignited = Some(Instant::now());
+                self.pointer.extinguished = None;
+                self.pointer.ignited = Some(now);
                 self.refresh_cursor();
                 install_cursor();
-                self.notify("Laser on");
+                if settings::get().pulse && animations_enabled() {
+                    self.pulse = Some(now);
+                }
+                self.greet();
                 self.show();
                 // Another always-on-top window (a slide show, say) may have been raised since.
                 self.raise();
                 self.take_mouse_from_game();
+                repick_cursor();
             } else {
                 self.notify("Laser off");
                 let _ = ReleaseCapture();
                 if let Some(game) = self.game.take() {
                     games::give_back(self.hwnd, game);
                 }
+                // The laser's cursor shrinks away now, rather than staying until the mouse next
+                // moves. Moving the mouse meanwhile hands it to the window underneath at once.
+                if animations_enabled() && cursor_is_ours() {
+                    self.pointer.ignited = None;
+                    self.pointer.pressed = None;
+                    self.pointer.extinguished = Some(now);
+                    self.refresh_cursor();
+                    self.show();
+                } else {
+                    self.pointer.extinguished = None;
+                    restore_arrow();
+                }
                 if !self.has_content() {
                     self.hide();
                 }
-                // The laser's cursor goes now, not when the mouse next moves.
-                if let Ok(arrow) = LoadCursorW(None, IDC_ARROW) {
-                    SetCursor(Some(arrow));
-                    INSTALLED.store(0, Ordering::Relaxed);
-                }
             }
-            repick_cursor();
         }
         self.update_ink_visible();
+    }
+
+    /// The notice for turning on. The first one ever also says how to draw and how to stop.
+    fn greet(&mut self) {
+        let mut current = settings::get();
+        if current.hinted || !current.indicator {
+            self.notify("Laser on");
+            return;
+        }
+        let stop = [Command::Off, Command::Toggle].into_iter().map(|command| current.key(command)).find(|key| key.is_set());
+        let text = match stop {
+            Some(key) => format!("Drag to draw  \u{b7}  {} to stop", ui::shortcut_name(key)),
+            None => "Drag to draw".into(),
+        };
+        self.notify_for(&text, HINT_SECS);
+        current.hinted = true;
+        settings::set(current);
+        save_soon();
+    }
+
+    /// Steps the cursor through shrinking away once the laser is off, and puts the arrow up when
+    /// it's done. Stops early, leaving the cursor be, once another window has put up its own.
+    fn extinguish(&mut self, now: Instant) {
+        let Some(at) = self.pointer.extinguished else { return };
+        if laser_on() || !cursor_is_ours() {
+            self.pointer.extinguished = None;
+            self.pointer.moving = false;
+            return;
+        }
+        if now.duration_since(at).as_secs_f32() >= cursors::EXTINGUISH_SECS {
+            self.pointer.extinguished = None;
+            self.pointer.moving = false;
+            self.pointer.current = None;
+            restore_arrow();
+            return;
+        }
+        self.refresh_cursor();
     }
 
     fn warn_fullscreen(&mut self) {
@@ -1372,6 +1614,11 @@ impl App {
 
     /// A pill near the bottom of the monitor the cursor is on, if the user wants them.
     fn notify(&mut self, text: &str) {
+        self.notify_for(text, TOAST_SECS);
+    }
+
+    /// The same, staying up for `secs`.
+    fn notify_for(&mut self, text: &str, secs: f32) {
         if !settings::get().indicator {
             return;
         }
@@ -1395,6 +1642,7 @@ impl App {
         let at = if showing { now.checked_sub(Duration::from_secs_f32(TOAST_IN)).unwrap_or(now) } else { now };
         let toast = unsafe { gfx.make_toast(text, centre, bottom, scale) }.map(|toast| (toast, at));
         self.replace_toast(toast);
+        self.toast_secs = secs;
         self.show();
     }
 
@@ -1472,6 +1720,12 @@ impl App {
         }
         self.drawing = true;
         self.dirty = true;
+        self.predictor.reset();
+        self.predictor.add(point.0, point.1, time);
+        if !self.boosted {
+            self.boosted = true;
+            boost_compositor(true);
+        }
         self.pointer.pressed = Some((true, now));
         self.refresh_cursor();
         self.update_ink_visible();
@@ -1578,6 +1832,7 @@ impl App {
         {
             return;
         }
+        self.predictor.add((sample.x - origin.0) as f32, (sample.y - origin.1) as f32, sample.time);
         let at = sample_instant(sample.time, ticks, now);
         let at = stroke.points.last().map_or(at, |last| at.max(last.at));
         let snappable = stroke.look.snap > 0 && !self.locked;
@@ -1608,6 +1863,10 @@ impl App {
         self.drawing = false;
         self.sample = None;
         self.lock = Lock::None;
+        if self.boosted {
+            self.boosted = false;
+            boost_compositor(false);
+        }
         if !freehand {
             self.snap_finished();
         }
@@ -1646,6 +1905,8 @@ impl App {
             set_parts(&mut drawn.stroke, &shapes::lean(&correction.parts), now);
             return;
         }
+        // It glows brighter once as it settles, to say it snapped.
+        drawn.stroke.flash = Some(now);
         set_parts(&mut drawn.stroke, &correction.parts, now);
         let from = shapes::correspondence(&self.path, &correction);
         drawn.morph = Some(Morph {
@@ -1739,7 +2000,7 @@ impl App {
                 Edit::Added(id) => {
                     // A fading stroke that has already gone has nothing left to undo.
                     if let Some(drawn) = self.remove_stroke(id) {
-                        self.redo.push(Redo::Stroke(drawn));
+                        self.redo.push(Redo::Stroke(Box::new(drawn)));
                         break;
                     }
                 }
@@ -1772,7 +2033,8 @@ impl App {
             return;
         }
         match self.redo.pop() {
-            Some(Redo::Stroke(mut drawn)) => {
+            Some(Redo::Stroke(drawn)) => {
+                let mut drawn = *drawn;
                 // A fading stroke fades again from now rather than vanishing at once.
                 if let Some(last) = drawn.stroke.points.last().map(|point| point.at) {
                     let shift = Instant::now().saturating_duration_since(last);
@@ -1984,7 +2246,8 @@ impl App {
         // Finely enough that no step of zoom or turn is skipped between samples.
         let igniting = (0..=96).map(|i| motion.pose(i as f32 / 96.0, 0.0));
         let pressing = (0..=32).map(|i| motion.pose(1.0, i as f32 / 32.0));
-        for (zoom, turn) in igniting.chain(pressing) {
+        let going = (0..=16).map(|i| (cursors::extinguish(i as f32 / 16.0), 0.0));
+        for (zoom, turn) in igniting.chain(pressing).chain(going) {
             let key = CursorKey {
                 style: settings.cursor,
                 color: settings.look.color,
@@ -2026,7 +2289,11 @@ impl App {
             .iter()
             .enumerate()
             .take_while(|&(index, drawn)| {
-                drawn.baked || (drawn.stroke.look.ink && !(drawing && index == last) && drawn.morph.is_none())
+                drawn.baked
+                    || (drawn.stroke.look.ink
+                        && !(drawing && index == last)
+                        && drawn.morph.is_none()
+                        && drawn.stroke.flash.is_none())
             })
             .filter(|(_, drawn)| !drawn.baked)
             .map(|(index, _)| index)
@@ -2083,18 +2350,62 @@ impl App {
         }
     }
 
+    /// Pushes a point onto the stroke being drawn where the mouse is now, a little ahead of it
+    /// if it's moving fast, so the head keeps up with the cursor. Messages bring the mouse's
+    /// path a little late; the point is only for this frame, and taken off once it's drawn.
+    fn push_head(&mut self, now: Instant) -> bool {
+        self.led = false;
+        if !self.drawing {
+            return false;
+        }
+        let Some(cursor) = (self.live_cursor)() else { return false };
+        let Some(drawn) = self.strokes.last_mut() else { return false };
+        let stroke = &mut drawn.stroke;
+        let (lead_x, lead_y) = self.predictor.lead(stroke.scale, now);
+        self.led = (lead_x, lead_y) != (0.0, 0.0);
+        let ahead = ((cursor.x - self.origin.0) as f32 + lead_x, (cursor.y - self.origin.1) as f32 + lead_y);
+        let (x, y) = self.lock.project(ahead, self.anchor);
+        let Some(last) = stroke.points.last() else { return false };
+        if (x - last.x).hypot(y - last.y) < MIN_STEP * stroke.scale {
+            return false;
+        }
+        let at = now.max(last.at);
+        stroke.points.push(Point { x, y, at });
+        true
+    }
+
+    /// The ring closing in on the cursor as the laser turns on, as it is now.
+    fn pulse_now(&self, now: Instant) -> Option<Pulse> {
+        let k = now.duration_since(self.pulse?).as_secs_f32() / PULSE_SECS;
+        let cursor = (self.live_cursor)()?;
+        let scale = monitor_scale(cursor);
+        Some(Pulse {
+            x: (cursor.x - self.origin.0) as f32,
+            y: (cursor.y - self.origin.1) as f32,
+            radius: (10.0 + (PULSE_REACH - 10.0) * (1.0 - ease_out(k))) * scale,
+            alpha: 0.9 * (k * 6.0).min(1.0) * (1.0 - k).max(0.0).powf(0.8),
+            scale,
+        })
+    }
+
     fn render(&mut self) {
-        if self.pointer.moving && laser_on() {
+        let started = Instant::now();
+        if self.pointer.extinguished.is_some() {
+            self.extinguish(started);
+        } else if self.pointer.moving && laser_on() {
             self.refresh_cursor();
         }
         let now = Instant::now();
         let color = settings::get().look.color;
         self.ripples
             .retain(|ripple| now.duration_since(ripple.at).as_secs_f32() < RIPPLE_SECS);
+        if self.pulse.is_some_and(|at| now.duration_since(at).as_secs_f32() >= PULSE_SECS) {
+            self.pulse = None;
+        }
         if self
             .toast
             .as_ref()
-            .is_some_and(|(_, at)| now.duration_since(*at).as_secs_f32() >= TOAST_SECS)
+            .is_some_and(|(_, at)| now.duration_since(*at).as_secs_f32() >= self.toast_secs)
         {
             self.replace_toast(None);
         }
@@ -2116,13 +2427,16 @@ impl App {
         });
         for drawn in &mut self.strokes {
             drawn.advance_morph(now);
+            drawn.stroke.settle_flash(now);
             drawn.stroke.prune(now);
         }
         self.bake_finished();
-        let Some(gfx) = &self.gfx else { return };
-        if gfx.trimmed {
+        if self.gfx.as_ref().is_none_or(|gfx| gfx.trimmed) {
             return;
         }
+        let head = self.push_head(now);
+        let pulse = self.pulse_now(now);
+        let Some(gfx) = &self.gfx else { return };
         let size = gfx.size();
 
         // What moves this frame, and where. Each stroke's bounds walk all its points, so
@@ -2154,6 +2468,9 @@ impl App {
         }
         for ripple in &self.ripples {
             moving.add(ripple_bounds(ripple));
+        }
+        if let Some(pulse) = &pulse {
+            moving.add(pulse.bounds());
         }
         // A notice holding still is repainted only where something else changes over it.
         if let Some((toast, _)) = self.toast.as_ref().filter(|_| self.toast_fading(now)) {
@@ -2224,9 +2541,12 @@ impl App {
                     if !bounds.is_some_and(|bounds| intersects(bounds, area)) {
                         continue;
                     }
+                    let settled = drawn.morph.is_none() && drawn.stroke.flash.is_none();
                     let (stroke, pieces) = (&mut drawn.stroke, &mut drawn.pieces);
                     if stroke::grows(stroke) {
                         let _ = stroke::draw_kept(&gfx.factory, &gfx.dc1, &gfx.brush, stroke, pieces, area, true, &mut self.scratch);
+                    } else if stroke.whole && settled {
+                        let _ = stroke::draw_shape(&gfx.factory, &gfx.dc1, &gfx.brush, stroke, pieces, now, &mut self.scratch);
                     } else {
                         let _ = stroke::draw(&gfx.factory, &gfx.dc, &gfx.brush, stroke, now, 1.0, &mut self.scratch);
                     }
@@ -2240,7 +2560,7 @@ impl App {
                 for ripple in &self.ripples {
                     if intersects(ripple_bounds(ripple), area) {
                         let k = now.duration_since(ripple.at).as_secs_f32() / RIPPLE_SECS;
-                        let radius = (6.0 + 30.0 * (1.0 - (1.0 - k).powi(3))) * ripple.scale;
+                        let radius = (6.0 + (RIPPLE_REACH - 6.0) * ease_out(k)) * ripple.scale;
                         gfx.brush.SetColor(&rgba(color, 0.9 * (1.0 - k).powf(1.5)));
                         gfx.dc.DrawEllipse(
                             &ellipse(ripple.x, ripple.y, radius),
@@ -2250,10 +2570,15 @@ impl App {
                         );
                     }
                 }
+                if let Some(pulse) = pulse.as_ref().filter(|pulse| intersects(pulse.bounds(), area)) {
+                    gfx.brush.SetColor(&rgba(color, pulse.alpha));
+                    gfx.dc.DrawEllipse(&ellipse(pulse.x, pulse.y, pulse.radius), &gfx.brush, 3.0 * pulse.scale, None);
+                }
                 if let Some((toast, at)) = &self.toast {
                     if intersects(Graphics::toast_bounds(toast), area) {
                         let age = now.duration_since(*at).as_secs_f32();
-                        let alpha = (age / TOAST_IN).min(1.0).min((TOAST_SECS - age) / TOAST_OUT).max(0.0);
+                        let entering = ease_out((age / TOAST_IN).min(1.0));
+                        let alpha = entering.min((self.toast_secs - age) / TOAST_OUT).max(0.0);
                         gfx.draw_toast(toast, color, alpha);
                     }
                 }
@@ -2265,6 +2590,13 @@ impl App {
         // Presented even if drawing failed: the turn this frame took must go back.
         let presented = unsafe { gfx.present(if whole { &mut [] } else { &mut rects[..count] }) };
         let presented = drawn.and(presented);
+        if head {
+            if let Some(drawn) = self.strokes.last_mut() {
+                drawn.stroke.points.pop();
+            }
+        }
+        let cost = started.elapsed().as_secs_f32();
+        self.frame_cost = cost.max(self.frame_cost * 0.95 + cost * 0.05);
 
         self.stale[back] = moving;
         self.ink_damage[back].clear();
@@ -2315,6 +2647,17 @@ mod tests {
         assert!((back_out(0.0)).abs() < 1e-6);
         assert!((back_out(1.0) - 1.0).abs() < 1e-6);
         assert!((0..20).map(|i| back_out(i as f32 / 20.0)).fold(0.0, f32::max) > 1.0);
+    }
+
+    #[test]
+    fn a_snap_sets_off_at_once_overshoots_a_little_and_lands_exactly() {
+        assert!(spring(0.0).abs() < 1e-6);
+        // It moves from the first frame rather than easing out of a standstill.
+        assert!(spring(0.008) > 0.08, "{}", spring(0.008));
+        let peak = (0..250).map(|ms| spring(ms as f32 / 1000.0)).fold(0.0, f32::max);
+        assert!(peak > 1.0 && peak < 1.06, "{peak}");
+        assert!((spring(SNAP_SECS - 0.001) - 1.0).abs() < 0.01);
+        assert_eq!(spring(SNAP_SECS), 1.0);
     }
 
     #[test]

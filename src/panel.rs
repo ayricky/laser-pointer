@@ -52,7 +52,20 @@ const INNER: f32 = WIDTH - 2.0 * MARGIN;
 const CONTENT_TOP: f32 = 118.0;
 // The shortcuts list scrolls between these; a footer below holds hints and errors.
 const LIST_BOTTOM: f32 = HEIGHT - 40.0;
-const PREVIEW: D2D_RECT_F = rect(MARGIN, CONTENT_TOP, INNER, 100.0);
+const PREVIEW: D2D_RECT_F = rect(MARGIN, CONTENT_TOP, INNER, 150.0);
+// The Pen tab, top to bottom under the preview.
+const COLOUR_TOP: f32 = 284.0;
+const SWATCH_TOP: f32 = COLOUR_TOP + 22.0;
+const STYLE_TOP: f32 = 348.0;
+/// The colour picker opens as a card over the style and sliders, under the swatches.
+const PICKER: D2D_RECT_F = rect(MARGIN, SWATCH_TOP + 40.0, INNER, 138.0);
+const HUE_BAR: D2D_RECT_F = rect(PICKER.left + 16.0, PICKER.top + 46.0, INNER - 32.0, 12.0);
+const SHADE_BAR: D2D_RECT_F = rect(PICKER.left + 16.0, PICKER.top + 78.0, INNER - 32.0, 12.0);
+const PICKER_DONE: D2D_RECT_F = rect(PICKER.right - 16.0 - 76.0, PICKER.top + 100.0, 76.0, 28.0);
+/// How light the picker's shade bar runs, from its dark end to its pale end.
+const SHADES: (f32, f32) = (0.2, 0.8);
+/// How long the pointer rests on an icon before its tooltip shows.
+const TIP_DELAY: Duration = Duration::from_millis(400);
 
 pub const SWATCHES: [u32; 6] = [0xff2a2a, 0xff8a00, 0xffd400, 0x2ecc40, 0x1e90ff, 0xd62aff];
 const STYLES: [u32; 3] = [STYLE_SOLID, STYLE_GLOW, STYLE_NEON];
@@ -79,6 +92,16 @@ struct SliderDef {
 
 const FADE: usize = 2;
 const SLIDER_TOP: f32 = 414.0;
+
+fn smoothing_name(value: i32) -> String {
+    match value {
+        0 => "Off",
+        1..=2 => "Low",
+        3..=5 => "Medium",
+        _ => "High",
+    }
+    .into()
+}
 
 fn snap_name(value: i32) -> String {
     match value {
@@ -117,7 +140,7 @@ const SLIDERS: [SliderDef; 5] = [
         range: (0, 8),
         get: |s| s.smoothing as i32,
         set: |s, v| s.smoothing = v as u32,
-        show: |v| v.to_string(),
+        show: smoothing_name,
     },
     // How sloppy a finished stroke may be and still straighten into a line, circle, box or arrow.
     SliderDef {
@@ -139,9 +162,10 @@ struct ToggleDef {
 }
 
 const KEEP_STROKES: usize = 0;
-const AUTOSTART: usize = 4;
+const AUTOSTART: usize = 5;
+const TOGGLE_STEP: f32 = 48.0;
 
-const TOGGLES: [ToggleDef; 5] = [
+const TOGGLES: [ToggleDef; 6] = [
     ToggleDef {
         title: "Keep strokes",
         detail: "Drawings stay up, even with the laser off, until cleared",
@@ -159,6 +183,12 @@ const TOGGLES: [ToggleDef; 5] = [
         detail: "Confirm toggles, presets and size changes",
         get: |s| s.indicator,
         set: |s, v| s.indicator = v,
+    },
+    ToggleDef {
+        title: "Show where the pointer is",
+        detail: "A ring closes in on the cursor as the laser turns on",
+        get: |s| s.pulse,
+        set: |s, v| s.pulse = v,
     },
     ToggleDef {
         title: "Pause games while drawing",
@@ -182,9 +212,12 @@ const QUIT: D2D_RECT_F = rect(WIDTH - MARGIN - 100.0, HEIGHT - 52.0, 100.0, 32.0
 enum Widget {
     Power,
     Tab(usize),
-    QuickPreset(usize),
-    MorePresets,
     Swatch(usize),
+    /// The colour picker's card, and the hue and shade bars and Done button on it.
+    Picker,
+    Hue,
+    Shade,
+    PickerDone,
     Style(usize),
     Slider(usize),
     PresetRow(usize),
@@ -196,8 +229,26 @@ enum Widget {
     Unbind(Slot),
     Cursor(usize),
     Toggle(usize),
+    Link(usize),
     Reset,
     Quit,
+}
+
+/// What a held mouse button is dragging.
+#[derive(Clone, Copy, PartialEq)]
+enum Drag {
+    Slider(usize),
+    Hue,
+    Shade,
+}
+
+/// The links under the Options tab: what each says, and where it goes.
+fn links() -> [(&'static str, String); 2] {
+    let first = match settings::package_family() {
+        Some(family) => ("Rate in the Store", format!("ms-windows-store://review/?PFN={family}")),
+        None => ("Release notes", "https://github.com/ayricky/laser-pointer/releases".into()),
+    };
+    [first, ("Report a problem", "https://github.com/ayricky/laser-pointer/issues/new".into())]
 }
 
 pub enum Action {
@@ -207,7 +258,8 @@ pub enum Action {
     Toggle(bool),
     /// Something the tray menu and shortcuts do too, done the same way.
     Run(Command),
-    PickColor,
+    /// Opens a web page or the Store.
+    Open(String),
     Quit,
     Close,
 }
@@ -243,6 +295,44 @@ fn faded(color: D2D1_COLOR_F, alpha: f32) -> D2D1_COLOR_F {
         a: color.a * alpha,
         ..color
     }
+}
+
+/// A fully saturated colour from its hue (0 to 1 round the wheel) and lightness.
+fn from_hue(hue: f32, light: f32) -> u32 {
+    let chroma = (1.0 - (2.0 * light - 1.0).abs()).max(0.0);
+    let h = hue.rem_euclid(1.0) * 6.0;
+    let x = chroma * (1.0 - (h % 2.0 - 1.0).abs());
+    let (r, g, b) = match h as u32 {
+        0 => (chroma, x, 0.0),
+        1 => (x, chroma, 0.0),
+        2 => (0.0, chroma, x),
+        3 => (0.0, x, chroma),
+        4 => (x, 0.0, chroma),
+        _ => (chroma, 0.0, x),
+    };
+    let m = light - chroma / 2.0;
+    let byte = |v: f32| ((v + m).clamp(0.0, 1.0) * 255.0).round() as u32;
+    byte(r) << 16 | byte(g) << 8 | byte(b)
+}
+
+/// The hue and lightness of a colour, as the picker places them.
+fn to_hue(rgb: u32) -> (f32, f32) {
+    let channel = |shift: u32| ((rgb >> shift) & 0xff) as f32 / 255.0;
+    let (r, g, b) = (channel(16), channel(8), channel(0));
+    let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+    let light = (max + min) / 2.0;
+    let delta = max - min;
+    if delta < 1e-6 {
+        return (0.0, light);
+    }
+    let hue = if max == r {
+        ((g - b) / delta).rem_euclid(6.0)
+    } else if max == g {
+        (b - r) / delta + 2.0
+    } else {
+        (r - g) / delta + 4.0
+    };
+    (hue / 6.0, light)
 }
 
 fn wide(text: &str) -> Vec<u16> {
@@ -366,7 +456,7 @@ impl Preview {
     fn position(t: f32) -> (f32, f32) {
         let cx = (PREVIEW.left + PREVIEW.right) / 2.0;
         let cy = (PREVIEW.top + PREVIEW.bottom) / 2.0 + 6.0;
-        (cx + 130.0 * t.sin(), cy + 26.0 * (2.0 * t).sin())
+        (cx + 130.0 * t.sin(), cy + 40.0 * (2.0 * t).sin())
     }
 }
 
@@ -410,7 +500,13 @@ pub struct Panel {
     pub scale: f32,
     tab: usize,
     hover: Option<Widget>,
-    dragging: Option<usize>,
+    /// When the pointer came to rest on what it's over, for tooltips.
+    hover_since: Instant,
+    dragging: Option<Drag>,
+    /// The colour picker is open, at this hue and lightness.
+    picking: Option<(f32, f32)>,
+    /// A preset's delete button was clicked once; a second click deletes it.
+    confirm_delete: Option<usize>,
     capturing: Option<Slot>,
     renaming: Option<Rename>,
     status: Option<(String, Instant, bool)>,
@@ -622,7 +718,10 @@ impl Panel {
             scale: dpi as f32 / 96.0,
             tab: PEN,
             hover: None,
+            hover_since: Instant::now(),
             dragging: None,
+            picking: None,
+            confirm_delete: None,
             capturing: None,
             renaming: None,
             status: None,
@@ -657,8 +756,10 @@ impl Panel {
             .status
             .as_ref()
             .is_some_and(|(_, at, _)| at.elapsed() < Duration::from_millis(5100));
+        // A tooltip is due to show.
+        let tip_due = self.tip().is_some() && self.hover_since.elapsed() < TIP_DELAY + Duration::from_millis(50);
         if self.tab != PEN {
-            return self.renaming.is_some() || status_showing;
+            return self.renaming.is_some() || status_showing || tip_due;
         }
         let now = Instant::now();
         let dt = now.duration_since(self.preview.last).as_secs_f32().min(0.1);
@@ -693,15 +794,6 @@ impl Panel {
             x += width;
             area
         })
-    }
-
-    fn quick_presets() -> (Vec<usize>, bool) {
-        let count = settings::presets().len();
-        if count <= 4 {
-            ((0..count).collect(), false)
-        } else {
-            ((0..3).collect(), true)
-        }
     }
 
     fn preset_row(index: usize) -> D2D_RECT_F {
@@ -765,26 +857,24 @@ impl Panel {
         }
         match self.tab {
             PEN => {
-                let (quick, more) = Self::quick_presets();
-                let count = quick.len() + usize::from(more);
-                let width = (INNER - 8.0 * (count.max(1) - 1) as f32) / count.max(1) as f32;
-                for (slot, index) in quick.iter().enumerate() {
-                    let x = MARGIN + slot as f32 * (width + 8.0);
-                    widgets.push((Widget::QuickPreset(*index), rect(x, 252.0, width, 30.0)));
-                }
-                if more {
-                    let x = MARGIN + quick.len() as f32 * (width + 8.0);
-                    widgets.push((Widget::MorePresets, rect(x, 252.0, width, 30.0)));
-                }
                 let gap = (INNER - 7.0 * 28.0) / 6.0;
                 for index in 0..=SWATCHES.len() {
                     let x = MARGIN + index as f32 * (28.0 + gap);
-                    widgets.push((Widget::Swatch(index), rect(x, 316.0, 28.0, 28.0)));
+                    widgets.push((Widget::Swatch(index), rect(x, SWATCH_TOP, 28.0, 28.0)));
+                }
+                if self.picking.is_some() {
+                    // The bars take clicks a little above and below, so they're easy to catch.
+                    let grab = |bar: D2D_RECT_F| rect(bar.left - 10.0, bar.top - 10.0, bar.right - bar.left + 20.0, bar.bottom - bar.top + 20.0);
+                    widgets.push((Widget::Hue, grab(HUE_BAR)));
+                    widgets.push((Widget::Shade, grab(SHADE_BAR)));
+                    widgets.push((Widget::PickerDone, PICKER_DONE));
+                    widgets.push((Widget::Picker, PICKER));
+                    return widgets;
                 }
                 let third = INNER / 3.0;
                 for index in 0..STYLES.len() {
                     let x = MARGIN + index as f32 * third;
-                    widgets.push((Widget::Style(index), rect(x, 376.0, third, 30.0)));
+                    widgets.push((Widget::Style(index), rect(x, STYLE_TOP + 22.0, third, 30.0)));
                 }
                 for index in 0..SLIDERS.len() {
                     let y = SLIDER_TOP + index as f32 * 34.0;
@@ -829,7 +919,10 @@ impl Panel {
                     widgets.push((Widget::Cursor(index), rect(x, CONTENT_TOP + 26.0, CURSOR_SWATCH, CURSOR_SWATCH)));
                 }
                 for index in 0..TOGGLES.len() {
-                    widgets.push((Widget::Toggle(index), rect(MARGIN - 8.0, TOGGLES_TOP + index as f32 * 52.0, INNER + 16.0, 48.0)));
+                    widgets.push((Widget::Toggle(index), rect(MARGIN - 8.0, TOGGLES_TOP + index as f32 * TOGGLE_STEP, INNER + 16.0, 44.0)));
+                }
+                for (index, area) in self.link_rects().into_iter().enumerate() {
+                    widgets.push((Widget::Link(index), area));
                 }
                 widgets.push((Widget::Reset, RESET));
                 widgets.push((Widget::Quit, QUIT));
@@ -837,6 +930,26 @@ impl Panel {
             _ => {}
         }
         widgets
+    }
+
+    /// The version line under the Options tab: where it sits, and each link's area after it.
+    const VERSION_TOP: f32 = RESET.top - 42.0;
+
+    fn link_rects(&self) -> Vec<D2D_RECT_F> {
+        let mut x = MARGIN + unsafe { self.measure(&Self::version(), &self.fonts.small_line) } + 14.0;
+        links()
+            .iter()
+            .map(|(label, _)| {
+                let width = unsafe { self.measure(label, &self.fonts.small_line) };
+                let area = rect(x, Self::VERSION_TOP, width, 20.0);
+                x += width + 14.0;
+                area
+            })
+            .collect()
+    }
+
+    fn version() -> String {
+        format!("Laser Pointer {}", env!("CARGO_PKG_VERSION"))
     }
 
     fn hit(&self, x: f32, y: f32) -> Option<Widget> {
@@ -849,14 +962,19 @@ impl Panel {
     // ---- Input ----------------------------------------------------------------------------------
 
     pub fn mouse_move(&mut self, x: f32, y: f32) -> Action {
-        if let Some(index) = self.dragging {
-            return self.slide(index, x);
+        if let Some(drag) = self.dragging {
+            return self.drag(drag, x);
         }
         let hover = self.hit(x, y);
         if hover == self.hover {
             return Action::None;
         }
         self.hover = hover;
+        self.hover_since = Instant::now();
+        // Moving off a delete button that was clicked once puts it back.
+        if self.confirm_delete.is_some_and(|index| hover != Some(Widget::PresetDelete(index))) {
+            self.confirm_delete = None;
+        }
         Action::Redraw
     }
 
@@ -881,6 +999,13 @@ impl Panel {
         if self.capturing.is_some() && !matches!(widget, Some(Widget::Binding(_))) {
             self.capturing = None;
         }
+        let on_picker = matches!(widget, Some(Widget::Picker | Widget::Hue | Widget::Shade | Widget::Swatch(_)));
+        if self.picking.is_some() && !on_picker {
+            self.picking = None;
+        }
+        if !matches!(widget, Some(Widget::PresetDelete(_))) {
+            self.confirm_delete = None;
+        }
         let Some(widget) = widget else {
             return Action::Redraw;
         };
@@ -893,7 +1018,7 @@ impl Panel {
                 self.scroll = 0.0;
                 return Action::Redraw;
             }
-            Widget::QuickPreset(index) | Widget::PresetRow(index) => {
+            Widget::PresetRow(index) => {
                 if renaming == Some(index) {
                     return Action::None;
                 }
@@ -901,20 +1026,39 @@ impl Panel {
                 settings::save();
                 return Action::SettingsChanged;
             }
-            Widget::MorePresets => {
-                self.tab = PRESETS;
+            Widget::Swatch(index) if index < SWATCHES.len() => {
+                self.picking = None;
+                current.look.color = SWATCHES[index];
+            }
+            Widget::Swatch(_) => {
+                self.picking = match self.picking {
+                    Some(_) => None,
+                    None => Some(to_hue(current.look.color)),
+                };
                 return Action::Redraw;
             }
-            Widget::Swatch(index) if index < SWATCHES.len() => current.look.color = SWATCHES[index],
-            Widget::Swatch(_) => return Action::PickColor,
+            Widget::Hue => {
+                self.dragging = Some(Drag::Hue);
+                return self.drag(Drag::Hue, x);
+            }
+            Widget::Shade => {
+                self.dragging = Some(Drag::Shade);
+                return self.drag(Drag::Shade, x);
+            }
+            Widget::PickerDone => {
+                self.picking = None;
+                return Action::Redraw;
+            }
+            Widget::Picker => return Action::None,
+            Widget::Link(index) => return Action::Open(links()[index].1.clone()),
             Widget::Style(index) => current.look.style = STYLES[index],
             Widget::Cursor(index) => current.cursor = index,
             Widget::Slider(index) => {
                 if !Self::slider_enabled(index, &current) {
                     return Action::None;
                 }
-                self.dragging = Some(index);
-                return self.slide(index, x);
+                self.dragging = Some(Drag::Slider(index));
+                return self.drag(Drag::Slider(index), x);
             }
             Widget::PresetSave(index) => {
                 let mut list = settings::presets();
@@ -935,6 +1079,12 @@ impl Panel {
                 return Action::Redraw;
             }
             Widget::PresetDelete(index) => {
+                // The first click only asks; the tooltip says to click again.
+                if self.confirm_delete != Some(index) {
+                    self.confirm_delete = Some(index);
+                    return Action::Redraw;
+                }
+                self.confirm_delete = None;
                 let mut list = settings::presets();
                 let removed = list.remove(index);
                 settings::set_presets(list);
@@ -987,9 +1137,10 @@ impl Panel {
                 (toggle.set)(&mut current, !on);
             }
             Widget::Reset => {
-                let keys = current.keys;
+                let (keys, hinted) = (current.keys, current.hinted);
                 current = Settings::default();
                 current.keys = keys;
+                current.hinted = hinted;
                 self.say("Pen and options reset; shortcuts and presets kept", false);
             }
             Widget::Quit => return Action::Quit,
@@ -1014,13 +1165,29 @@ impl Panel {
         }
     }
 
-    fn slide(&mut self, index: usize, x: f32) -> Action {
-        let slider = &SLIDERS[index];
-        let (min, max) = slider.range;
-        let k = ((x - TRACK_X) / TRACK_W).clamp(0.0, 1.0);
-        let value = min + (k * (max - min) as f32).round() as i32;
+    /// Follows the mouse with whatever it's dragging. Settings change as it moves, and are saved
+    /// and passed on once it lets go.
+    fn drag(&mut self, drag: Drag, x: f32) -> Action {
         let mut current = settings::get();
-        (slider.set)(&mut current.look, value);
+        match drag {
+            Drag::Slider(index) => {
+                let slider = &SLIDERS[index];
+                let (min, max) = slider.range;
+                let k = ((x - TRACK_X) / TRACK_W).clamp(0.0, 1.0);
+                let value = min + (k * (max - min) as f32).round() as i32;
+                (slider.set)(&mut current.look, value);
+            }
+            Drag::Hue | Drag::Shade => {
+                let Some((hue, light)) = &mut self.picking else { return Action::None };
+                let k = ((x - HUE_BAR.left) / (HUE_BAR.right - HUE_BAR.left)).clamp(0.0, 1.0);
+                if drag == Drag::Hue {
+                    *hue = k;
+                } else {
+                    *light = SHADES.0 + (SHADES.1 - SHADES.0) * k;
+                }
+                current.look.color = from_hue(*hue, *light);
+            }
+        }
         settings::set(current);
         Action::Redraw
     }
@@ -1082,6 +1249,11 @@ impl Panel {
         }
         if let Some(slot) = self.capturing {
             return self.capture(slot, vk);
+        }
+        if is(VK_ESCAPE) && (self.picking.is_some() || self.confirm_delete.is_some()) {
+            self.picking = None;
+            self.confirm_delete = None;
+            return Action::Redraw;
         }
         if is(VK_ESCAPE) {
             return Action::Close;
@@ -1153,7 +1325,48 @@ impl Panel {
             OPTIONS => self.draw_options(&settings),
             _ => {}
         }
+        self.draw_tip();
         self.target.EndDraw(None, None)
+    }
+
+    /// What the hovered icon does, for one that has no label of its own.
+    fn tip(&self) -> Option<&'static str> {
+        Some(match self.hover? {
+            Widget::PresetSave(_) => "Save the current pen to this preset",
+            Widget::PresetRename(_) => "Rename",
+            Widget::PresetDelete(index) if self.confirm_delete == Some(index) => "Click again to delete",
+            Widget::PresetDelete(_) => "Delete",
+            Widget::Unbind(_) => "Remove shortcut",
+            Widget::Swatch(index) if index == SWATCHES.len() => "Custom colour",
+            Widget::Power => "Turn the laser on or off",
+            _ => return None,
+        })
+    }
+
+    /// A tooltip under the hovered icon once the pointer has rested on it, kept inside the panel.
+    unsafe fn draw_tip(&self) {
+        let (Some(text), Some(anchor)) = (self.tip(), self.hover.and_then(|hover| self.area_of(hover))) else {
+            return;
+        };
+        if self.hover_since.elapsed() < TIP_DELAY && !matches!(self.hover, Some(Widget::PresetDelete(index)) if self.confirm_delete == Some(index)) {
+            return;
+        }
+        let theme = &self.theme;
+        let width = self.measure(text, &self.fonts.small_line) + 18.0;
+        let left = (anchor.right - width).clamp(8.0, WIDTH - 8.0 - width);
+        let mut top = anchor.bottom + 6.0;
+        if top + 26.0 > HEIGHT - 8.0 {
+            top = anchor.top - 6.0 - 26.0;
+        }
+        let bubble = rect(left, top, width, 26.0);
+        self.fill_round(rect(left, top + 1.0, width, 26.0), 4.0, faded(hex(0x000000), 0.18));
+        self.fill_round(bubble, 4.0, theme.control);
+        self.outline_round(bubble, 4.0, theme.control_border, 1.0);
+        self.text(text, &self.fonts.small_line, rect(left + 9.0, top, width - 18.0, 26.0), theme.text);
+    }
+
+    fn area_of(&self, widget: Widget) -> Option<D2D_RECT_F> {
+        self.layout().into_iter().find(|(shown, _)| *shown == widget).map(|(_, area)| area)
     }
 
     unsafe fn draw_header(&self, settings: &Settings) {
@@ -1165,6 +1378,7 @@ impl Panel {
         }
         self.circle(28.0, 29.0, 6.0, dot);
         self.text("Laser Pointer", &self.fonts.title, rect(44.0, 14.0, 240.0, 30.0), theme.text);
+        // The dot and the switch both say whether it's on, so there's no On or Off beside them.
         let mut hints = Vec::new();
         if settings.key(Command::Toggle).is_set() {
             hints.push(format!("{} to toggle", shortcut_name(settings.key(Command::Toggle))));
@@ -1178,12 +1392,6 @@ impl Panel {
             hints.join("  \u{b7}  ")
         };
         self.text(&hint, &self.fonts.small_line, rect(MARGIN, 42.0, 300.0, 18.0), theme.muted);
-        self.text(
-            if on { "On" } else { "Off" },
-            &self.fonts.body_right,
-            rect(POWER.left - 58.0, POWER.top, 50.0, 22.0),
-            theme.text,
-        );
         self.switch(POWER, on, self.hover == Some(Widget::Power));
         for (index, area) in Self::tab_rects().into_iter().enumerate() {
             let selected = index == self.tab;
@@ -1203,19 +1411,13 @@ impl Panel {
 
     unsafe fn draw_pen(&mut self, settings: &Settings) {
         self.draw_preview(&settings.look, settings.cursor);
-        let theme = &self.theme;
-        self.section("Presets", 230.0);
-        let active = settings::active_preset();
-        let presets = settings::presets();
-        self.section("Colour", 294.0);
-        self.section("Style", 354.0);
+        self.section("Colour", COLOUR_TOP);
+        if self.picking.is_none() {
+            self.section("Style", STYLE_TOP);
+        }
         for (widget, area) in self.layout() {
             let hovered = self.hover == Some(widget);
             match widget {
-                Widget::QuickPreset(index) => {
-                    self.chip(area, &presets[index].name, active == Some(index), hovered, 6.0);
-                }
-                Widget::MorePresets => self.chip(area, "More\u{2026}", false, hovered, 6.0),
                 Widget::Swatch(index) => self.swatch(area, index, settings.look.color, hovered),
                 Widget::Style(index) => {
                     let selected = settings.look.style == STYLES[index];
@@ -1225,9 +1427,43 @@ impl Panel {
                 _ => {}
             }
         }
-        if presets.is_empty() {
-            self.text("No presets yet", &self.fonts.small_line, rect(MARGIN, 252.0, INNER, 30.0), theme.muted);
+        if self.picking.is_some() {
+            self.draw_picker(settings.look.color);
         }
+    }
+
+    /// The colour picker: a hue bar, a shade bar from dark to pale, and the colour they make.
+    unsafe fn draw_picker(&self, color: u32) {
+        let Some((hue, light)) = self.picking else { return };
+        let theme = &self.theme;
+        self.fill_round(rect(PICKER.left, PICKER.top + 2.0, INNER, PICKER.bottom - PICKER.top), 8.0, faded(hex(0x000000), 0.22));
+        self.fill_round(PICKER, 8.0, theme.control);
+        self.outline_round(PICKER, 8.0, theme.control_border, 1.0);
+        self.text("Custom colour", &self.fonts.section, rect(PICKER.left + 16.0, PICKER.top + 12.0, 200.0, 20.0), theme.text);
+        let (cx, cy) = (PICKER.right - 28.0, PICKER.top + 22.0);
+        self.circle(cx, cy, 10.0, hex(color));
+        self.ring(cx, cy, 10.0, faded(theme.text, 0.15), 1.0);
+        self.text(&format!("#{color:06X}"), &self.fonts.body_right, rect(cx - 116.0, PICKER.top + 12.0, 100.0, 20.0), theme.muted);
+        let bar = |area: D2D_RECT_F, paint: &dyn Fn(f32) -> u32, at: f32| {
+            let steps = 96;
+            let width = (area.right - area.left) / steps as f32;
+            self.target.PushAxisAlignedClip(&area, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            for step in 0..steps {
+                let k = (step as f32 + 0.5) / steps as f32;
+                self.fill(rect(area.left + step as f32 * width, area.top, width + 0.6, area.bottom - area.top), hex(paint(k)));
+            }
+            self.target.PopAxisAlignedClip();
+            self.outline_round(area, 6.0, faded(theme.text, 0.12), 1.0);
+            let x = area.left + (area.right - area.left) * at;
+            let y = (area.top + area.bottom) / 2.0;
+            self.circle(x, y, 9.0, hex(0xffffff));
+            self.ring(x, y, 9.0, faded(hex(0x000000), 0.35), 1.0);
+            self.circle(x, y, 6.0, hex(paint(at)));
+        };
+        bar(HUE_BAR, &|k| from_hue(k, 0.5), hue);
+        bar(SHADE_BAR, &|k| from_hue(hue, SHADES.0 + (SHADES.1 - SHADES.0) * k), (light - SHADES.0) / (SHADES.1 - SHADES.0));
+        let hovered = self.hover == Some(Widget::PickerDone);
+        self.button(PICKER_DONE, "Done", hovered, theme.text);
     }
 
     unsafe fn draw_preview(&mut self, look: &Look, cursor: usize) {
@@ -1258,6 +1494,7 @@ impl Panel {
             scale: 1.0,
             whole: false,
             breaks: Vec::new(),
+            flash: None,
         };
         let _ = stroke::draw(
             &self.factory,
@@ -1305,22 +1542,41 @@ impl Panel {
         // Icons last, so they sit on top of their rows.
         for (widget, area) in self.layout() {
             let hovered = self.hover == Some(widget);
-            let (glyph, color, tip) = match widget {
-                Widget::PresetSave(_) => (ICON_SAVE, theme.text, "Overwrite with the current pen"),
-                Widget::PresetRename(_) => (ICON_RENAME, theme.text, "Rename"),
-                Widget::PresetDelete(_) => (ICON_DELETE, theme.danger, "Delete"),
+            let (glyph, color) = match widget {
+                Widget::PresetSave(_) => (ICON_SAVE, theme.text),
+                Widget::PresetRename(_) => (ICON_RENAME, theme.text),
+                Widget::PresetDelete(_) => (ICON_DELETE, theme.danger),
                 _ => continue,
             };
+            let armed = matches!(widget, Widget::PresetDelete(index) if self.confirm_delete == Some(index));
+            if armed {
+                self.fill_round(area, 4.0, theme.danger);
+                self.icon(glyph, area, theme.background);
+                continue;
+            }
             if hovered {
                 self.fill_round(area, 4.0, theme.control_hover);
-                self.text(tip, &self.fonts.small_line, rect(MARGIN, LIST_BOTTOM + 8.0, INNER, 20.0), theme.muted);
             }
             self.icon(glyph, area, color);
         }
-        if presets.len() >= MAX_PRESETS {
-            self.text("That's the most presets there's room for.", &self.fonts.small_line, rect(MARGIN, LIST_BOTTOM + 8.0, INNER, 20.0), theme.muted);
+        if self.draw_status() {
+            return;
         }
-        self.draw_status();
+        let footer = rect(MARGIN, LIST_BOTTOM + 8.0, INNER, 20.0);
+        if presets.len() >= MAX_PRESETS {
+            self.text("That's the most presets there's room for.", &self.fonts.small_line, footer, theme.muted);
+            return;
+        }
+        let keys: Vec<String> = [Command::NextPreset, Command::PreviousPreset]
+            .into_iter()
+            .map(|command| settings.key(command))
+            .filter(|key| key.is_set())
+            .map(shortcut_name)
+            .collect();
+        if !keys.is_empty() && presets.len() > 1 {
+            let hint = format!("{} step through presets while you present.", keys.join(" and "));
+            self.text(&hint, &self.fonts.small_line, footer, theme.muted);
+        }
     }
 
     unsafe fn preset_card(&self, area: D2D_RECT_F, preset: &Preset, index: usize, active: bool, hovered: bool) {
@@ -1432,8 +1688,14 @@ impl Panel {
                 self.icon(ICON_WARNING, rect(field.left + 4.0, field.top, 20.0, 30.0), theme.danger);
             }
         } else {
-            self.outline_round(field, 4.0, theme.control_border, 1.0);
-            self.text("Not set", &self.fonts.body_centre, field, theme.muted);
+            // An invitation rather than a greyed-out box: no fill, the accent's text.
+            self.fill_round(field, 4.0, if hovered { theme.control_hover } else { theme.background });
+            self.outline_round(field, 4.0, if hovered { theme.accent } else { theme.control_border }, 1.0);
+            let label = "Add shortcut";
+            let width = self.measure(label, &self.fonts.body) + 22.0;
+            let left = (field.left + field.right - width) / 2.0;
+            self.icon(ICON_ADD, rect(left, field.top, 16.0, field.bottom - field.top), theme.accent);
+            self.text(label, &self.fonts.body, rect(left + 22.0, field.top, width, field.bottom - field.top), theme.accent);
         }
         if binding.is_set() {
             if self.hover == Some(Widget::Unbind(slot)) {
@@ -1488,13 +1750,23 @@ impl Panel {
         self.text(
             "Right-click passes a click through to the app underneath. The scroll wheel scrolls the page; Ctrl+wheel changes thickness.",
             &self.fonts.small,
-            rect(MARGIN, TOGGLES_TOP + TOGGLES.len() as f32 * 52.0 + 6.0, INNER, 40.0),
+            rect(MARGIN, TOGGLES_TOP + TOGGLES.len() as f32 * TOGGLE_STEP + 2.0, INNER, 40.0),
             theme.muted,
         );
-        if let Some((text, at, _)) = &self.status {
-            if at.elapsed() < Duration::from_secs(5) {
-                self.text(text, &self.fonts.small_line, rect(MARGIN, RESET.top - 28.0, INNER, 20.0), theme.muted);
+        let line = rect(MARGIN, Self::VERSION_TOP, INNER, 20.0);
+        if let Some((text, ..)) = self.status.as_ref().filter(|(_, at, _)| at.elapsed() < Duration::from_secs(5)) {
+            self.text(text, &self.fonts.small_line, line, theme.muted);
+            return;
+        }
+        self.text(&Self::version(), &self.fonts.small_line, line, theme.muted);
+        for (index, (area, (label, _))) in self.link_rects().into_iter().zip(links()).enumerate() {
+            let hovered = self.hover == Some(Widget::Link(index));
+            let color = if hovered { theme.text } else { theme.accent };
+            self.text(label, &self.fonts.small_line, area, color);
+            if hovered {
+                self.fill(rect(area.left, area.bottom - 3.0, area.right - area.left, 1.0), color);
             }
+            self.text("\u{b7}", &self.fonts.small_line, rect(area.left - 10.0, area.top, 8.0, 20.0), theme.muted);
         }
     }
 
@@ -1634,19 +1906,6 @@ impl Panel {
         self.text(title, &self.fonts.section, rect(MARGIN, y, INNER, 18.0), self.theme.text);
     }
 
-    unsafe fn chip(&self, area: D2D_RECT_F, label: &str, selected: bool, hovered: bool, radius: f32) {
-        let theme = &self.theme;
-        if selected {
-            self.fill_round(area, radius, theme.accent);
-            self.text(label, &self.fonts.body_centre, area, theme.on_accent);
-        } else {
-            let fill = if hovered { theme.control_hover } else { theme.control };
-            self.fill_round(area, radius, fill);
-            self.outline_round(area, radius, theme.control_border, 1.0);
-            self.text(label, &self.fonts.body_centre, area, theme.text);
-        }
-    }
-
     /// One part of a segmented control; only the outer ends are rounded.
     unsafe fn segment(&self, area: D2D_RECT_F, label: &str, selected: bool, hovered: bool, index: usize) {
         let theme = &self.theme;
@@ -1737,7 +1996,7 @@ impl Panel {
         let thumb = TRACK_X + TRACK_W * k;
         self.circle(thumb, cy, 10.0, theme.control);
         self.ring(thumb, cy, 10.0, theme.control_border, 1.0);
-        let inner = if enabled && (hovered || self.dragging == Some(index)) { 7.0 } else { 5.0 };
+        let inner = if enabled && (hovered || self.dragging == Some(Drag::Slider(index))) { 7.0 } else { 5.0 };
         self.circle(thumb, cy, inner, accent);
         self.text(
             &(slider.show)(value),
@@ -1780,6 +2039,21 @@ mod tests {
 
     /// Writes every tab, light and dark, at 100 % and 150 %, to target/snapshots for review.
     #[test]
+    fn the_picker_reads_back_the_colours_it_makes() {
+        for hue in [0.0, 0.13, 0.4, 0.58, 0.83] {
+            for light in [SHADES.0, 0.5, SHADES.1] {
+                let (h, l) = to_hue(from_hue(hue, light));
+                assert!((h - hue).abs() < 0.01 && (l - light).abs() < 0.01, "{hue}, {light} came back as {h}, {l}");
+            }
+        }
+        // A softer colour opens the picker at its own hue.
+        assert!((to_hue(0x2ecc40).0 - 0.355).abs() < 0.01);
+        assert_eq!(from_hue(0.0, 0.5), 0xff0000);
+        assert_eq!(from_hue(1.0 / 3.0, 0.5), 0x00ff00);
+        assert_eq!(from_hue(2.0 / 3.0, 0.5), 0x0000ff);
+    }
+
+    #[test]
     #[ignore = "writes PNGs to look at"]
     fn snapshot_panel() {
         snapshot::init();
@@ -1803,11 +2077,20 @@ mod tests {
                     if tab == OPTIONS {
                         panel.hover = Some(Widget::Cursor(3));
                     }
+                    if tab == PRESETS {
+                        panel.hover = Some(Widget::PresetDelete(1));
+                        panel.confirm_delete = Some(1);
+                    }
                     if tab == SHORTCUTS {
                         panel.scroll = Panel::max_scroll();
                     }
                     unsafe { panel.draw() };
                     canvas.save(&format!("panel-{name}-{theme}-{dpi}.png"));
+                    if tab == PEN {
+                        panel.picking = Some(to_hue(0x1e90ff));
+                        unsafe { panel.draw() };
+                        canvas.save(&format!("panel-picker-{theme}-{dpi}.png"));
+                    }
                 }
             }
         }
