@@ -4,9 +4,7 @@ use std::cell::{Cell, RefCell};
 use std::time::{Duration, Instant};
 
 use windows::core::{w, Result, HSTRING, PCWSTR};
-use windows::Win32::Foundation::{
-    COLORREF, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
-};
+use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
     DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_USE_IMMERSIVE_DARK_MODE,
     DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DWMWINDOWATTRIBUTE,
@@ -24,21 +22,21 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN, TME_LEAVE, TRACKMOUSEEVENT,
 };
 use windows::Win32::UI::Shell::{
-    ShellExecuteW, Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIM_ADD,
-    NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NINF_KEY, NIN_SELECT, NOTIFYICONDATAW,
+    Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIIF_INFO,
+    NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NINF_KEY, NIN_SELECT, NOTIFYICONDATAW,
     NOTIFYICON_VERSION_4,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AllowSetForegroundWindow, AppendMenuW, CopyIcon, CreatePopupMenu, CreateWindowExW,
-    DefWindowProcW, DestroyIcon, DestroyMenu, DestroyWindow, FindWindowW, GetCursorPos, KillTimer,
-    LoadCursorW, LoadIconW, PostMessageW, RegisterClassW, RegisterWindowMessageW,
-    SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow, TrackPopupMenu, ASFW_ANY,
-    CS_DROPSHADOW, HICON, HWND_TOPMOST, IDC_ARROW, IDI_APPLICATION, MENU_ITEM_FLAGS, MF_CHECKED,
-    MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, SM_CXSMICON, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOSIZE, SW_SHOW, TPM_BOTTOMALIGN, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON,
-    WA_INACTIVE, WM_ACTIVATE, WM_APP, WM_CHAR, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_DPICHANGED,
-    WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NULL,
-    WM_PAINT, WM_SETTINGCHANGE, WM_SYSCHAR, WM_SYSKEYDOWN, WM_THEMECHANGED, WM_TIMER, WNDCLASSW,
+    AllowSetForegroundWindow, AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
+    DestroyIcon, DestroyMenu, DestroyWindow, FindWindowW, GetCursorPos, KillTimer, LoadCursorW,
+    LoadIconW, PostMessageW, RegisterClassW, RegisterWindowMessageW, SetForegroundWindow,
+    SetTimer, SetWindowPos, ShowWindow, TrackPopupMenu, ASFW_ANY, CS_DROPSHADOW, HICON,
+    HWND_TOPMOST, IDC_ARROW, IDI_APPLICATION, MENU_ITEM_FLAGS, MF_CHECKED, MF_GRAYED, MF_POPUP,
+    MF_SEPARATOR, MF_STRING, SM_CXSMICON, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOW,
+    TPM_BOTTOMALIGN, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WA_INACTIVE, WM_ACTIVATE,
+    WM_APP, WM_CHAR, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_KEYDOWN,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NULL, WM_PAINT,
+    WM_SETTINGCHANGE, WM_SYSCHAR, WM_SYSKEYDOWN, WM_THEMECHANGED, WM_TIMER, WNDCLASSW,
     WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
@@ -50,7 +48,7 @@ const PANEL_CLASS: PCWSTR = w!("LaserPointerFlyout");
 const WM_TRAY: u32 = WM_APP + 1;
 const TRAY_ID: u32 = 1;
 const NIN_KEYSELECT: u32 = NIN_SELECT | NINF_KEY;
-const TIMER_WAKE: usize = 1;
+const TIMER_PREVIEW: usize = 1;
 // Not in the bindings' WindowsAndMessaging module.
 const WM_MOUSELEAVE: u32 = 0x02a3;
 
@@ -67,11 +65,19 @@ struct State {
     tray: Cell<HWND>,
     flyout: Cell<HWND>,
     icon: Cell<HICON>,
+    /// Rendered by the app, so ours to destroy; the stock fallback is shared and must not be.
+    icon_owned: Cell<bool>,
     closed_at: Cell<Option<Instant>>,
     modal: Cell<bool>,
     tracking: Cell<bool>,
     taskbar_created: Cell<u32>,
     show_message: Cell<u32>,
+    /// The tray icon needs redrawing, once the overlay's next frame is out.
+    tray_pending: Cell<bool>,
+    /// What the tray icon shows now, so an unchanged one isn't drawn and sent to Explorer again.
+    tray_shows: Cell<u64>,
+    /// The panel had the app's shortcuts let go, last time they were claimed.
+    keys_released: Cell<bool>,
 }
 
 // Cells rather than one RefCell: most of these Win32 calls re-enter a window procedure.
@@ -158,63 +164,22 @@ pub fn shutdown() {
     }
 }
 
-pub fn welcome() -> Result<()> {
-    unsafe {
-        open_panel()?;
+/// The panel is recording a shortcut or taking a name, so keys must reach it, not the app.
+pub fn panel_wants_keys() -> bool {
+    with_panel(|panel| panel.wants_keys()).unwrap_or(false)
+}
+
+/// Redraws the tray icon if something changed it. Called once the overlay's frame is out, since
+/// Explorer can take a while to answer.
+pub fn flush_tray() {
+    if state(|s| s.tray_pending.replace(false)) {
+        unsafe { update_tray(false) };
     }
-    with_panel(Panel::welcome);
-    let hwnd = state(|s| s.flyout.get());
-    unsafe {
-        let _ = InvalidateRect(Some(hwnd), None, false);
-    }
-    Ok(())
-}
-
-pub fn animation_waitable() -> Option<HANDLE> {
-    with_panel(|panel| {
-        if panel.frame_schedule() == crate::frame::Schedule::Wait {
-            panel.waitable()
-        } else {
-            None
-        }
-    })
-    .flatten()
-}
-
-pub fn frame_schedule() -> crate::frame::Schedule {
-    with_panel(|panel| panel.frame_schedule()).unwrap_or(crate::frame::Schedule::Idle)
-}
-
-pub fn hold_frame_slot() {
-    with_panel(Panel::hold_frame_slot);
-}
-
-fn arm_wake(hwnd: HWND) {
-    unsafe {
-        let _ = KillTimer(Some(hwnd), TIMER_WAKE);
-        if let Some(delay) = with_panel(|panel| panel.wake_after()).flatten() {
-            SetTimer(Some(hwnd), TIMER_WAKE, delay, None);
-        }
-    }
-}
-
-pub fn render_panel() {
-    if let Some(Err(error)) = with_panel(|panel| unsafe { panel.draw() }) {
-        eprintln!("Could not draw panel: {error}");
-    }
-    let hwnd = state(|s| s.flyout.get());
-    if !hwnd.is_invalid() {
-        arm_wake(hwnd);
-    }
-}
-
-pub fn panel_open() -> bool {
-    !state(|s| s.flyout.get()).is_invalid()
 }
 
 pub fn laser_changed() {
     unsafe {
-        update_tray(false);
+        state(|s| s.tray_pending.set(true));
         let flyout = state(|s| s.flyout.get());
         if !flyout.is_invalid() {
             // Switching on raises the overlay; keep the panel above it so it stays usable.
@@ -234,7 +199,7 @@ pub fn laser_changed() {
 
 pub fn settings_changed() {
     unsafe {
-        update_tray(false);
+        state(|s| s.tray_pending.set(true));
         let flyout = state(|s| s.flyout.get());
         if !flyout.is_invalid() {
             let _ = InvalidateRect(Some(flyout), None, false);
@@ -273,6 +238,26 @@ pub fn shortcut_name(binding: Binding) -> String {
     name
 }
 
+/// Fills a fixed-size UTF-16 field, leaving room for the terminating null.
+fn copy_text(field: &mut [u16], text: &str) {
+    let room = field.len() - 1;
+    for (slot, unit) in field.iter_mut().zip(text.encode_utf16().take(room)) {
+        *slot = unit;
+    }
+}
+
+/// A notification from the tray icon, for things worth saying once.
+pub fn balloon(title: &str, text: &str) {
+    let mut data = notify_data();
+    data.uFlags = NIF_INFO;
+    data.dwInfoFlags = NIIF_INFO;
+    copy_text(&mut data.szInfoTitle, title);
+    copy_text(&mut data.szInfo, text);
+    unsafe {
+        let _ = Shell_NotifyIconW(NIM_MODIFY, &data);
+    }
+}
+
 fn notify_data() -> NOTIFYICONDATAW {
     NOTIFYICONDATAW {
         cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
@@ -286,27 +271,32 @@ unsafe fn update_tray(add: bool) {
     let on = crate::laser_on();
     let current = settings::get();
     let size = GetSystemMetricsForDpi(SM_CXSMICON, GetDpiForSystem()) as u32;
-    let icon = crate::tray_icon(on, size).unwrap_or_else(|| {
-        LoadIconW(
-            Some(state(|s| s.instance.get())),
-            PCWSTR(usize::from(1u16) as *const u16),
-        )
-        .or_else(|_| LoadIconW(None, IDI_APPLICATION))
-        .and_then(|icon| CopyIcon(icon))
-        .unwrap_or_default()
-    });
-    let mut data = notify_data();
-    data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
-    data.uCallbackMessage = WM_TRAY;
-    data.hIcon = icon;
+    let svg = crate::tray_svg(on, current.look.color);
     let tip = format!(
         "Laser pointer: {} ({})",
         if on { "on" } else { "off" },
         shortcut_name(current.key(Command::Toggle))
     );
-    for (slot, unit) in data.szTip.iter_mut().zip(tip.encode_utf16().take(127)) {
-        *slot = unit;
+    let shows = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::hash::DefaultHasher::new();
+        (&svg, &tip, size).hash(&mut hasher);
+        hasher.finish()
+    };
+    if !add && state(|s| s.tray_shows.get()) == shows {
+        return;
     }
+    let (icon, owned) = match crate::tray_icon(&svg, size) {
+        Some(icon) => (icon, true),
+        None => (LoadIconW(None, IDI_APPLICATION).unwrap_or_default(), false),
+    };
+    // A stand-in, drawn while the GPU is away, is replaced once it's back.
+    state(|s| s.tray_shows.set(if owned { shows } else { 0 }));
+    let mut data = notify_data();
+    data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
+    data.uCallbackMessage = WM_TRAY;
+    data.hIcon = icon;
+    copy_text(&mut data.szTip, &tip);
     if add {
         let _ = Shell_NotifyIconW(NIM_ADD, &data);
         data.Anonymous.uVersion = NOTIFYICON_VERSION_4;
@@ -315,22 +305,14 @@ unsafe fn update_tray(add: bool) {
         let _ = Shell_NotifyIconW(NIM_MODIFY, &data);
     }
     let old = state(|s| s.icon.replace(icon));
-    if !old.is_invalid() && old != icon {
+    let old_owned = state(|s| s.icon_owned.replace(owned));
+    if old_owned && !old.is_invalid() && old != icon {
         let _ = DestroyIcon(old);
     }
 }
 
 extern "system" fn tray_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     unsafe {
-        if (msg == WM_SETTINGCHANGE
-            && lparam.0 != 0
-            && PCWSTR(lparam.0 as *const u16)
-                .to_string()
-                .is_ok_and(|name| name == "ImmersiveColorSet"))
-            || msg == WM_DPICHANGED
-        {
-            update_tray(false);
-        }
         if msg == WM_TRAY {
             match (lparam.0 & 0xffff) as u32 {
                 NIN_SELECT | NIN_KEYSELECT => toggle_panel(),
@@ -351,6 +333,10 @@ extern "system" fn tray_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARA
         if msg != 0 && msg == state(|s| s.taskbar_created.get()) {
             update_tray(true);
             return LRESULT(0);
+        }
+        // The taskbar may have switched between light and dark.
+        if msg == WM_SETTINGCHANGE {
+            update_tray(false);
         }
         DefWindowProcW(hwnd, msg, wparam, lparam)
     }
@@ -480,7 +466,7 @@ unsafe fn open_panel() -> Result<()> {
         Some(state(|s| s.instance.get())),
         None,
     )?;
-    let mut panel = match Panel::new(hwnd, dpi, width as u32, height as u32) {
+    let panel = match Panel::new(hwnd, dpi, width as u32, height as u32) {
         Ok(panel) => panel,
         Err(error) => {
             let _ = DestroyWindow(hwnd);
@@ -488,15 +474,10 @@ unsafe fn open_panel() -> Result<()> {
         }
     };
     style_window(hwnd, &panel);
-    if let Err(error) = panel.draw() {
-        let _ = DestroyWindow(hwnd);
-        return Err(error);
-    }
     PANEL.with(|slot| *slot.borrow_mut() = Some(panel));
     state(|s| s.flyout.set(hwnd));
-    // The panel has the keyboard now; let go of every shortcut so they can be typed into it.
-    crate::sync_hotkeys();
-    arm_wake(hwnd);
+
+    SetTimer(Some(hwnd), TIMER_PREVIEW, 16, None);
     let _ = ShowWindow(hwnd, SW_SHOW);
     let _ = SetForegroundWindow(hwnd);
     Ok(())
@@ -527,14 +508,16 @@ extern "system" fn panel_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
                 DefWindowProcW(hwnd, msg, wparam, lparam)
             }
             WM_PAINT => {
-                render_panel();
+                with_panel(|panel| panel.draw());
                 let _ = ValidateRect(Some(hwnd), None);
                 LRESULT(0)
             }
             WM_ERASEBKGND => LRESULT(1),
-            WM_TIMER if wparam.0 == TIMER_WAKE => {
-                let _ = KillTimer(Some(hwnd), TIMER_WAKE);
-                let _ = InvalidateRect(Some(hwnd), None, false);
+            WM_TIMER if wparam.0 == TIMER_PREVIEW => {
+                // The preview waits while a real stroke is drawn, so it doesn't take its frames.
+                if !crate::drawing() && with_panel(Panel::tick).unwrap_or(false) {
+                    let _ = InvalidateRect(Some(hwnd), None, false);
+                }
                 LRESULT(0)
             }
             WM_MOUSEMOVE => {
@@ -582,28 +565,16 @@ extern "system" fn panel_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
                 LRESULT(0)
             }
             WM_SYSCHAR => LRESULT(0),
+            // Moved to a monitor at another scale: Windows suggests where and how big.
             WM_DPICHANGED => {
                 let dpi = (wparam.0 & 0xffff) as u32;
                 let area = &*(lparam.0 as *const RECT);
-                let width = area.right - area.left;
-                let height = area.bottom - area.top;
-                let _ = SetWindowPos(
-                    hwnd,
-                    None,
-                    area.left,
-                    area.top,
-                    width,
-                    height,
-                    SWP_NOACTIVATE,
-                );
-                if let Some(Err(error)) =
-                    with_panel(|panel| panel.resize(dpi, width as u32, height as u32))
-                {
-                    eprintln!("Could not resize panel: {error}");
+                let (width, height) = (area.right - area.left, area.bottom - area.top);
+                let _ = SetWindowPos(hwnd, None, area.left, area.top, width, height, SWP_NOACTIVATE | SWP_NOZORDER);
+                if let Some(Err(_)) = with_panel(|panel| panel.resize(dpi, width as u32, height as u32)) {
+                    let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
                 }
-                arm_wake(hwnd);
                 let _ = InvalidateRect(Some(hwnd), None, false);
-                update_tray(false);
                 LRESULT(0)
             }
             WM_SETTINGCHANGE | WM_THEMECHANGED => {
@@ -611,15 +582,15 @@ extern "system" fn panel_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
                     panel.reload_theme();
                     style_window(hwnd, panel);
                 });
-                let _ = InvalidateRect(Some(hwnd), None, false);
                 DefWindowProcW(hwnd, msg, wparam, lparam)
             }
             WM_DESTROY => {
-                let _ = KillTimer(Some(hwnd), TIMER_WAKE);
+                let _ = KillTimer(Some(hwnd), TIMER_PREVIEW);
                 PANEL.with(|slot| slot.borrow_mut().take());
                 state(|s| {
                     s.flyout.set(HWND::default());
                     s.closed_at.set(Some(Instant::now()));
+                    s.keys_released.set(false);
                 });
                 crate::sync_hotkeys();
                 update_tray(false);
@@ -631,40 +602,26 @@ extern "system" fn panel_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
 }
 
 unsafe fn act(hwnd: HWND, action: Option<Action>) {
+    // Shortcuts stay working while the panel is open, and let go only while it records one or
+    // takes a name.
+    let wants = panel_wants_keys();
+    if state(|s| s.keys_released.replace(wants)) != wants {
+        crate::sync_hotkeys();
+    }
     match action {
         Some(Action::Redraw) => {
             let _ = InvalidateRect(Some(hwnd), None, false);
         }
         Some(Action::SettingsChanged) => {
             crate::settings_changed();
+            // A shortcut cleared, or a preset removed so the ones after it moved up.
+            crate::sync_hotkeys();
             let _ = InvalidateRect(Some(hwnd), None, false);
         }
         Some(Action::Toggle(on)) => crate::set_laser(on),
+        Some(Action::Run(command)) => crate::run_command(command),
         Some(Action::PickColor) => pick_color(hwnd),
         Some(Action::Quit) => crate::quit(),
-        Some(Action::OpenLink(index)) => {
-            let urls = [
-                "https://ayricky.github.io/laser-pointer/",
-                "https://github.com/ayricky/laser-pointer",
-                "https://ayricky.github.io/laser-pointer/privacy.html",
-            ];
-            if let Some(url) = urls.get(index) {
-                state(|s| s.modal.set(true));
-                let result = ShellExecuteW(
-                    Some(hwnd),
-                    w!("open"),
-                    &HSTRING::from(*url),
-                    PCWSTR::null(),
-                    PCWSTR::null(),
-                    SW_SHOW,
-                );
-                state(|s| s.modal.set(false));
-                if result.0 as isize <= 32 {
-                    eprintln!("Could not open {url}");
-                }
-            }
-            let _ = InvalidateRect(Some(hwnd), None, false);
-        }
         Some(Action::Close) => {
             let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
         }

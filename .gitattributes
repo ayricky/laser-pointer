@@ -2,4 +2,3 @@
 *.ps1 text eol=crlf
 *.png binary
 *.ico binary
-*.msix binary

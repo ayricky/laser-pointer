@@ -1,3 +1,7 @@
+# Pushing a tag like v1.0.0 (matching Cargo.toml) builds both architectures and publishes a GitHub
+# release with the exes. The Store bundle is kept as a workflow artifact, to upload in Partner
+# Center; its identity comes from the repository variables STORE_NAME, STORE_PUBLISHER and
+# STORE_PUBLISHER_DISPLAY_NAME (Partner Center > the app > Product identity).
 name: Release
 
 on:
@@ -12,47 +16,44 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: actions-rust-lang/setup-rust-toolchain@v2
-        with:
-          toolchain: stable
-          components: clippy
-          target: x86_64-pc-windows-msvc
-          build-warnings: warn
-          cache: false
+      - run: rustup target add aarch64-pc-windows-msvc
       - uses: Swatinem/rust-cache@v2
-      - name: Validate and build
+
+      - name: Check the tag matches Cargo.toml
         shell: pwsh
         run: |
-          $version = (Select-String -Path Cargo.toml -Pattern '^version = "([^"]+)"').Matches[0].Groups[1].Value
-          if ($env:GITHUB_REF_NAME -ne "v$version") { throw 'Tag must match the Cargo.toml version.' }
-          cargo build --release
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          cargo test
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          cargo clippy
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-      - name: Package
+          if ((Get-Content Cargo.toml -Raw) -notmatch '(?m)^version = "(.+)"') { throw 'No version in Cargo.toml' }
+          if ("v$($Matches[1])" -ne $env:GITHUB_REF_NAME) { throw "Tag $env:GITHUB_REF_NAME doesn't match version $($Matches[1])" }
+
+      # A tag can point anywhere, so what it releases is checked here too, not only by CI.
+      - run: rustup component add clippy
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
+
+      - name: Build and package
         shell: pwsh
+        env:
+          STORE_NAME: ${{ vars.STORE_NAME }}
+          STORE_PUBLISHER: ${{ vars.STORE_PUBLISHER }}
+          STORE_PUBLISHER_DISPLAY_NAME: ${{ vars.STORE_PUBLISHER_DISPLAY_NAME }}
         run: |
-          ./packaging/build-msix.ps1 -NoBuild -Publisher "CN=LaserPointerDev"
-          $version = $env:GITHUB_REF_NAME.Substring(1)
-          Compress-Archive -LiteralPath target/release/laser-pointer.exe, LICENSE, THIRD-PARTY-NOTICES.txt, README.md -DestinationPath "dist/laser-pointer-$version-x64.zip"
-          $tagType = git for-each-ref --format='%(objecttype)' "refs/tags/$env:GITHUB_REF_NAME"
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          $notes = ''
-          if ($tagType -eq 'tag') {
-            $notes = git for-each-ref --format='%(contents)' "refs/tags/$env:GITHUB_REF_NAME"
-            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $identity = @{}
+          if ($env:STORE_NAME) { $identity.Name = $env:STORE_NAME }
+          if ($env:STORE_PUBLISHER) { $identity.Publisher = $env:STORE_PUBLISHER }
+          if ($env:STORE_PUBLISHER_DISPLAY_NAME) { $identity.PublisherDisplayName = $env:STORE_PUBLISHER_DISPLAY_NAME }
+          ./packaging/package.ps1 -Architectures x64,arm64 @identity
+          foreach ($architecture in 'x64', 'arm64') {
+            Compress-Archive -Path "dist/$architecture/laser-pointer.exe", LICENSE, README.md `
+              -DestinationPath "dist/laser-pointer-$env:GITHUB_REF_NAME-windows-$architecture.zip"
           }
-          if (-not ($notes -join "`n").Trim()) { $notes = "Laser Pointer $version for Windows x64. The MSIX is unsigned; use the zip for a portable build or the Microsoft Store for a signed installation." }
-          $notes | Set-Content -Path dist/release-notes.md -Encoding utf8
-      - name: Publish GitHub Release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: store-bundle
+          path: dist/*.msixbundle
+
+      - name: Publish the release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          $version = $env:GITHUB_REF_NAME.Substring(1)
-          gh release create $env:GITHUB_REF_NAME "dist/laser-pointer-$version-x64.zip" "dist/LaserPointer_$version.0_x64.msix" --title "Laser Pointer $version" --notes-file dist/release-notes.md --verify-tag
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+        run: gh release create $env:GITHUB_REF_NAME (Get-ChildItem dist/*.zip) --title "Laser Pointer $env:GITHUB_REF_NAME" --generate-notes

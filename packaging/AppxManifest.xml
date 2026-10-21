@@ -1,36 +1,48 @@
 <?xml version="1.0" encoding="utf-8"?>
-<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
-         xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
-         xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
-         xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
-         IgnorableNamespaces="uap desktop rescap">
-  <Identity Name="{{IdentityName}}" Publisher="{{Publisher}}" Version="{{Version}}" ProcessorArchitecture="x64" />
+<!-- The Store package's manifest. package.ps1 fills in the {{...}} fields: the identity comes from
+     the app's reservation in Partner Center, the version from Cargo.toml. -->
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap desktop rescap">
+
+  <Identity Name="{{Name}}" Publisher="{{Publisher}}" Version="{{Version}}" ProcessorArchitecture="{{Architecture}}" />
+
   <Properties>
     <DisplayName>Laser Pointer</DisplayName>
     <PublisherDisplayName>{{PublisherDisplayName}}</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
   </Properties>
+
   <Dependencies>
     <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.26100.0" />
   </Dependencies>
+
   <Resources>
-    <Resource Language="en-US" />
+    <Resource Language="en-us" />
   </Resources>
+
   <Applications>
     <Application Id="LaserPointer" Executable="laser-pointer.exe" EntryPoint="Windows.FullTrustApplication">
-      <uap:VisualElements DisplayName="Laser Pointer" Description="Draw over anything while you present"
-                          BackgroundColor="transparent" Square150x150Logo="Assets\Square150x150Logo.png"
-                          Square44x44Logo="Assets\Square44x44Logo.png">
-        <uap:DefaultTile Wide310x150Logo="Assets\Wide310x150Logo.png"
-                         Square71x71Logo="Assets\SmallTile.png" Square310x310Logo="Assets\LargeTile.png" />
+      <uap:VisualElements
+        DisplayName="Laser Pointer"
+        Description="Draw over anything on your screen with a laser that fades by itself."
+        BackgroundColor="transparent"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png">
+        <uap:DefaultTile Wide310x150Logo="Assets\Wide310x150Logo.png" Square71x71Logo="Assets\SmallTile.png" Square310x310Logo="Assets\LargeTile.png" />
       </uap:VisualElements>
       <Extensions>
-        <desktop:Extension Category="windows.startupTask" Executable="laser-pointer.exe" EntryPoint="Windows.FullTrustApplication">
+        <!-- "Start with Windows" in the settings turns this on; src/settings.rs uses the same TaskId. -->
+        <desktop:Extension Category="windows.startupTask">
           <desktop:StartupTask TaskId="LaserPointerStartup" Enabled="false" DisplayName="Laser Pointer" />
         </desktop:Extension>
       </Extensions>
     </Application>
   </Applications>
+
   <Capabilities>
     <rescap:Capability Name="runFullTrust" />
   </Capabilities>

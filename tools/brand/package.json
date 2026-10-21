@@ -1,9 +1,0 @@
-{
-  "name": "laser-pointer-brand",
-  "private": true,
-  "type": "module",
-  "description": "Generates the logo, icons and Store assets from code. Run: npm install && node generate.mjs",
-  "dependencies": {
-    "@resvg/resvg-js": "^2.6.2"
-  }
-}

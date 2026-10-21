@@ -1,19 +1,19 @@
 fn main() {
-    // Common Controls v6 gives the flyout's checkboxes and sliders the current Windows look.
     if std::env::var_os("CARGO_CFG_WINDOWS").is_some() {
+        // Common Controls v6 gives the flyout's dialogs the current Windows look.
         embed_manifest::embed_manifest(embed_manifest::new_manifest("LaserPointer"))
             .expect("unable to embed manifest");
-        winresource::WindowsResource::new()
-            .set_icon_with_id("assets/brand/app.ico", "1")
-            .set("ProductName", "Laser Pointer")
+        // The icon Explorer, the taskbar and shortcuts show, and the details on the file's
+        // Properties sheet. The version comes from Cargo.toml.
+        let mut resources = winresource::WindowsResource::new();
+        resources
+            .set_icon("assets/brand/app.ico")
             .set("FileDescription", "Laser Pointer")
-            .set("CompanyName", "Ricardo Mariano")
-            .set("LegalCopyright", "© 2026 Ricardo Mariano. MIT licence.")
-            .set("OriginalFilename", "laser-pointer.exe")
-            .set("FileVersion", env!("CARGO_PKG_VERSION"))
-            .set("ProductVersion", env!("CARGO_PKG_VERSION"))
+            .set("ProductName", "Laser Pointer")
+            .set("LegalCopyright", "\u{a9} 2026 Ricardo Mariano");
+        resources
             .compile()
-            .expect("unable to embed icon and version resources");
+            .expect("unable to compile the Windows resources");
     }
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=assets/brand/app.ico");

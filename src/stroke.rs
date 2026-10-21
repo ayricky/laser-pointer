@@ -7,18 +7,26 @@ use windows::core::Result;
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED, D2D1_FILL_MODE_WINDING,
 };
-use windows::Win32::Graphics::Direct2D::{ID2D1Factory, ID2D1RenderTarget, ID2D1SolidColorBrush};
+use windows::Win32::Graphics::Direct2D::{
+    ID2D1DeviceContext1, ID2D1Factory, ID2D1GeometryRealization, ID2D1PathGeometry, ID2D1RenderTarget,
+    ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_DEFAULT_FLATTENING_TOLERANCE,
+    D2D1_LAYER_OPTIONS1_NONE, D2D1_LAYER_PARAMETERS1,
+};
+use windows_numerics::Matrix3x2;
 use windows_numerics::Vector2;
 
 use crate::settings::{Look, STYLE_GLOW, STYLE_NEON};
 
 // Dropping tiny moves keeps a slow hand from leaving a jittery cluster of points.
 pub const MIN_STEP: f32 = 2.0;
-// Longest straight segment left after curving between samples, in DIPs.
-const CURVE_STEP: f32 = 3.0;
+// How far the curve between samples may stray from true once flattened, in DIPs, and the range
+// each flat piece may turn through, so a wide glow's outer edge stays round as well.
+const CURVE_TOLERANCE: f32 = 0.1;
+const CURVE_TURN: f32 = 5.0 * PI / 180.0;
+const MAX_CURVE_TURN: f32 = 20.0 * PI / 180.0;
 const CAP_STEPS: usize = 8;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct Point {
     pub x: f32,
     pub y: f32,
@@ -28,35 +36,73 @@ pub struct Point {
 #[derive(Clone, Debug)]
 pub struct Stroke {
     pub points: Vec<Point>,
+    /// Captured when the stroke began, so switching pens never restyles what is already drawn.
     pub look: Look,
+    /// DPI scale of the monitor it was drawn on.
     pub scale: f32,
-    pub baked: bool,
+    /// A corrected shape fades out all at once instead of shrinking along its trail.
+    pub whole: bool,
+    /// Where each part after the first begins, for shapes drawn in pieces like an arrow.
+    pub breaks: Vec<usize>,
 }
 
 impl Stroke {
-    pub fn translate(&mut self, offset: (i32, i32)) {
-        for point in &mut self.points {
-            point.x += offset.0 as f32;
-            point.y += offset.1 as f32;
+    pub fn new(point: Point, look: Look, scale: f32) -> Self {
+        Self {
+            points: vec![point],
+            look,
+            scale,
+            whole: false,
+            breaks: Vec::new(),
         }
     }
 
-    /// Conservative bounds avoid tessellating just to decide which pixels need repainting.
+    /// Where it could paint, glow included, without building its geometry.
     pub fn bounds(&self) -> Option<Bounds> {
-        let radius = self.look.width as f32 * self.scale * layers(self.look.style)[0].0 / 2.0 + 2.0;
-        self.points.iter().fold(None, |bounds, point| {
-            union(bounds, Some(Bounds::around(point.x, point.y, radius)))
-        })
+        self.bounds_from(0)
     }
 
-    pub fn prune(&mut self, now: Instant, scratch: &mut Scratch) {
-        prune(
-            &mut self.points,
-            now,
-            &self.look,
-            self.scale,
-            &mut scratch.radii,
-        );
+    /// The same for its points from `start` on.
+    pub fn bounds_from(&self, start: usize) -> Option<Bounds> {
+        let points = self.points.get(start..)?;
+        let first = points.first()?;
+        let reach = self.look.width as f32 / 2.0 * self.scale * layers(self.look.style)[0].0 + 2.0;
+        let mut bounds = Bounds::around(first.x, first.y, reach);
+        for point in points {
+            bounds = bounds.union(Bounds::around(point.x, point.y, reach));
+        }
+        Some(bounds)
+    }
+
+    /// Fading strokes are done once every point has aged out.
+    pub fn expired(&self, now: Instant) -> bool {
+        !self.look.ink
+            && self.points.last().is_none_or(|last| {
+                now.duration_since(last.at).as_millis() >= u128::from(self.look.fade_ms)
+            })
+    }
+
+    /// Drops points that have aged out, keeping the newest faded one so the tail still tapers.
+    /// Painting does this too, but a stroke can be off screen and never painted.
+    pub fn prune(&mut self, now: Instant) {
+        if self.look.ink || self.whole {
+            return;
+        }
+        let fade = u128::from(self.look.fade_ms);
+        let aged = self
+            .points
+            .iter()
+            .take_while(|point| now.duration_since(point.at).as_millis() >= fade)
+            .count();
+        let drop = if aged == self.points.len() { aged } else { aged.saturating_sub(1) };
+        self.points.drain(..drop);
+    }
+
+    pub fn translate(&mut self, dx: f32, dy: f32) {
+        for point in &mut self.points {
+            point.x += dx;
+            point.y += dy;
+        }
     }
 }
 
@@ -130,116 +176,110 @@ fn layers(style: u32) -> &'static [(f32, f32, f32)] {
     }
 }
 
-/// Drops points that have faded out, then fills what is left. Returns the area drawn on.
-#[allow(clippy::too_many_arguments)]
+/// Drops points that have faded out, then fills what is left, `fade` times as opaque as usual.
+/// Fails if any of it couldn't be drawn, so a stroke isn't taken as baked when it wasn't.
 pub fn draw(
     factory: &ID2D1Factory,
     target: &ID2D1RenderTarget,
     brush: &ID2D1SolidColorBrush,
     stroke: &mut Stroke,
     now: Instant,
+    fade: f32,
     scratch: &mut Scratch,
-) -> Result<Option<Bounds>> {
-    draw_points(
-        factory,
-        target,
-        brush,
-        &mut stroke.points,
-        now,
-        &stroke.look,
-        stroke.scale,
-        scratch,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn draw_points(
-    factory: &ID2D1Factory,
-    target: &ID2D1RenderTarget,
-    brush: &ID2D1SolidColorBrush,
-    points: &mut Vec<Point>,
-    now: Instant,
-    look: &Look,
-    scale: f32,
-    scratch: &mut Scratch,
-) -> Result<Option<Bounds>> {
-    prune(points, now, look, scale, &mut scratch.radii);
-    if points.is_empty() {
-        return Ok(None);
-    }
-    smooth(points, look.smoothing as usize, &mut scratch.path);
-    curve_through(
-        &scratch.path,
-        &scratch.radii,
-        CURVE_STEP * scale,
-        &mut scratch.centre,
-        &mut scratch.widths,
-    );
-
-    let opacity = look.opacity as f32 / 100.0;
-    let mut bounds = None;
-    for &(width, alpha, white) in layers(look.style) {
-        scratch.layer.clear();
-        scratch
-            .layer
-            .extend(scratch.widths.iter().map(|radius| radius * width));
-        outline(&scratch.centre, &scratch.layer, &mut scratch.outline);
-        bounds = union(bounds, extent(&scratch.outline));
-        let mut color = rgba(look.color, alpha * opacity);
-        color.r += (1.0 - color.r) * white;
-        color.g += (1.0 - color.g) * white;
-        color.b += (1.0 - color.b) * white;
-        unsafe { brush.SetColor(&color) };
-        fill(factory, target, brush, &scratch.outline)?;
-    }
-    Ok(bounds)
-}
-
-fn prune(points: &mut Vec<Point>, now: Instant, look: &Look, scale: f32, widths: &mut Vec<f32>) {
-    radii(
+) -> Result<()> {
+    let Stroke {
         points,
-        now,
-        look.width as f32 / 2.0 * scale,
         look,
         scale,
-        widths,
-    );
-    if !look.ink {
-        let faded = widths.iter().take_while(|&&radius| radius < 0.1).count();
+        whole,
+        breaks,
+    } = stroke;
+    let (look, scale) = (*look, *scale);
+    let base = look.width as f32 / 2.0 * scale;
+    radii(points, now, base, &look, *whole, &mut scratch.radii);
+    if !look.ink && !*whole {
+        let faded = scratch.radii.iter().take_while(|&&radius| radius < 0.1).count();
+        // Keep one faded point so the tail still tapers all the way to nothing.
         let drop = if faded == points.len() {
             faded
         } else {
             faded.saturating_sub(1)
         };
         points.drain(..drop);
-        widths.drain(..drop);
+        scratch.radii.drain(..drop);
     }
+    if points.is_empty() {
+        return Ok(());
+    }
+    let mut start = 0;
+    for end in breaks.iter().copied().chain([points.len()]) {
+        let part = start..end.min(points.len());
+        start = end;
+        if part.is_empty() {
+            continue;
+        }
+        smooth(&points[part.clone()], look.smoothing as usize, &mut scratch.path);
+        if *whole {
+            // A snapped shape is already its clean outline, kept to its corners once it settles:
+            // curving through those would round them off.
+            scratch.centre.clone_from(&scratch.path);
+            scratch.widths.clear();
+            scratch.widths.extend_from_slice(&scratch.radii[part]);
+        } else {
+            curve_through(
+                &scratch.path,
+                &scratch.radii[part],
+                CURVE_TOLERANCE * scale,
+                max_turn(&look, scale),
+                &mut scratch.centre,
+                &mut scratch.widths,
+            );
+        }
+        let opacity = look.opacity as f32 / 100.0 * fade;
+        for &(width, alpha, white) in layers(look.style) {
+            scratch.layer.clear();
+            scratch.layer.extend(scratch.widths.iter().map(|radius| radius * width));
+            outline(&scratch.centre, &scratch.layer, &mut scratch.outline);
+            let mut color = rgba(look.color, alpha * opacity);
+            color.r += (1.0 - color.r) * white;
+            color.g += (1.0 - color.g) * white;
+            color.b += (1.0 - color.b) * white;
+            unsafe { brush.SetColor(&color) };
+            fill(factory, target, brush, &scratch.outline)?;
+        }
+    }
+    Ok(())
 }
 
 fn ease_out(k: f32) -> f32 {
     1.0 - (1.0 - k).powi(4)
 }
 
-/// Thinner the older a point is and the further it sits behind the head, whichever is smaller.
-/// Measured in distance rather than point count, so the tail is the same length however fast
-/// the mouse reports.
-fn radii(points: &[Point], now: Instant, base: f32, look: &Look, scale: f32, radii: &mut Vec<f32>) {
+/// Thinner the older a point is, so the trail lasts as long as the fade however far the hand
+/// went. A whole shape thins evenly, by the age of its newest point.
+fn radii(
+    points: &[Point],
+    now: Instant,
+    base: f32,
+    look: &Look,
+    whole: bool,
+    radii: &mut Vec<f32>,
+) {
     radii.clear();
     radii.resize(points.len(), base);
     if look.ink {
         return;
     }
-    let trail = look.trail as f32 * scale;
     let fade = look.fade_ms as f32 / 1000.0;
-    let mut behind = 0.0;
-    for index in (0..points.len()).rev() {
-        let point = &points[index];
-        if let Some(next) = points.get(index + 1) {
-            behind += (next.x - point.x).hypot(next.y - point.y);
-        }
+    if whole {
+        let newest = points.iter().map(|point| point.at).max();
+        let age = newest.map_or(0.0, |at| 1.0 - now.duration_since(at).as_secs_f32() / fade);
+        radii.fill(base * ease_out(age.max(0.0)));
+        return;
+    }
+    for (radius, point) in radii.iter_mut().zip(points) {
         let age = 1.0 - now.duration_since(point.at).as_secs_f32() / fade;
-        let length = 1.0 - behind / trail;
-        radii[index] = base * ease_out(length.max(0.0)).min(ease_out(age.max(0.0)));
+        *radius = base * ease_out(age.max(0.0));
     }
 }
 
@@ -274,11 +314,13 @@ fn distance(a: Vector2, b: Vector2) -> f32 {
 }
 
 /// Quadratic curves midpoint to midpoint with each sample as the control, flattened finely
-/// enough that sparse samples from a fast flick still come out round.
+/// enough that sparse samples from a fast flick still come out round, and no finer: nearly
+/// straight stretches stay as one piece, since every point is drawn again each frame.
 fn curve_through(
     path: &[Vector2],
     radii: &[f32],
-    step: f32,
+    tolerance: f32,
+    max_turn: f32,
     points: &mut Vec<Vector2>,
     widths: &mut Vec<f32>,
 ) {
@@ -297,8 +339,12 @@ fn curve_through(
     for index in 1..count - 1 {
         let (from, control, to) = (mid(index - 1), path[index], mid(index));
         let (r0, r1, r2) = (mid_radius(index - 1), radii[index], mid_radius(index));
-        let length = distance(from, control) + distance(control, to);
-        let steps = ((length / step).ceil() as usize).clamp(1, 16);
+        // Cut into n pieces, a quadratic strays |from - 2 control + to| / 4n² from its chords.
+        let bend = distance(Vector2 { X: from.X - control.X, Y: from.Y - control.Y }, Vector2 { X: control.X - to.X, Y: control.Y - to.Y });
+        let by_error = (bend / (4.0 * tolerance)).sqrt();
+        let (u, v) = ((control.X - from.X, control.Y - from.Y), (to.X - control.X, to.Y - control.Y));
+        let turn = (u.0 * v.1 - u.1 * v.0).atan2(u.0 * v.0 + u.1 * v.1).abs();
+        let steps = (by_error.max(turn / max_turn).ceil() as usize).clamp(1, 16);
         for k in 1..=steps {
             let t = k as f32 / steps as f32;
             let (a, b, c) = ((1.0 - t) * (1.0 - t), 2.0 * (1.0 - t) * t, t * t);
@@ -349,9 +395,9 @@ fn outline(centre: &[Vector2], radii: &[f32], out: &mut Vec<Vector2>) {
         tangents_end = t;
     }
     let head = count - 1;
-    out.extend(
-        (1..CAP_STEPS).map(|step| offset(head, tangents_end, angle(step).sin(), angle(step).cos())),
-    );
+    out.extend((1..CAP_STEPS).map(|step| {
+        offset(head, tangents_end, angle(step).sin(), angle(step).cos())
+    }));
     // Walk back down the other side; tangents again, since they weren't kept.
     let start = out.len();
     let mut direction = first;
@@ -361,7 +407,6 @@ fn outline(centre: &[Vector2], radii: &[f32], out: &mut Vec<Vector2>) {
     }
     out[start..].reverse();
     out.extend((1..CAP_STEPS).map(|step| offset(0, first, -angle(step).sin(), -angle(step).cos())));
-    out.push(out[0]);
 }
 
 fn extent(points: &[Vector2]) -> Option<Bounds> {
@@ -385,6 +430,11 @@ fn fill(
     if outline.len() < 3 {
         return Ok(());
     }
+    unsafe { target.FillGeometry(&geometry(factory, outline)?, brush, None) };
+    Ok(())
+}
+
+fn geometry(factory: &ID2D1Factory, outline: &[Vector2]) -> Result<ID2D1PathGeometry> {
     unsafe {
         let geometry = factory.CreatePathGeometry()?;
         let sink = geometry.Open()?;
@@ -393,108 +443,180 @@ fn fill(
         sink.AddLines(&outline[1..]);
         sink.EndFigure(D2D1_FIGURE_END_CLOSED);
         sink.Close()?;
-        target.FillGeometry(&geometry, brush, None);
+        Ok(geometry)
     }
-    Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::settings::Settings;
-    use std::time::Duration;
+/// Points of a kept stroke in each settled piece, and how many each shares with the next, so
+/// the pieces join without a seam.
+const PIECE: usize = 192;
+const OVERLAP: usize = 6;
 
-    fn points(now: Instant) -> Vec<Point> {
-        (0..5)
-            .map(|index| Point {
-                x: index as f32 * 30.0,
-                y: 40.0,
-                at: now,
-            })
-            .collect()
+/// A stretch of stroke tessellated for each pass, and where it paints.
+struct Tessellated {
+    bounds: Bounds,
+    passes: Vec<ID2D1GeometryRealization>,
+}
+
+/// A kept stroke grows for as long as the button is held, and drawing it whole every frame would
+/// cost more the longer it got. Its settled stretch is tessellated once, a piece at a time, so a
+/// frame costs the same however long the stroke is. Tied to the device that made it.
+#[derive(Default)]
+pub struct Pieces {
+    done: Vec<Tessellated>,
+    /// The stretch after them, kept for as long as the same points make it: a frame draws it
+    /// into each rectangle it repaints, and a stroke waiting to be baked doesn't change.
+    tail: Option<((usize, usize), Box<Tessellated>)>,
+}
+
+impl Pieces {
+    pub fn clear(&mut self) {
+        self.done.clear();
+        self.tail = None;
     }
 
-    #[test]
-    fn outline_closes_and_contains_centres() {
-        let now = Instant::now();
-        let mut scratch = Scratch::default();
-        smooth(&points(now), 2, &mut scratch.path);
-        curve_through(
-            &scratch.path,
-            &[3.0; 5],
-            3.0,
-            &mut scratch.centre,
-            &mut scratch.widths,
-        );
-        outline(&scratch.centre, &scratch.widths, &mut scratch.outline);
-        assert_eq!(scratch.outline.first(), scratch.outline.last());
-        let bounds = extent(&scratch.outline).unwrap();
-        for point in &scratch.centre {
-            assert!(bounds.left <= point.X && point.X <= bounds.right);
-            assert!(bounds.top <= point.Y && point.Y <= bounds.bottom);
+    /// Where the stretch still drawn afresh each frame begins. Nothing before it changes, as
+    /// long as the pieces are drawn.
+    pub fn settled(&self) -> usize {
+        self.done.len() * PIECE
+    }
+}
+
+/// Whether `draw_kept` applies: a kept stroke, drawn as one piece of freehand.
+pub fn grows(stroke: &Stroke) -> bool {
+    stroke.look.ink && !stroke.whole && stroke.breaks.is_empty()
+}
+
+/// How far each flat piece of a curve may turn: as far as keeps the outer edge of the widest
+/// pass within the tolerance, which for a thin stroke is a good deal further than for a thick.
+fn max_turn(look: &Look, scale: f32) -> f32 {
+    let outer = look.width as f32 / 2.0 * scale * layers(look.style)[0].0;
+    let tolerance = CURVE_TOLERANCE * scale;
+    if outer <= tolerance {
+        return MAX_CURVE_TURN;
+    }
+    (2.0 * (1.0 - tolerance / outer).acos()).clamp(CURVE_TURN, MAX_CURVE_TURN)
+}
+
+/// The centre line of `points[range]` and its widths, as the whole stroke would have it there.
+/// It takes a sample either side as context, so it begins and ends where the stroke's curve
+/// passes between samples, not on the sample beside it, which would bulge at each join.
+fn centre_of(points: &[Point], range: std::ops::Range<usize>, look: &Look, scale: f32, scratch: &mut Scratch) {
+    let span = look.smoothing as usize;
+    let (before, after) = (usize::from(range.start > 0), usize::from(range.end < points.len()));
+    let (start, end) = (range.start - before, range.end + after);
+    let (from, to) = (start.saturating_sub(span), (end + span).min(points.len()));
+    smooth(&points[from..to], span, &mut scratch.path);
+    scratch.path.truncate(end - from);
+    scratch.path.drain(..start - from);
+    scratch.radii.clear();
+    scratch.radii.resize(scratch.path.len(), look.width as f32 / 2.0 * scale);
+    let (tolerance, turn) = (CURVE_TOLERANCE * scale, max_turn(look, scale));
+    curve_through(&scratch.path, &scratch.radii, tolerance, turn, &mut scratch.centre, &mut scratch.widths);
+    if before == 1 && scratch.centre.len() > 1 {
+        scratch.centre.remove(0);
+        scratch.widths.remove(0);
+    }
+    if after == 1 && scratch.centre.len() > 1 {
+        scratch.centre.pop();
+        scratch.widths.pop();
+    }
+}
+
+/// Tessellates the centre line in `scratch` for each pass. Nothing to draw is `None`.
+fn tessellate(factory: &ID2D1Factory, dc: &ID2D1DeviceContext1, look: &Look, scratch: &mut Scratch) -> Result<Option<Tessellated>> {
+    if scratch.centre.is_empty() {
+        return Ok(None);
+    }
+    let mut passes = Vec::with_capacity(4);
+    let mut bounds = None;
+    for &(width, _, _) in layers(look.style) {
+        scratch.layer.clear();
+        scratch.layer.extend(scratch.widths.iter().map(|radius| radius * width));
+        outline(&scratch.centre, &scratch.layer, &mut scratch.outline);
+        bounds = union(bounds, extent(&scratch.outline));
+        let realization = geometry(factory, &scratch.outline)
+            .and_then(|geometry| unsafe { dc.CreateFilledGeometryRealization(&geometry, D2D1_DEFAULT_FLATTENING_TOLERANCE) })?;
+        passes.push(realization);
+    }
+    Ok(bounds.map(|bounds| Tessellated { bounds, passes }))
+}
+
+fn overlap(a: Bounds, b: Bounds) -> Option<Bounds> {
+    let both = Bounds {
+        left: a.left.max(b.left),
+        top: a.top.max(b.top),
+        right: a.right.min(b.right),
+        bottom: a.bottom.min(b.bottom),
+    };
+    (both.left < both.right && both.top < both.bottom).then_some(both)
+}
+
+/// Draws a kept stroke as `draw` would, into `area`, from settled pieces and its newest
+/// stretch. Each pass is filled solid inside a layer of its opacity, so where pieces overlap
+/// they don't show darker. Settling makes new pieces as the stroke grows; a stroke drawn once,
+/// as when baked, needn't. Fails if any of it couldn't be tessellated.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_kept(
+    factory: &ID2D1Factory,
+    dc: &ID2D1DeviceContext1,
+    brush: &ID2D1SolidColorBrush,
+    stroke: &Stroke,
+    pieces: &mut Pieces,
+    area: Bounds,
+    settle: bool,
+    scratch: &mut Scratch,
+) -> Result<()> {
+    let (points, look, scale) = (&stroke.points, stroke.look, stroke.scale);
+    let span = look.smoothing as usize;
+    // A piece settles once every point that smooths its end, and the one after, is in.
+    while settle && (pieces.done.len() + 1) * PIECE + OVERLAP + 1 + span < points.len() {
+        let start = pieces.done.len() * PIECE;
+        centre_of(points, start..start + PIECE + OVERLAP, &look, scale, scratch);
+        let Some(piece) = tessellate(factory, dc, &look, scratch)? else { break };
+        pieces.done.push(piece);
+        pieces.tail = None;
+    }
+    let made_from = (pieces.settled(), points.len());
+    if pieces.tail.as_ref().is_none_or(|(from, _)| *from != made_from) {
+        pieces.tail = None;
+        if made_from.0 < made_from.1 {
+            centre_of(points, made_from.0..made_from.1, &look, scale, scratch);
+            pieces.tail = tessellate(factory, dc, &look, scratch)?.map(|tail| (made_from, Box::new(tail)));
         }
-        outline(&[Vector2 { X: 4.0, Y: 7.0 }], &[3.0], &mut scratch.outline);
-        assert_eq!(scratch.outline.first(), scratch.outline.last());
     }
-
-    #[test]
-    fn radii_taper_towards_tail() {
-        let now = Instant::now();
-        let look = Settings::default().look;
-        let mut widths = Vec::new();
-        radii(&points(now), now, 3.0, &look, 1.0, &mut widths);
-        assert!(widths.windows(2).all(|pair| pair[0] <= pair[1]));
-        assert_eq!(widths.last(), Some(&3.0));
-        assert!(widths[0] < 3.0);
-    }
-
-    #[test]
-    fn prune_preserves_one_faded_tail_point() {
-        let now = Instant::now();
-        let mut points = points(now);
-        for point in points.iter_mut().take(3) {
-            point.at = now - Duration::from_secs(10);
-        }
-        let mut widths = Vec::new();
-        let look = Settings::default().look;
-        prune(&mut points, now, &look, 1.0, &mut widths);
-        assert_eq!(points.len(), 3);
-        assert_eq!(points[0].x, 60.0);
-        assert_eq!(widths[0], 0.0);
-        prune(
-            &mut points,
-            now + Duration::from_secs(10),
-            &look,
-            1.0,
-            &mut widths,
-        );
-        assert!(points.is_empty());
-    }
-
-    #[test]
-    fn origin_change_preserves_screen_positions_and_look() {
-        let now = Instant::now();
-        let mut stroke = Stroke {
-            points: points(now),
-            look: Settings::default().look,
-            scale: 1.5,
-            baked: true,
-        };
-        let original = stroke.clone();
-        let (old_origin, new_origin) = ((-1920, -100), (-2560, -400));
-        stroke.translate((old_origin.0 - new_origin.0, old_origin.1 - new_origin.1));
-        for (before, after) in original.points.iter().zip(&stroke.points) {
-            assert_eq!(
-                before.x + old_origin.0 as f32,
-                after.x + new_origin.0 as f32
+    let shown: Vec<&Tessellated> = pieces
+        .done
+        .iter()
+        .chain(pieces.tail.as_ref().map(|(_, tail)| tail.as_ref()))
+        .filter(|stretch| overlap(stretch.bounds, area).is_some())
+        .collect();
+    let Some(bounds) = shown.iter().map(|stretch| stretch.bounds).reduce(Bounds::union) else { return Ok(()) };
+    let Some(bounds) = overlap(bounds, area) else { return Ok(()) };
+    let opacity = look.opacity as f32 / 100.0;
+    for (pass, &(_, alpha, white)) in layers(look.style).iter().enumerate() {
+        let mut color = rgba(look.color, 1.0);
+        color.r += (1.0 - color.r) * white;
+        color.g += (1.0 - color.g) * white;
+        color.b += (1.0 - color.b) * white;
+        unsafe {
+            dc.PushLayer(
+                &D2D1_LAYER_PARAMETERS1 {
+                    contentBounds: crate::graphics::rect_f(bounds),
+                    maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                    maskTransform: Matrix3x2::identity(),
+                    opacity: alpha * opacity,
+                    layerOptions: D2D1_LAYER_OPTIONS1_NONE,
+                    ..Default::default()
+                },
+                None,
             );
-            assert_eq!(
-                before.y + old_origin.1 as f32,
-                after.y + new_origin.1 as f32
-            );
-            assert_eq!(before.at, after.at);
+            brush.SetColor(&color);
+            for stretch in &shown {
+                dc.DrawGeometryRealization(&stretch.passes[pass], brush);
+            }
+            dc.PopLayer();
         }
-        assert_eq!(stroke.look, original.look);
-        assert_eq!(stroke.scale, original.scale);
     }
+    Ok(())
 }

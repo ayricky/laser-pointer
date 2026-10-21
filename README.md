@@ -1,30 +1,39 @@
-<p align="center"><img src="assets/brand/logo.svg" width="96" height="96" alt=""></p>
-
 # Laser Pointer
 
-Draw over anything while you present — a smooth, fading laser for Windows.
+A screen-wide laser pointer and annotation tool for presenting on Windows. Press a shortcut and
+draw over anything — slides, browsers, code — with a smooth, fading laser trail. Right-clicks and
+the scroll wheel still reach the app underneath, so you never have to switch it off to drive your
+presentation.
 
-[![CI](https://github.com/ayricky/laser-pointer/actions/workflows/ci.yml/badge.svg)](https://github.com/ayricky/laser-pointer/actions/workflows/ci.yml)
-
-[Live demo](https://ayricky.github.io/laser-pointer/) ·
-Microsoft Store (coming soon) ·
-[Releases](https://github.com/ayricky/laser-pointer/releases)
-
-<!-- Replace the Microsoft Store placeholder with the product URL once the listing is live. -->
+[See it in action](https://ayricky.github.io/laser-pointer/): the site's demo runs the app's own stroke and shape code in the browser.
 
 ## Features
 
-- Smooth trails that taper by distance and fade over time. Solid, Glow and Neon styles, any colour,
-  and adjustable thickness, opacity, fade, trail length and smoothing.
-- Laser, Highlighter and Pen presets; create, rename, update and delete your own, up to eight.
-- Keep annotations on screen while the laser is off and clicks pass through. Each stroke remembers
-  its look. Undo, redo, and Clear with a gentle fade; undo also restores a Clear.
-- Rebind or remove any shortcut, including preset shortcuts and single keys.
-- Right-click to pass a click through; scroll the app underneath; Ctrl+wheel adjusts thickness.
-- Laser-dot cursor, click ripples and an on-screen indicator for toggles and preset changes.
-- Tabbed settings with a live preview, Windows light/dark theme and accent colour. Left-click the
-  notification-area icon to open it. Optional start with Windows.
-- A lightweight overlay that hides when empty and redraws only the parts of the screen that change.
+- **Smooth laser trail** that tapers and fades over time, drawn as one anti-aliased
+  shape per stroke. Solid, Glow and Neon styles; any colour; adjustable thickness, opacity and
+  fade time.
+- **Presets** — Laser, Highlighter and Pen to start with; create, rename, update and delete your
+  own (up to eight).
+- **Keep strokes** — annotations stay on screen, even with the laser off and clicks passing
+  through them, until you clear them. Undo and redo anything, clearing included.
+- **Straight lines** — hold Alt while drawing for a perfectly horizontal line, Shift+Alt for a
+  vertical one.
+- **Shape snapping** — let go of a rough circle, box, triangle, line or arrow and it settles into
+  a clean one. How sloppy a stroke may be and still snap is set per preset, from Strict to
+  Lenient; hold Ctrl as you let go to keep a stroke freehand.
+- **Shortcuts for everything** — rebind or remove any action, including single keys. Keys that
+  only make sense while drawing (Esc, Undo) are claimed only while the laser is on.
+- **Cursor styles** — a soft glow, segment ring, classic cross, cross and dot, circle and dot,
+  chevron, brackets or micro dot, in the laser colour. Each moves its own way: dots swell in and
+  squeeze, crosshairs spin in and twist, rings pulse, the chevron tilts.
+- **Click ripples** where right-clicks land, and an **on-screen indicator** that confirms toggles,
+  preset changes and size changes.
+- **Settings panel** in the Windows 11 style, following your light/dark theme and accent colour,
+  with a live preview. Left-click the tray icon to open it.
+- Light on resources: the overlay is hidden while there is nothing to show, only the parts of the
+  screen that change are redrawn, kept strokes are drawn once, idle memory is handed back, and it
+  uses no CPU while nothing moves. It follows each monitor's scaling, keeps your annotations when
+  displays change, and recovers on its own if the graphics driver resets.
 
 ## Default shortcuts
 
@@ -32,69 +41,53 @@ Microsoft Store (coming soon) ·
 | --- | --- | --- |
 | Turn laser on or off | Alt+L | always |
 | Turn laser off | Esc | while the laser is on |
-| Undo last stroke or Clear | Ctrl+Z | while the laser is on |
+| Undo | Ctrl+Z | while the laser is on |
 | Redo | Ctrl+Y | while the laser is on |
 | Clear strokes | Alt+X | while strokes are on screen |
 | Keep strokes on or off | Alt+K | always |
 | Next / previous preset | Alt+] / Alt+[ | always |
 | Quit | Alt+Shift+L | always |
 
-While the laser is on: drag to draw, right-click to click through, scroll to scroll the app
-underneath, and Ctrl+scroll to change thickness.
+While the laser is on: drag to draw, right-click to click through, middle and side buttons and
+both scroll wheels reach the app underneath, Ctrl+scroll changes thickness. While drawing, hold
+Alt for a horizontal line, Shift+Alt for a vertical one, and Ctrl as you let go to skip snapping.
 
-## Install
+## Games
 
-- **Microsoft Store (coming soon):** US$2.99 for a signed build with automatic updates.
-- **Release zip:** download `laser-pointer-<version>-x64.zip` from
-  [Releases](https://github.com/ayricky/laser-pointer/releases), extract it and open `laser-pointer.exe`.
-  GitHub MSIX files are unsigned and intended for Store submission or developer sideload testing.
-- **Build:** follow the instructions below; building it yourself is always free.
+The laser can draw over games running in borderless or windowed mode. Games in exclusive
+fullscreen own the display, so nothing can appear over them; you'll get a notice saying so.
 
-Requires Windows 10 1809 or later, x64. The app lives in the notification area. Press Alt+L to
-draw; left-click its tray icon for settings. Starting it again opens the running copy's settings.
+## Running it
+
+Build it (below) and run `target\release\laser-pointer.exe`; it sits in the notification area.
+Only one copy runs at a time; starting it again opens the settings of the running copy.
+
+Settings are stored in `%APPDATA%\LaserPointer\settings.ini`.
 
 ## Build from source
 
-Requires Windows 10 1809 or later and Rust (1.93 stable with the MSVC toolchain is supported).
+Requires Windows 10 1809 or later and a Rust toolchain.
 
 ```powershell
-cargo build --release --target-dir target-codex
-cargo test --target-dir target-codex
-cargo clippy --target-dir target-codex
+cargo build --release
 ```
 
-The executable is `target-codex\release\laser-pointer.exe`. Using a separate target directory
-also avoids overwriting a running copy in `target\release`.
+The default MSVC toolchain needs the Visual Studio Build Tools. With the GNU toolchain
+(`x86_64-pc-windows-gnu`), put a MinGW-w64 `bin` folder (for `dlltool` and `as`) on `PATH`.
 
-The default MSVC toolchain needs Visual Studio Build Tools and the Windows 10/11 SDK (`rc.exe`
-embeds the icon and version resources). With the GNU toolchain (`x86_64-pc-windows-gnu`), put a
-MinGW-w64 `bin` folder (for `dlltool`, `as` and `windres`) on `PATH`.
+### Store package
 
-To regenerate the branding assets, install the dependencies declared in `tools/brand/package.json`
-there, then run from the repository root:
+`packaging\package.ps1` builds the MSIX the Microsoft Store takes (it needs the Windows SDK), with
+the identity Partner Center assigns; run `Get-Help packaging\package.ps1` for the details. Pushing
+a `v*` tag runs the same on GitHub Actions for x64 and Arm64, publishes the exes as a release and
+keeps the Store bundle as an artifact. Images under `packaging\Assets` and `docs\img` come from
+`assets\brand\logo.svg`: `cd tools; npm install; npm run icons`.
 
-```powershell
-node tools/brand/generate.mjs
-```
+## Support
 
-To create an unsigned Store package (Windows SDK required):
-
-```powershell
-./packaging/build-msix.ps1 -TargetDir target-codex
-```
-
-The package is written to `dist/`. Supply your Partner Center identity for submission; see
-[the submission checklist](store/SUBMITTING.md). Optional PFX signing is for developer sideload
-testing; the Store signs submitted packages. Nothing is installed by the packaging script.
-
-## Privacy
-
-No personal data collection, network connections, telemetry, ads or accounts; settings stay on your PC.
-Read the [privacy policy](https://ayricky.github.io/laser-pointer/privacy.html).
+The Microsoft Store version (US$2.99) pays for the work. If you build it yourself and it helps,
+a tip on [Ko-fi](https://ko-fi.com/ayricky) is welcome.
 
 ## Licence
 
-[MIT](LICENSE). The Store version is the same code; buying it supports development and provides
-signed distribution and automatic updates. The cursor artwork comes from
-[Excalidraw](https://github.com/excalidraw/excalidraw) under the MIT licence; see
-[THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt).
+[MIT](LICENSE).

@@ -1,23 +1,21 @@
 //! User settings, presets and shortcuts, kept in %APPDATA%\LaserPointer\settings.ini.
 
 use std::cell::{Cell, RefCell};
-use std::io::Write;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
-use windows::core::{w, Result, HSTRING, PCWSTR};
+use windows::core::{w, HSTRING, PCWSTR};
 use windows::ApplicationModel::{StartupTask, StartupTaskState};
 use windows::Win32::Foundation::APPMODEL_ERROR_NO_PACKAGE;
-use windows::Win32::Storage::FileSystem::{
-    MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
-};
 use windows::Win32::Storage::Packaging::Appx::GetCurrentPackageFullName;
 use windows::Win32::System::Registry::{
     RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW, HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_SZ,
 };
-use windows::Win32::System::WinRT::{RoInitialize, RoUninitialize, RO_INIT_MULTITHREADED};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     MOD_ALT, MOD_CONTROL, MOD_SHIFT, VK_ESCAPE, VK_OEM_4, VK_OEM_6,
 };
+
+use crate::cursors;
 
 pub const STYLE_SOLID: u32 = 0;
 pub const STYLE_GLOW: u32 = 1;
@@ -47,10 +45,7 @@ impl Binding {
 
     fn parse(text: &str) -> Option<Self> {
         let (mods, vk) = text.split_once(',')?;
-        Some(Self::new(
-            mods.trim().parse().ok()?,
-            vk.trim().parse().ok()?,
-        ))
+        Some(Self::new(mods.trim().parse().ok()?, vk.trim().parse().ok()?))
     }
 }
 
@@ -64,33 +59,34 @@ pub struct Look {
     /// Percent.
     pub opacity: u32,
     pub fade_ms: u32,
-    /// Distance behind the head over which the stroke tapers away, in DIPs.
-    pub trail: u32,
     pub smoothing: u32,
     pub style: u32,
     /// Strokes stay until cleared instead of fading.
     pub ink: bool,
+    /// How readily a finished stroke is straightened into a line, circle, box or arrow, 0–100.
+    pub snap: u32,
 }
 
 impl Look {
+    #[allow(clippy::too_many_arguments)]
     const fn new(
         color: u32,
         width: u32,
         opacity: u32,
         fade_ms: u32,
-        trail: u32,
         style: u32,
         ink: bool,
+        snap: u32,
     ) -> Self {
         Self {
             color,
             width,
             opacity,
             fade_ms,
-            trail,
             smoothing: 2,
             style,
             ink,
+            snap,
         }
     }
 
@@ -99,34 +95,28 @@ impl Look {
         self.width = self.width.clamp(2, 24);
         self.opacity = self.opacity.clamp(10, 100);
         self.fade_ms = self.fade_ms.clamp(200, 5000);
-        self.trail = self.trail.clamp(100, 2000);
         self.smoothing = self.smoothing.min(8);
         self.style = self.style.min(STYLE_NEON);
+        self.snap = self.snap.min(100);
         self
     }
 
     /// One line describing it, for the presets list.
     pub fn summary(&self) -> String {
-        let mut text = format!(
-            "{} px \u{b7} {}",
-            self.width, STYLE_NAMES[self.style as usize]
-        );
+        let mut text = format!("{} px \u{b7} {}", self.width, STYLE_NAMES[self.style as usize]);
         if self.opacity < 100 {
             text.push_str(&format!(" \u{b7} {}%", self.opacity));
         }
         if self.ink {
             text.push_str(" \u{b7} keeps strokes");
         } else {
-            text.push_str(&format!(
-                " \u{b7} fades in {:.1} s",
-                self.fade_ms as f32 / 1000.0
-            ));
+            text.push_str(&format!(" \u{b7} fades in {:.1} s", self.fade_ms as f32 / 1000.0));
         }
         text
     }
 }
 
-const LASER: Look = Look::new(0xff2a2a, 4, 100, 1000, 500, STYLE_GLOW, false);
+const LASER: Look = Look::new(0xff2a2a, 4, 100, 1000, STYLE_GLOW, false, 35);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Command {
@@ -155,17 +145,14 @@ pub const COMMANDS: [Command; 9] = [
 
 impl Command {
     pub fn index(self) -> usize {
-        COMMANDS
-            .iter()
-            .position(|&command| command == self)
-            .unwrap_or(0)
+        COMMANDS.iter().position(|&command| command == self).unwrap_or(0)
     }
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Toggle => "Turn laser on or off",
             Self::Off => "Turn laser off",
-            Self::Undo => "Undo last stroke",
+            Self::Undo => "Undo",
             Self::Redo => "Redo",
             Self::Clear => "Clear strokes",
             Self::ToggleInk => "Keep strokes on or off",
@@ -218,10 +205,12 @@ impl Command {
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Settings {
     pub look: Look,
-    /// A glowing dot instead of the pen cursor.
-    pub dot_cursor: bool,
+    /// Index into `cursors::STYLES`.
+    pub cursor: usize,
     pub ripples: bool,
     pub indicator: bool,
+    /// Take the mouse from a game that has captured it while the laser is on.
+    pub game_focus: bool,
     pub keys: [Binding; COMMANDS.len()],
 }
 
@@ -229,9 +218,10 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             look: LASER,
-            dot_cursor: true,
+            cursor: 0,
             ripples: true,
             indicator: true,
+            game_focus: true,
             keys: COMMANDS.map(Command::default_binding),
         }
     }
@@ -260,11 +250,11 @@ fn default_presets() -> Vec<Preset> {
         preset("Laser", LASER),
         preset(
             "Highlighter",
-            Look::new(0xffd400, 18, 40, 3000, 2000, STYLE_SOLID, false),
+            Look::new(0xffd400, 18, 40, 3000, STYLE_SOLID, false, 60),
         ),
         preset(
             "Pen",
-            Look::new(0x1e90ff, 4, 100, 1000, 500, STYLE_SOLID, true),
+            Look::new(0x1e90ff, 4, 100, 1000, STYLE_SOLID, true, 50),
         ),
     ]
 }
@@ -282,7 +272,6 @@ pub fn clean_name(name: &str) -> String {
 thread_local! {
     static CURRENT: Cell<Settings> = Cell::new(Settings::default());
     static PRESETS: RefCell<Vec<Preset>> = RefCell::new(default_presets());
-    static PRESET_REVISION: Cell<u64> = const { Cell::new(0) };
 }
 
 pub fn get() -> Settings {
@@ -291,15 +280,8 @@ pub fn get() -> Settings {
 
 pub fn set(mut settings: Settings) {
     settings.look = settings.look.clamped();
+    settings.cursor = settings.cursor.min(cursors::STYLES.len() - 1);
     CURRENT.with(|current| current.set(settings));
-}
-
-pub fn preset_count() -> usize {
-    PRESETS.with(|presets| presets.borrow().len())
-}
-
-pub fn preset_revision() -> u64 {
-    PRESET_REVISION.with(Cell::get)
 }
 
 pub fn presets() -> Vec<Preset> {
@@ -312,18 +294,12 @@ pub fn set_presets(mut list: Vec<Preset>) {
         preset.look = preset.look.clamped();
     }
     PRESETS.with(|presets| *presets.borrow_mut() = list);
-    PRESET_REVISION.with(|revision| revision.set(revision.get().wrapping_add(1)));
 }
 
 /// The preset the current look came from, if it still matches one.
 pub fn active_preset() -> Option<usize> {
     let look = get().look;
-    PRESETS.with(|presets| {
-        presets
-            .borrow()
-            .iter()
-            .position(|preset| preset.look == look)
-    })
+    PRESETS.with(|presets| presets.borrow().iter().position(|preset| preset.look == look))
 }
 
 pub fn apply_preset(index: usize) -> Option<String> {
@@ -331,7 +307,6 @@ pub fn apply_preset(index: usize) -> Option<String> {
     let mut settings = get();
     settings.look = preset.look;
     set(settings);
-    save();
     Some(preset.name)
 }
 
@@ -360,9 +335,7 @@ pub enum Slot {
 pub fn binding(slot: Slot) -> Binding {
     match slot {
         Slot::Command(command) => get().key(command),
-        Slot::Preset(index) => presets()
-            .get(index)
-            .map_or(Binding::NONE, |preset| preset.key),
+        Slot::Preset(index) => presets().get(index).map_or(Binding::NONE, |preset| preset.key),
     }
 }
 
@@ -384,6 +357,8 @@ pub fn set_binding(slot: Slot, binding: Binding) {
     save();
 }
 
+// ---- The settings file ---------------------------------------------------------------------------
+
 type Field = (&'static str, fn(&Settings) -> u32, fn(&mut Settings, u32));
 
 const FIELDS: [Field; 11] = [
@@ -391,34 +366,18 @@ const FIELDS: [Field; 11] = [
     ("width", |s| s.look.width, |s, v| s.look.width = v),
     ("opacity", |s| s.look.opacity, |s, v| s.look.opacity = v),
     ("fade_ms", |s| s.look.fade_ms, |s, v| s.look.fade_ms = v),
-    ("trail", |s| s.look.trail, |s, v| s.look.trail = v),
-    (
-        "smoothing",
-        |s| s.look.smoothing,
-        |s, v| s.look.smoothing = v,
-    ),
+    ("smoothing", |s| s.look.smoothing, |s, v| s.look.smoothing = v),
     ("style", |s| s.look.style, |s, v| s.look.style = v),
     ("ink", |s| s.look.ink.into(), |s, v| s.look.ink = v != 0),
-    (
-        "dot_cursor",
-        |s| s.dot_cursor.into(),
-        |s, v| s.dot_cursor = v != 0,
-    ),
+    ("snap", |s| s.look.snap, |s, v| s.look.snap = v),
     ("ripples", |s| s.ripples.into(), |s, v| s.ripples = v != 0),
-    (
-        "indicator",
-        |s| s.indicator.into(),
-        |s, v| s.indicator = v != 0,
-    ),
+    ("indicator", |s| s.indicator.into(), |s, v| s.indicator = v != 0),
+    ("game_focus", |s| s.game_focus.into(), |s, v| s.game_focus = v != 0),
 ];
 
 fn path() -> Option<PathBuf> {
     let base = std::env::var_os("APPDATA")?;
-    Some(
-        PathBuf::from(base)
-            .join("LaserPointer")
-            .join("settings.ini"),
-    )
+    Some(PathBuf::from(base).join("LaserPointer").join("settings.ini"))
 }
 
 fn number(value: &str) -> Option<u32> {
@@ -428,11 +387,17 @@ fn number(value: &str) -> Option<u32> {
     }
 }
 
-/// name|#rrggbb|width|opacity|fade|trail|smoothing|style|ink|mods|vk
+/// name|#rrggbb|width|opacity|fade|trail|smoothing|style|ink|mods|vk[|snap]
+/// Snap came later, so it goes last and files without it still load. Trail length is gone (the
+/// trail lasts as long as its fade), but its column stays so the others don't move.
 fn parse_preset(value: &str) -> Option<Preset> {
     let parts: Vec<&str> = value.split('|').collect();
-    let [name, color, width, opacity, fade, trail, smoothing, style, ink, mods, vk] = parts[..]
-    else {
+    let (fields, snap) = match parts.len() {
+        11 => (&parts[..], None),
+        12 => (&parts[..11], Some(number(parts[11])?)),
+        _ => return None,
+    };
+    let [name, color, width, opacity, fade, _trail, smoothing, style, ink, mods, vk] = fields else {
         return None;
     };
     let name = clean_name(name);
@@ -446,74 +411,60 @@ fn parse_preset(value: &str) -> Option<Preset> {
             width: number(width)?,
             opacity: number(opacity)?,
             fade_ms: number(fade)?,
-            trail: number(trail)?,
             smoothing: number(smoothing)?,
             style: number(style)?,
             ink: number(ink)? != 0,
+            snap: snap.unwrap_or(LASER.snap),
         },
         key: Binding::new(number(mods)?, number(vk)?),
     })
 }
 
-pub fn parse(text: &str) -> (Settings, Option<Vec<Preset>>) {
+/// Reads a settings file. Presets are `None` when the file never listed any, so the defaults stay.
+fn parse(text: &str) -> (Settings, Option<Vec<Preset>>) {
     let mut settings = Settings::default();
-    let mut list = Vec::new();
-    let mut saw_presets = false;
-    {
-        let mut old_hotkey = Binding::NONE;
-        let mut saw_toggle = false;
-        for line in text.lines() {
-            let Some((key, value)) = line.split_once('=') else {
-                continue;
-            };
-            let (key, value) = (key.trim(), value.trim());
-            if key == "preset" {
-                saw_presets = true;
-                list.extend(parse_preset(value));
-            } else if let Some(command) = COMMANDS.iter().find(|command| command.key() == key) {
-                if let Some(binding) = Binding::parse(value) {
-                    settings.keys[command.index()] = binding;
-                    saw_toggle |= *command == Command::Toggle;
-                }
-            } else if let Some(value) = number(value) {
-                match key {
-                    // Older versions only had the one shortcut.
-                    "hotkey_mods" => old_hotkey.mods = value,
-                    "hotkey_vk" => old_hotkey.vk = value,
-                    _ => {
-                        if let Some((_, _, set)) = FIELDS.iter().find(|(name, ..)| *name == key) {
-                            set(&mut settings, value);
-                        }
+    let mut presets: Option<Vec<Preset>> = None;
+    let mut old_hotkey = Binding::NONE;
+    let mut toggle_read = false;
+    for line in text.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let (key, value) = (key.trim(), value.trim());
+        if key == "preset" {
+            presets.get_or_insert_with(Vec::new).extend(parse_preset(value));
+        } else if key == "presets" {
+            // Written before the list, so a list the user emptied loads as empty, not as the
+            // defaults an older file without presets gets.
+            presets.get_or_insert_with(Vec::new);
+        } else if key == "cursor" {
+            settings.cursor = cursors::index_of(value);
+        } else if let Some(command) = COMMANDS.iter().find(|command| command.key() == key) {
+            if let Some(binding) = Binding::parse(value) {
+                settings.keys[command.index()] = binding;
+                toggle_read |= *command == Command::Toggle;
+            }
+        } else if let Some(value) = number(value) {
+            match key {
+                // Older versions only had the one shortcut.
+                "hotkey_mods" => old_hotkey.mods = value,
+                "hotkey_vk" => old_hotkey.vk = value,
+                _ => {
+                    if let Some((_, _, set)) = FIELDS.iter().find(|(name, ..)| *name == key) {
+                        set(&mut settings, value);
                     }
                 }
             }
         }
-        if old_hotkey.is_set() && !saw_toggle {
-            settings.keys[Command::Toggle.index()] = old_hotkey;
-        }
     }
-    settings.look = settings.look.clamped();
-    list.truncate(MAX_PRESETS);
-    for preset in &mut list {
-        preset.look = preset.look.clamped();
+    // The one shortcut older versions had, unless the file also says what Toggle is now.
+    if old_hotkey.is_set() && !toggle_read {
+        settings.keys[Command::Toggle.index()] = old_hotkey;
     }
-    (settings, saw_presets.then_some(list))
+    (settings, presets)
 }
 
-pub fn load() -> bool {
-    let first_run = path().is_some_and(|path| !path.exists());
-    let text = path()
-        .and_then(|path| std::fs::read_to_string(path).ok())
-        .unwrap_or_default();
-    let (settings, list) = parse(&text);
-    set(settings);
-    if let Some(list) = list {
-        set_presets(list);
-    }
-    first_run
-}
-
-pub fn serialize(settings: &Settings, presets: &[Preset]) -> String {
+fn serialize(settings: &Settings, presets: &[Preset]) -> String {
     let mut text = String::new();
     for (name, get, _) in FIELDS {
         let value = get(settings);
@@ -523,65 +474,128 @@ pub fn serialize(settings: &Settings, presets: &[Preset]) -> String {
             text.push_str(&format!("{name}={value}\n"));
         }
     }
+    text.push_str(&format!("cursor={}\n", cursors::STYLES[settings.cursor].id));
     for command in COMMANDS {
         let key = settings.key(command);
         text.push_str(&format!("{}={},{}\n", command.key(), key.mods, key.vk));
     }
-    if presets.is_empty() {
-        text.push_str("preset=\n");
-    }
+    text.push_str(&format!("presets={}\n", presets.len()));
     for preset in presets {
         let look = preset.look;
         text.push_str(&format!(
-            "preset={}|#{:06x}|{}|{}|{}|{}|{}|{}|{}|{}|{}\n",
+            "preset={}|#{:06x}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}\n",
             preset.name,
             look.color,
             look.width,
             look.opacity,
             look.fade_ms,
-            look.trail,
+            0,
             look.smoothing,
             look.style,
             u32::from(look.ink),
             preset.key.mods,
-            preset.key.vk
+            preset.key.vk,
+            look.snap,
         ));
     }
     text
 }
 
-/// Flush the replacement before publishing it, so a failed save leaves the last file intact.
-fn save_file() -> std::io::Result<()> {
-    let Some(path) = path() else { return Ok(()) };
-    if let Some(directory) = path.parent() {
-        std::fs::create_dir_all(directory)?;
+/// Returns true on first run, when there was no settings file yet.
+pub fn load() -> bool {
+    let text = path().and_then(|path| std::fs::read_to_string(path).ok());
+    let first_run = text.is_none();
+    let (settings, list) = parse(text.as_deref().unwrap_or_default());
+    set(settings);
+    if let Some(list) = list {
+        set_presets(list);
     }
-    let temporary = path.with_extension("ini.tmp");
-    let mut file = std::fs::File::create(&temporary)?;
-    file.write_all(serialize(&get(), &presets()).as_bytes())?;
-    file.sync_all()?;
-    drop(file);
-    unsafe {
-        MoveFileExW(
-            &HSTRING::from(temporary.as_os_str()),
-            &HSTRING::from(path.as_os_str()),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    }
-    .map_err(std::io::Error::other)
+    first_run
 }
 
+/// Writes a temporary file and renames it over the old one, so a crash or full disk mid-write
+/// can't leave a truncated settings file behind.
 pub fn save() {
-    if let Err(error) = save_file() {
-        eprintln!("Could not save settings: {error}");
+    let Some(path) = path() else { return };
+    let text = serialize(&get(), &presets());
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let temporary = path.with_extension("ini.tmp");
+    if std::fs::write(&temporary, text).is_ok() {
+        let _ = std::fs::rename(&temporary, &path);
     }
 }
+
+// ---- Start with Windows --------------------------------------------------------------------------
+// The plain exe adds itself to the Run key. The Store build is packaged, where that key would be
+// virtualised away; it starts through the StartupTask its manifest declares (packaging/). The user
+// can turn that off in Task Manager and an organisation can decide it by policy, and Windows won't
+// let the app override either, so its state is always read back rather than assumed.
 
 const RUN_KEY: PCWSTR = w!(r"Software\Microsoft\Windows\CurrentVersion\Run");
 const RUN_VALUE: PCWSTR = w!("LaserPointer");
+/// Must match the TaskId in packaging/AppxManifest.xml.
+const STARTUP_TASK: &str = "LaserPointerStartup";
 
-fn registry_autostart() -> bool {
-    unsafe {
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Autostart {
+    Off,
+    On,
+    /// Turned off in Task Manager or Settings; only the user can turn it back on, there.
+    OffByUser,
+    /// Decided by the organisation's policy, on or off.
+    Policy(bool),
+    /// Not known yet: Windows is still answering.
+    Unknown,
+    /// Windows couldn't read or change it.
+    Failed,
+}
+
+fn packaged() -> bool {
+    static PACKAGED: OnceLock<bool> = OnceLock::new();
+    *PACKAGED.get_or_init(|| {
+        let mut length = 0;
+        unsafe { GetCurrentPackageFullName(&mut length, None) != APPMODEL_ERROR_NO_PACKAGE }
+    })
+}
+
+/// Asks where start-up stands, changing it first if `change` says so, and gives the answer to
+/// `answer`. The Run key answers at once, on this thread. The StartupTask is asked on a worker
+/// thread, so a slow answer from Windows never holds up the settings panel.
+pub fn autostart(change: Option<bool>, answer: impl FnOnce(Autostart) + Send + 'static) {
+    if packaged() {
+        std::thread::spawn(move || answer(startup_task(change)));
+    } else {
+        if let Some(on) = change {
+            set_run_key(on);
+        }
+        answer(run_key())
+    }
+}
+
+fn startup_task(change: Option<bool>) -> Autostart {
+    let state = (|| {
+        let task = StartupTask::GetAsync(&HSTRING::from(STARTUP_TASK))?.join()?;
+        match change {
+            Some(true) => return task.RequestEnableAsync()?.join(),
+            Some(false) => task.Disable()?,
+            None => {}
+        }
+        task.State()
+    })();
+    match state {
+        Ok(StartupTaskState::Enabled) => Autostart::On,
+        Ok(StartupTaskState::DisabledByUser) => Autostart::OffByUser,
+        Ok(StartupTaskState::EnabledByPolicy) => Autostart::Policy(true),
+        Ok(StartupTaskState::DisabledByPolicy) => Autostart::Policy(false),
+        Ok(_) => Autostart::Off,
+        Err(_) => Autostart::Failed,
+    }
+}
+
+fn run_key() -> Autostart {
+    let found = unsafe {
         RegGetValueW(
             HKEY_CURRENT_USER,
             RUN_KEY,
@@ -592,120 +606,34 @@ fn registry_autostart() -> bool {
             None,
         )
         .is_ok()
+    };
+    if found {
+        Autostart::On
+    } else {
+        Autostart::Off
     }
 }
 
-fn set_registry_autostart(on: bool) -> Result<()> {
+fn set_run_key(on: bool) {
     unsafe {
         if !on {
-            let result = RegDeleteKeyValueW(HKEY_CURRENT_USER, RUN_KEY, RUN_VALUE);
-            if result == windows::Win32::Foundation::ERROR_FILE_NOT_FOUND {
-                return Ok(());
-            }
-            return result.ok();
+            let _ = RegDeleteKeyValueW(HKEY_CURRENT_USER, RUN_KEY, RUN_VALUE);
+            return;
         }
-        let exe = std::env::current_exe().map_err(|error| {
-            windows::core::Error::new(windows::Win32::Foundation::E_FAIL, error.to_string())
-        })?;
+        let Ok(exe) = std::env::current_exe() else {
+            return;
+        };
         let command = HSTRING::from(format!("\"{}\"", exe.display()));
         // REG_SZ data includes the terminating null.
         let bytes = (command.len() + 1) * 2;
-        RegSetKeyValueW(
+        let _ = RegSetKeyValueW(
             HKEY_CURRENT_USER,
             RUN_KEY,
             RUN_VALUE,
             REG_SZ.0,
             Some(command.as_ptr().cast()),
             bytes as u32,
-        )
-        .ok()
-    }
-}
-
-/// Packaged apps need the manifest startup task because their Run key is virtualised.
-fn packaged() -> bool {
-    let mut length = 0;
-    unsafe { GetCurrentPackageFullName(&mut length, None) != APPMODEL_ERROR_NO_PACKAGE }
-}
-
-pub struct Autostart {
-    pub enabled: bool,
-    pub blocked: bool,
-}
-
-fn startup_state(state: StartupTaskState) -> Autostart {
-    Autostart {
-        enabled: matches!(
-            state,
-            StartupTaskState::Enabled | StartupTaskState::EnabledByPolicy
-        ),
-        blocked: matches!(
-            state,
-            StartupTaskState::DisabledByUser | StartupTaskState::DisabledByPolicy
-        ),
-    }
-}
-
-pub fn autostart() -> Result<Autostart> {
-    if packaged() {
-        return packaged_autostart(None);
-    }
-    Ok(Autostart {
-        enabled: registry_autostart(),
-        blocked: false,
-    })
-}
-
-pub fn set_autostart(on: bool) -> Result<Autostart> {
-    if packaged() {
-        return packaged_autostart(Some(on));
-    }
-    set_registry_autostart(on)?;
-    autostart()
-}
-
-/// Blocking WinRT completions must stay off the UI thread's STA.
-fn packaged_autostart(on: Option<bool>) -> Result<Autostart> {
-    std::thread::Builder::new()
-        .name("Startup task".into())
-        .spawn(move || {
-            unsafe {
-                RoInitialize(RO_INIT_MULTITHREADED)?;
-            }
-            let result = startup_task(on);
-            unsafe {
-                RoUninitialize();
-            }
-            result
-        })
-        .map_err(|error| {
-            windows::core::Error::new(windows::Win32::Foundation::E_FAIL, error.to_string())
-        })?
-        .join()
-        .map_err(|_| {
-            windows::core::Error::new(
-                windows::Win32::Foundation::E_FAIL,
-                "Startup task worker stopped unexpectedly",
-            )
-        })?
-}
-
-fn startup_task(on: Option<bool>) -> Result<Autostart> {
-    let task = StartupTask::GetAsync(&HSTRING::from("LaserPointerStartup"))?.join()?;
-    let state = task.State()?;
-    if matches!(
-        state,
-        StartupTaskState::DisabledByUser | StartupTaskState::DisabledByPolicy
-    ) {
-        return Ok(startup_state(state));
-    }
-    match on {
-        Some(true) => Ok(startup_state(task.RequestEnableAsync()?.join()?)),
-        Some(false) => {
-            task.Disable()?;
-            Ok(startup_state(task.State()?))
-        }
-        None => Ok(startup_state(state)),
+        );
     }
 }
 
@@ -714,70 +642,84 @@ mod tests {
     use super::*;
 
     #[test]
-    fn startup_states_follow_user_and_policy_choices() {
-        for (state, enabled, blocked) in [
-            (StartupTaskState::Disabled, false, false),
-            (StartupTaskState::Enabled, true, false),
-            (StartupTaskState::DisabledByUser, false, true),
-            (StartupTaskState::DisabledByPolicy, false, true),
-            (StartupTaskState::EnabledByPolicy, true, false),
-        ] {
-            let actual = startup_state(state);
-            assert_eq!((actual.enabled, actual.blocked), (enabled, blocked));
-        }
-    }
-
-    #[test]
-    fn settings_round_trip() {
-        let mut settings = Settings {
-            dot_cursor: false,
-            ripples: false,
-            indicator: false,
-            ..Settings::default()
-        };
-        settings.look.ink = true;
+    fn round_trips_settings_and_presets() {
+        let mut settings = Settings::default();
         settings.look.color = 0x123456;
-        settings.keys[Command::Redo.index()] = Binding::new(MOD_ALT.0, 0x71);
+        settings.look.snap = 80;
+        settings.cursor = cursors::index_of("chevron");
+        settings.game_focus = false;
+        settings.keys[Command::Redo.index()] = Binding::new(MOD_CONTROL.0, u32::from(b'R'));
         let mut presets = default_presets();
-        presets[0].name = "日本語 · café 🖊".into();
-        presets[0].key = Binding::new(MOD_CONTROL.0, 0x72);
-        let (parsed, list) = parse(&serialize(&settings, &presets));
+        presets[1].key = Binding::new(MOD_ALT.0, u32::from(b'H'));
+
+        let (parsed, parsed_presets) = parse(&serialize(&settings, &presets));
         assert_eq!(parsed, settings);
-        assert_eq!(list, Some(presets));
-        assert_eq!(parse(&serialize(&settings, &[])).1, Some(Vec::new()));
+        assert_eq!(parsed_presets, Some(presets));
     }
 
     #[test]
-    fn old_shortcuts_and_missing_redo() {
-        let (settings, presets) = parse("hotkey_mods=3\nhotkey_vk=75\n");
-        assert_eq!(settings.key(Command::Toggle), Binding::new(3, 75));
-        assert_eq!(
-            settings.key(Command::Redo),
-            Binding::new(MOD_CONTROL.0, u32::from(b'Y'))
-        );
-        assert!(presets.is_none());
-        let (settings, _) = parse("hotkey_mods=3\nhotkey_vk=75\nkey_toggle = 0,0\n");
-        assert_eq!(settings.key(Command::Toggle), Binding::NONE);
+    fn deleting_every_preset_sticks() {
+        let (_, presets) = parse(&serialize(&Settings::default(), &[]));
+        assert_eq!(presets, Some(Vec::new()));
     }
 
     #[test]
-    fn settings_and_presets_are_clamped() {
-        let (settings, presets) = parse("color=#ffffffff\nwidth=0\nopacity=999\nfade_ms=1\ntrail=99999\nsmoothing=99\nstyle=999\npreset=Pen|#ffffffff|999|0|99999|0|99|99|1|0|0\n");
-        assert_eq!(settings.look.color, 0xffffff);
-        assert_eq!(settings.look.width, 2);
-        assert_eq!(settings.look.opacity, 100);
-        assert_eq!(settings.look.fade_ms, 200);
-        assert_eq!(settings.look.trail, 2000);
-        assert_eq!(settings.look.smoothing, 8);
-        assert_eq!(settings.look.style, STYLE_NEON);
-        let look = presets.unwrap()[0].look;
-        assert_eq!(
-            (look.width, look.opacity, look.fade_ms, look.trail),
-            (24, 10, 5000, 100)
-        );
-        assert_eq!(
-            (look.color, look.smoothing, look.style),
-            (0xffffff, 8, STYLE_NEON)
-        );
+    fn empty_file_gives_defaults_and_keeps_default_presets() {
+        let (settings, presets) = parse("");
+        assert_eq!(settings, Settings::default());
+        assert_eq!(presets, None);
+    }
+
+    #[test]
+    fn loads_files_from_before_snap_redo_cursors_and_games() {
+        let old = "color=#ff2a2a\nwidth=6\nink=0\ndot_cursor=0\nkey_toggle=1,76\n\
+                   preset=Laser|#ff2a2a|4|100|1000|500|2|1|0|0|0\n";
+        let (settings, presets) = parse(old);
+        assert_eq!(settings.look.width, 6);
+        // The old dot-or-pen switch has nothing to map to; the default cursor takes over.
+        assert_eq!(settings.cursor, 0);
+        assert!(settings.game_focus);
+        assert_eq!(settings.key(Command::Redo), Command::Redo.default_binding());
+        let presets = presets.unwrap();
+        assert_eq!(presets.len(), 1);
+        assert_eq!(presets[0].look.snap, LASER.snap);
+    }
+
+    /// A file with both the old shortcut and a Toggle line, however spaced, keeps the Toggle line,
+    /// even when that line says Toggle has no shortcut.
+    #[test]
+    fn a_toggle_line_wins_over_the_old_single_hotkey() {
+        let (settings, _) = parse("hotkey_mods=2
+hotkey_vk=80
+key_toggle = 0,0
+");
+        assert!(!settings.key(Command::Toggle).is_set());
+    }
+
+    #[test]
+    fn the_old_single_hotkey_still_becomes_the_toggle() {
+        let (settings, _) = parse("hotkey_mods=2\nhotkey_vk=80\n");
+        assert_eq!(settings.key(Command::Toggle), Binding::new(2, 80));
+    }
+
+    #[test]
+    fn a_saved_cursor_loads_and_an_unknown_one_falls_back() {
+        let (settings, _) = parse("cursor=brackets\n");
+        assert_eq!(settings.cursor, cursors::index_of("brackets"));
+        let (settings, _) = parse("cursor=no-such-style\n");
+        assert_eq!(settings.cursor, 0);
+    }
+
+    #[test]
+    fn rejects_malformed_presets_and_bad_names() {
+        assert_eq!(parse_preset("Only|#ff0000|4"), None);
+        assert_eq!(parse_preset(" |#ff0000|4|100|1000|500|2|1|0|0|0"), None);
+        assert_eq!(parse_preset("Pen|red|4|100|1000|500|2|1|0|0|0"), None);
+    }
+
+    #[test]
+    fn clean_name_strips_separators_and_control_characters() {
+        assert_eq!(clean_name("  a|b\tc  "), "abc");
+        assert_eq!(clean_name(&"x".repeat(40)).len(), MAX_NAME);
     }
 }
