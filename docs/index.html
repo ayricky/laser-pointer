@@ -20,7 +20,7 @@
   document.documentElement.dataset.theme = theme;
 })();
 </script>
-<link rel="stylesheet" href="site.css?v=3">
+<link rel="stylesheet" href="site.css?v=4">
 <link rel="stylesheet" href="film.css?v=2">
 </head>
 <body>
@@ -44,6 +44,7 @@
   </section>
 
   <section class="film" id="film" aria-label="Laser Pointer, playing">
+    <div class="film-head" id="film-head" aria-hidden="true"><span class="brand"><img src="img/logo.svg?v=2" alt="">Laser Pointer <span>for Windows</span></span></div>
     <div class="monitor"><div id="screen"></div></div>
     <div class="deck">
       <div class="caption" aria-live="polite"><span class="num" id="cap-num">01</span><span class="text" id="cap">Point at it. It fades by itself.</span></div>
@@ -102,7 +103,7 @@
 <footer><div class="wrap"><span>© 2026 Ricardo Mariano</span><nav><a href="privacy.html">Privacy</a><a href="https://github.com/ayricky/laser-pointer">GitHub</a><a href="https://github.com/ayricky/laser-pointer/blob/main/LICENSE">MIT licence</a><a href="https://ko-fi.com/ayricky">Ko-fi</a></nav></div></footer>
 
 <script src="cursors.js?v=1"></script>
-<script src="laser.js?v=12"></script>
+<script src="laser.js?v=13"></script>
 <script src="kit.js?v=2"></script>
 <script src="film.js?v=5"></script>
 <script>
@@ -160,6 +161,9 @@ themeButton.addEventListener('click', () => {
   syncTheme();
 });
 syncTheme();
+// The name rides above the film once the hero's has scrolled away, as it has at #film.
+if ('IntersectionObserver' in window) new IntersectionObserver(([e]) => $('#film-head').classList.toggle('on', !e.isIntersecting)).observe($('.hero .brand'));
+else $('#film-head').classList.add('on');
 // Once the monitor has risen into place, so the first marks aim right.
 setTimeout(() => { if (!film.started) film.play(0); }, 700);
 </script>
