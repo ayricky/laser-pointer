@@ -111,6 +111,7 @@ fn kept_pieces_look_like_the_whole_stroke() {
             out
         };
         let now = Instant::now();
+        let everywhere = crate::stroke::Bounds { left: 0.0, top: 0.0, right: size as f32, bottom: size as f32 };
         for (style, smoothing) in [(STYLE_GLOW, 2), (STYLE_NEON, 0), (0, 4)] {
             let mut look = settings::get().look;
             (look.ink, look.style, look.smoothing, look.width) = (true, style, smoothing, 6);
@@ -124,14 +125,14 @@ fn kept_pieces_look_like_the_whole_stroke() {
                 })
                 .collect();
             let whole = pixels(&|| {
-                stroke::draw_kept_unsettled(&gfx.factory, &gfx.dc1, &gfx.brush, &stroke, &mut Scratch::default());
+                stroke::draw_kept(&gfx.factory, &gfx.dc1, &gfx.brush, &stroke, &mut Pieces::default(), everywhere, false, &mut Scratch::default());
             });
             let plain = pixels(&|| {
                 let mut copy = stroke.clone();
                 stroke::draw(&gfx.factory, &gfx.dc, &gfx.brush, &mut copy, now, 1.0, &mut Scratch::default());
             });
             let pieced = pixels(&|| {
-                stroke::draw_kept(&gfx.factory, &gfx.dc1, &gfx.brush, &stroke, &mut Pieces::default(), &mut Scratch::default());
+                stroke::draw_kept(&gfx.factory, &gfx.dc1, &gfx.brush, &stroke, &mut Pieces::default(), everywhere, true, &mut Scratch::default());
             });
             if let Ok(directory) = std::env::var("PIECES_DUMP") {
                 for (name, data) in [("whole", &whole), ("plain", &plain), ("pieced", &pieced)] {
@@ -216,6 +217,135 @@ fn a_growing_kept_stroke_leaves_what_a_full_repaint_shows() {
     }
 }
 
+/// Undoing a kept stroke that a fading one still holds back from the ink layer leaves nothing
+/// of it on screen, though only its growing end was repainted while it was drawn.
+#[test]
+#[ignore = "needs a GPU"]
+fn undoing_a_kept_stroke_leaves_nothing_behind() {
+    unsafe {
+        let size = 900u32;
+        let hwnd = hidden_window(0, 0, size as i32, size as i32);
+        let gfx = Graphics::new(hwnd, size, size).unwrap();
+        let mut app = App::new(hwnd, gfx, (0, 0), (size, size));
+        let waitable = app.waitable().unwrap();
+        let frame = |app: &mut App| {
+            WaitForSingleObject(waitable, 100);
+            app.dirty = true;
+            app.render();
+        };
+        let now = Instant::now();
+        let mut laser = settings::get().look;
+        (laser.ink, laser.fade_ms) = (false, 5000);
+        let mut fading = Stroke::new(Point { x: 100.0, y: 100.0, at: now }, laser, 1.0);
+        fading.points.push(Point { x: 200.0, y: 120.0, at: now });
+        app.strokes.push(Drawn::new(1, fading));
+        let mut ink = laser;
+        ink.ink = true;
+        app.strokes.push(Drawn::new(2, Stroke::new(Point { x: 450.0, y: 450.0, at: now }, ink, 1.0)));
+        app.undo.push(crate::Edit::Added(2));
+        app.drawing = true;
+        for i in 1..900 {
+            let t = i as f32 * 0.02;
+            let r = 20.0 + t * 13.0;
+            app.strokes[1].stroke.points.push(Point { x: 450.0 + r * t.cos(), y: 450.0 + r * t.sin(), at: now });
+            if i % 4 == 0 {
+                frame(&mut app);
+            }
+        }
+        app.drawing = false;
+        frame(&mut app);
+        assert!(!app.strokes[1].baked, "the fading stroke should still hold it back");
+        app.undo();
+        for _ in 0..3 {
+            frame(&mut app);
+        }
+        let after = app.gfx.as_ref().unwrap().read_back();
+        app.presented = false;
+        frame(&mut app);
+        app.presented = false;
+        frame(&mut app);
+        let repainted = app.gfx.as_ref().unwrap().read_back();
+        let differ = after.chunks(4).zip(repainted.chunks(4)).filter(|(a, b)| a[3].abs_diff(b[3]) > 24).count();
+        eprintln!("{differ} pixels left behind");
+        assert_eq!(differ, 0);
+    }
+}
+
+/// Clearing kept strokes fades the ink layer out as one picture: once the fade is over nothing
+/// is left, and undoing the clear brings every stroke back.
+#[test]
+#[ignore = "needs a GPU"]
+fn a_clear_fades_away_and_undoes() {
+    unsafe {
+        let size = 900u32;
+        let hwnd = hidden_window(0, 0, size as i32, size as i32);
+        let gfx = Graphics::new(hwnd, size, size).unwrap();
+        let mut app = App::new(hwnd, gfx, (0, 0), (size, size));
+        let waitable = app.waitable().unwrap();
+        let frame = |app: &mut App| {
+            WaitForSingleObject(waitable, 100);
+            app.dirty = true;
+            app.render();
+        };
+        let now = Instant::now();
+        let mut ink = settings::get().look;
+        ink.ink = true;
+        for k in 0..5u64 {
+            let mut stroke = Stroke::new(Point { x: 0.0, y: 0.0, at: now }, ink, 1.0);
+            stroke.points = (0..300).map(|i| Point { x: 100.0 + i as f32 * 2.3, y: 150.0 + k as f32 * 140.0 + (i as f32 * 0.05).sin() * 40.0, at: now }).collect();
+            app.strokes.push(Drawn::new(k + 1, stroke));
+        }
+        let shown = |app: &mut App| {
+            for _ in 0..3 {
+                frame(app);
+            }
+            app.gfx.as_ref().unwrap().read_back()
+        };
+        let repainted = |app: &mut App| {
+            app.presented = false;
+            frame(app);
+            app.presented = false;
+            frame(app);
+            app.gfx.as_ref().unwrap().read_back()
+        };
+        let painted = |pixels: &[u8]| pixels.chunks(4).filter(|p| p[3] > 0).count();
+        let before = shown(&mut app);
+        assert!(app.strokes.iter().all(|drawn| drawn.baked));
+        app.clear(|_| true);
+        // The back buffer holds the frame before last.
+        frame(&mut app);
+        frame(&mut app);
+        let fading = app.gfx.as_ref().unwrap().read_back();
+        let alpha = |pixels: &[u8]| pixels.chunks(4).map(|p| u64::from(p[3])).sum::<u64>();
+        assert!(alpha(&fading) < alpha(&before) && alpha(&fading) > 0, "the ink should be fading, not gone or whole");
+        std::thread::sleep(Duration::from_secs_f32(crate::CLEAR_SECS));
+        let gone = shown(&mut app);
+        assert_eq!(painted(&gone), 0, "ink left after the fade");
+        app.undo();
+        let back = shown(&mut app);
+        let full = repainted(&mut app);
+        let differ = back.chunks(4).zip(full.chunks(4)).filter(|(a, b)| a[3].abs_diff(b[3]) > 24).count();
+        eprintln!("{} painted before, {} after undo, {differ} differ from a full repaint", painted(&before), painted(&back));
+        assert!(differ == 0 && painted(&back) * 100 > painted(&before) * 99);
+
+        // Undoing one kept stroke that crosses the others repairs only where it was, and the
+        // strokes it crossed come back whole there.
+        let mut across = Stroke::new(Point { x: 0.0, y: 0.0, at: now }, ink, 1.0);
+        across.points = (0..300).map(|i| Point { x: 450.0 + (i as f32 * 0.04).sin() * 60.0, y: 80.0 + i as f32 * 2.5, at: now }).collect();
+        app.strokes.push(Drawn::new(6, across));
+        app.undo.push(crate::Edit::Added(6));
+        let _ = shown(&mut app);
+        assert!(app.strokes.iter().all(|drawn| drawn.baked));
+        app.undo();
+        let after = shown(&mut app);
+        let full = repainted(&mut app);
+        let differ = after.chunks(4).zip(full.chunks(4)).filter(|(a, b)| a[3].abs_diff(b[3]) > 24).count();
+        let still = after.chunks(4).zip(before.chunks(4)).filter(|(a, b)| a[3].abs_diff(b[3]) > 24).count();
+        eprintln!("after undoing the crossing stroke: {differ} differ from a full repaint, {still} from before it was drawn");
+        assert!(differ == 0 && still == 0);
+    }
+}
+
 #[test]
 #[ignore = "prints timings"]
 fn perf_report() {
@@ -245,6 +375,34 @@ fn perf_report() {
             let cursor = app.render_cursor(key).unwrap();
             let _ = windows::Win32::UI::WindowsAndMessaging::DestroyCursor(cursor);
         });
+        // Every cursor frame the laser's ignite and press will need, made ahead while idle, so
+        // none is made mid-animation. Then an ignite at the display's rate finds them all.
+        {
+            let started = Instant::now();
+            let mut made = 0;
+            while app.warm_cursor() {
+                made += 1;
+            }
+            eprintln!("{:<44} {made} frames in {:.1} ms", "cursor frames made ahead", started.elapsed().as_secs_f64() * 1000.0);
+            let settings = settings::get();
+            let motion = crate::cursors::STYLES[settings.cursor].motion;
+            let mut position = windows::Win32::Foundation::POINT::default();
+            let _ = windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut position);
+            let dpi = crate::monitor_dpi(position);
+            let mut missing = 0;
+            for frame in 0..=60 {
+                let k = frame as f32 * 0.00408 / motion.ignite_secs();
+                for press in [0.0, frame as f32 / 60.0] {
+                    let (zoom, turn) = motion.pose(k.min(1.0), if k >= 1.0 { press } else { 0.0 });
+                    let key = CursorKey { style: settings.cursor, color: settings.look.color, dpi, step: crate::zoom_step(zoom), turn: crate::turn_step(turn) };
+                    if !app.pointer.cursors.iter().any(|(cached, _)| *cached == key) {
+                        missing += 1;
+                    }
+                }
+            }
+            eprintln!("{:<44} {missing}", "ignite or press frames not made ahead");
+            assert_eq!(missing, 0);
+        }
         time("tray icon", 20, || {
             let svg = crate::tray_svg(true, 0xff2a2a);
             let icon = app.gfx.as_ref().unwrap().svg_icon(&svg, 24, None, 1.0, 0.0).unwrap();
@@ -383,6 +541,40 @@ fn perf_report() {
             app.dirty = true;
             frame(&mut app)
         });
+
+        // Clearing a screenful of kept strokes: every frame of the short fade that follows.
+        {
+            let mut ink = settings::get().look;
+            ink.ink = true;
+            app.strokes.clear();
+            for k in 0..30u64 {
+                let mut stroke = Stroke::new(Point { x: 0.0, y: 0.0, at: now }, ink, 1.0);
+                stroke.points = (0..800)
+                    .map(|i| {
+                        let t = i as f32 * 0.01;
+                        Point { x: 300.0 + (k % 6) as f32 * 900.0 + 300.0 * (t * 1.3).sin(), y: 300.0 + (k / 6) as f32 * 900.0 + 300.0 * (t * 0.9 + k as f32).cos(), at: now }
+                    })
+                    .collect();
+                app.strokes.push(Drawn::new(100 + k, stroke));
+            }
+            frame(&mut app);
+            frame(&mut app);
+            let mut times = Vec::new();
+            for _ in 0..5 {
+                app.clear(|_| true);
+                let started = Instant::now();
+                while started.elapsed().as_secs_f32() < crate::CLEAR_SECS {
+                    times.push(frame(&mut app));
+                }
+                frame(&mut app);
+                app.undo();
+                frame(&mut app);
+                frame(&mut app);
+            }
+            times.sort();
+            eprintln!("{:<44} median {:>7.3} ms   worst {:>7.3} ms", "frame while 30 kept strokes clear", times[times.len() / 2].as_secs_f64() * 1000.0, times[times.len() - 1].as_secs_f64() * 1000.0);
+            app.strokes.clear();
+        }
 
         // The longest trails a fast hand leaves: a 1000 Hz mouse moving 4,000 px a second the
         // whole time, for a Laser's one-second fade and a Highlighter's three.

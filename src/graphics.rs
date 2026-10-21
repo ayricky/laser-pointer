@@ -4,7 +4,7 @@
 use windows::core::{w, Interface, Result, HRESULT};
 use windows::Win32::Foundation::{CloseHandle, E_FAIL, HANDLE, HWND, RECT};
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_F,
+    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_COMPOSITE_MODE_SOURCE_COPY, D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_F,
     D2D_SIZE_U,
 };
 use windows::Win32::Graphics::Direct2D::{
@@ -12,7 +12,7 @@ use windows::Win32::Graphics::Direct2D::{
     ID2D1SolidColorBrush, D2D1_BITMAP_OPTIONS, D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
     D2D1_BITMAP_OPTIONS_CPU_READ, D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1,
     D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_FACTORY_TYPE_SINGLE_THREADED,
-    D2D1_MAP_OPTIONS_READ, D2D1_ROUNDED_RECT,
+    D2D1_MAP_OPTIONS_READ, D2D1_ROUNDED_RECT, D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
 };
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE, D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP,
@@ -101,6 +101,8 @@ pub struct Graphics {
     target: Option<ID2D1Bitmap1>,
     /// Kept strokes, drawn once and copied into each frame; created on first use.
     ink: Option<ID2D1Bitmap1>,
+    /// The ink layer as it was when everything in it was cleared, fading out.
+    fading: Option<ID2D1Bitmap1>,
     pub brush: ID2D1SolidColorBrush,
     dwrite: IDWriteFactory,
     dxgi: IDXGIDevice,
@@ -205,6 +207,7 @@ impl Graphics {
             dc1,
             target: None,
             ink: None,
+            fading: None,
             brush,
             dwrite,
             dxgi,
@@ -253,6 +256,7 @@ impl Graphics {
     /// The kept-stroke layer is dropped too; the caller re-bakes it.
     pub unsafe fn resize(&mut self, width: u32, height: u32) -> Result<()> {
         self.ink = None;
+        self.fading = None;
         self.size = (width, height);
         if self.trimmed {
             return Ok(());
@@ -269,6 +273,10 @@ impl Graphics {
         self.ink = None;
         self.resize_buffers(TRIMMED, TRIMMED)?;
         self.trimmed = true;
+        // Direct2D keeps textures from large layers and fills cached; let them go too.
+        if let Ok(device) = self.dc.GetDevice() {
+            device.ClearResources(0);
+        }
         if let Ok(device) = self.dxgi.cast::<IDXGIDevice3>() {
             device.Trim();
         }
@@ -311,21 +319,40 @@ impl Graphics {
         drawn
     }
 
-    pub fn drop_ink(&mut self) {
-        self.ink = None;
+    /// Empties the kept-stroke layer, keeping it rather than allocating a screenful again.
+    pub unsafe fn clear_ink(&mut self) -> Result<()> {
+        self.retarget(|gfx| unsafe { gfx.dc.Clear(Some(&D2D1_COLOR_F::default())) })
     }
 
-    /// Copies the kept strokes under `area` into the frame being drawn.
-    pub unsafe fn draw_ink(&self, area: D2D_RECT_F) {
-        if let Some(ink) = &self.ink {
-            self.dc.DrawBitmap(
+    /// Sets the whole ink layer aside to fade out, leaving none: the next kept stroke starts a
+    /// new one.
+    pub fn fade_ink(&mut self) {
+        self.fading = self.ink.take();
+    }
+
+    pub fn end_fade(&mut self) {
+        self.fading = None;
+    }
+
+    /// Draws what is fading out under `area`, `opacity` times as opaque as it was.
+    pub unsafe fn draw_fading(&self, area: D2D_RECT_F, opacity: f32) {
+        if let Some(fading) = &self.fading {
+            self.dc.DrawBitmap(fading, Some(&area), opacity, D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR, Some(&area), None);
+        }
+    }
+
+    /// Starts `area` of the frame being drawn with the kept strokes under it, or with nothing.
+    /// Copying replaces what was there, so the area needn't be cleared first as well.
+    pub unsafe fn start_with_ink(&self, area: D2D_RECT_F) {
+        match &self.ink {
+            Some(ink) => self.dc.DrawImage(
                 ink,
+                Some(&Vector2 { X: area.left, Y: area.top }),
                 Some(&area),
-                1.0,
-                windows::Win32::Graphics::Direct2D::D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
-                Some(&area),
-                None,
-            );
+                D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
+                D2D1_COMPOSITE_MODE_SOURCE_COPY,
+            ),
+            None => self.dc.Clear(Some(&D2D1_COLOR_F::default())),
         }
     }
 

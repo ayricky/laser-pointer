@@ -307,7 +307,6 @@ pub fn apply_preset(index: usize) -> Option<String> {
     let mut settings = get();
     settings.look = preset.look;
     set(settings);
-    save();
     Some(preset.name)
 }
 

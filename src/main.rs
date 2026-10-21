@@ -88,8 +88,9 @@ const TIMER_SAVE: usize = 6;
 const GAME_CHECK_MS: u32 = 300;
 const PASSTHROUGH_MS: u32 = 80;
 const RECOVER_MS: u32 = 1000;
-const TRIM_MS: u32 = 3000;
-/// Ctrl+scroll saves the new thickness once the wheel stops, not at every notch.
+/// Long enough that turning the laser back on during a talk finds its buffers still there.
+const TRIM_MS: u32 = 30_000;
+/// How long after a change from a shortcut or the wheel the settings are saved.
 const SAVE_MS: u32 = 700;
 
 // wParam flag on WM_MOUSEWHEEL.
@@ -380,6 +381,8 @@ struct App {
     redo: Vec<Redo>,
     /// Strokes fading out after a clear.
     clearing: Vec<Stroke>,
+    /// Where the ink layer, set aside whole, is fading out after a clear.
+    fading_ink: Option<Bounds>,
     cleared_at: Instant,
     ripples: Vec<Ripple>,
     toast: Option<(Toast, Instant)>,
@@ -484,9 +487,16 @@ unsafe fn run() {
             Some(handle) => std::slice::from_ref(handle),
             None => &[],
         };
-        let timeout = with_app(|app| app.wake_in())
-            .flatten()
-            .map_or(INFINITE, |wait: Duration| wait.as_millis().min(u128::from(INFINITE - 1)) as u32 + 1);
+        // With nothing to draw, the time goes to making cursor frames ahead of need; while
+        // there are more to make, the loop only looks for messages before the next.
+        let warming = waitable.is_none() && with_app(App::warm_cursor).unwrap_or(false);
+        let timeout = if warming {
+            0
+        } else {
+            with_app(|app| app.wake_in())
+                .flatten()
+                .map_or(INFINITE, |wait: Duration| wait.as_millis().min(u128::from(INFINITE - 1)) as u32 + 1)
+        };
         let woke =
             MsgWaitForMultipleObjectsEx(Some(handles), timeout, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
         while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
@@ -500,8 +510,8 @@ unsafe fn run() {
         if rendered {
             with_app(App::render);
         }
-        // Explorer can be slow to answer, so the tray waits until the frame is out.
-        if rendered || waitable.is_none() {
+        // Explorer can be slow to answer, so the tray waits until any frame is out.
+        if rendered || !with_app(|app| app.needs_frame()).unwrap_or(false) {
             ui::flush_tray();
         }
     }
@@ -565,7 +575,7 @@ pub fn run_command(command: Command) {
             let mut current = settings::get();
             current.look.ink = !current.look.ink;
             settings::set(current);
-            settings::save();
+            save_soon();
             with_app(|app| {
                 // Turning it off lets go of what was kept, as well as what comes next.
                 if !current.look.ink {
@@ -600,6 +610,15 @@ pub fn apply_preset(index: usize) {
     if let Some(name) = settings::apply_preset(index) {
         with_app(|app| app.notify(&name));
         settings_changed();
+        save_soon();
+    }
+}
+
+/// Saves the settings shortly, once a burst of changes from shortcuts or the wheel is over, so
+/// writing the file never holds up the notice saying what changed.
+fn save_soon() {
+    unsafe {
+        SetTimer(Some(overlay()), TIMER_SAVE, SAVE_MS, None);
     }
 }
 
@@ -626,7 +645,7 @@ pub fn sync_hotkeys() {
         for index in 0..MAX_PRESETS as i32 {
             let _ = UnregisterHotKey(hwnd, HOTKEY_PRESET + index);
         }
-        if ui::panel_open() {
+        if ui::panel_wants_keys() {
             return;
         }
         let on = laser_on();
@@ -661,8 +680,8 @@ pub fn hotkey_failed(slot: Slot) -> bool {
     HOTKEY_FAILED.load(Ordering::Relaxed) & (1 << bit) != 0
 }
 
-/// Whether another app already holds this combination. Only meaningful while the panel is
-/// open, when this app has let go of all of its own.
+/// Whether another app already holds this combination. Only meaningful while the panel records
+/// a shortcut, when this app has let go of all of its own.
 pub fn shortcut_free(binding: Binding) -> bool {
     unsafe {
         let free = register(HOTKEY_PROBE, binding);
@@ -808,6 +827,8 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                         let _ = KillTimer(Some(hwnd), TIMER_PASSTHROUGH);
                         if laser_on() {
                             set_click_through(hwnd, false);
+                            // The app underneath put up its own cursor for the click it got.
+                            repick_cursor();
                         }
                     }
                     TIMER_RECOVER => {
@@ -1013,6 +1034,7 @@ impl App {
             undo: Vec::new(),
             redo: Vec::new(),
             clearing: Vec::new(),
+            fading_ink: None,
             cleared_at: Instant::now(),
             ripples: Vec::new(),
             toast: None,
@@ -1036,7 +1058,7 @@ impl App {
 
     fn shutdown(&mut self) {
         games::remove_hook(self.foreground_hook);
-        // A thickness change may still be waiting to be saved.
+        // A change may still be waiting to be saved.
         if unsafe { KillTimer(Some(self.hwnd), TIMER_SAVE) }.is_ok() {
             settings::save();
         }
@@ -1082,6 +1104,7 @@ impl App {
             || !self.ripples.is_empty()
             || self.toast_fading(Instant::now())
             || !self.clearing.is_empty()
+            || self.fading_ink.is_some()
             || (self.pointer.moving && laser_on())
     }
 
@@ -1108,6 +1131,7 @@ impl App {
             || !self.ripples.is_empty()
             || self.toast.is_some()
             || !self.clearing.is_empty()
+            || self.fading_ink.is_some()
     }
 
     fn update_ink_visible(&self) {
@@ -1129,7 +1153,9 @@ impl App {
     /// Throws the ink layer away and bakes every kept stroke again on the next frame.
     fn rebake(&mut self) {
         if let Some(gfx) = &mut self.gfx {
-            gfx.drop_ink();
+            if unsafe { gfx.clear_ink() }.is_err() {
+                self.lose_device();
+            }
         }
         for drawn in &mut self.strokes {
             drawn.baked = false;
@@ -1154,7 +1180,8 @@ impl App {
 
     fn set_on(&mut self, on: bool) {
         LASER_ON.store(on, Ordering::Relaxed);
-        self.finish();
+        // A stroke cut short by switching off isn't a shape the user finished.
+        self.finish_stroke(true);
         self.ripples.clear();
         self.toast = None;
         self.dirty = true;
@@ -1258,7 +1285,11 @@ impl App {
                 if unsafe { gfx.untrim() }.is_err() {
                     self.lose_device();
                 }
+                // Both buffers are new: the first frame paints one whole, and this the other.
                 self.presented = false;
+                let mut whole = Region::default();
+                whole.add(self.full());
+                self.stale = [whole; 2];
             }
         }
         self.render_now();
@@ -1274,7 +1305,7 @@ impl App {
     fn render_now(&mut self) {
         if let Some(gfx) = self.gfx.as_ref().filter(|gfx| !gfx.trimmed) {
             unsafe {
-                WaitForSingleObject(gfx.waitable(), 100);
+                WaitForSingleObject(gfx.waitable(), 20);
             }
         }
         self.render();
@@ -1316,10 +1347,11 @@ impl App {
         match unsafe { Graphics::new(self.hwnd, width, height) } {
             Ok(gfx) => {
                 self.gfx = Some(gfx);
-                // Tessellations belonged to the device that went.
+                // Tessellations belonged to the device that went, as did any ink fading out.
                 for drawn in &mut self.strokes {
                     drawn.pieces.clear();
                 }
+                self.fading_ink = None;
                 self.presented = false;
                 self.stale = Default::default();
                 self.pointer.current = None;
@@ -1355,7 +1387,11 @@ impl App {
         let centre = ((work.left + work.right) / 2 - self.origin.0) as f32;
         let bottom = (work.bottom - self.origin.1) as f32 - 72.0 * scale;
         let Some(gfx) = &self.gfx else { return };
-        self.toast = unsafe { gfx.make_toast(text, centre, bottom, scale) }.map(|toast| (toast, Instant::now()));
+        let now = Instant::now();
+        // A notice replacing one already up (scrolling the thickness, say) stays up.
+        let showing = self.toast.as_ref().is_some_and(|(_, at)| now.duration_since(*at).as_secs_f32() >= TOAST_IN);
+        let at = if showing { now.checked_sub(Duration::from_secs_f32(TOAST_IN)).unwrap_or(now) } else { now };
+        self.toast = unsafe { gfx.make_toast(text, centre, bottom, scale) }.map(|toast| (toast, at));
         self.dirty = true;
         self.show();
     }
@@ -1604,10 +1640,55 @@ impl App {
         let index = self.strokes.iter().position(|drawn| drawn.id == id)?;
         let mut drawn = self.strokes.remove(index);
         drawn.settle();
+        drawn.pieces.clear();
         if drawn.baked {
-            self.rebake();
+            if let Some(bounds) = drawn.stroke.bounds() {
+                self.repair_ink(bounds);
+            }
+        } else if let Some(bounds) = drawn.stroke.bounds() {
+            // Only its growing end may have been repainted lately; the rest is still on screen.
+            self.damage_ink(bounds);
         }
         Some(drawn)
+    }
+
+    /// Draws the kept strokes under `area` into the ink layer again, as if the one just taken
+    /// away had never been there. Baking everything again would redraw the whole screen.
+    fn repair_ink(&mut self, area: Bounds) {
+        let Some(gfx) = &mut self.gfx else { return };
+        let (strokes, scratch) = (&mut self.strokes, &mut self.scratch);
+        let repaired = unsafe {
+            gfx.bake(|gfx| {
+                gfx.dc.PushAxisAlignedClip(&graphics::rect_f(area), D2D1_ANTIALIAS_MODE_ALIASED);
+                gfx.dc.Clear(Some(&D2D1_COLOR_F::default()));
+                for drawn in strokes.iter_mut().filter(|drawn| drawn.baked) {
+                    if !drawn.stroke.bounds().is_some_and(|bounds| intersects(bounds, area)) {
+                        continue;
+                    }
+                    if stroke::grows(&drawn.stroke) {
+                        stroke::draw_kept(&gfx.factory, &gfx.dc1, &gfx.brush, &drawn.stroke, &mut drawn.pieces, area, false, scratch);
+                        drawn.pieces.clear();
+                    } else {
+                        stroke::draw(&gfx.factory, &gfx.dc, &gfx.brush, &mut drawn.stroke, Instant::now(), 1.0, scratch);
+                    }
+                }
+                gfx.dc.PopAxisAlignedClip();
+            })
+        };
+        if repaired.is_err() {
+            self.rebake();
+        }
+        self.damage_ink(area);
+    }
+
+    /// Stops a clear's fade at once, as when it's undone.
+    fn end_fade(&mut self) {
+        if let Some(area) = self.fading_ink.take() {
+            if let Some(gfx) = &mut self.gfx {
+                gfx.end_fade();
+            }
+            self.damage_ink(area);
+        }
     }
 
     /// Puts strokes back where they were in drawing order (ids grow as strokes are drawn), so
@@ -1650,6 +1731,7 @@ impl App {
                         continue;
                     }
                     self.clearing.clear();
+                    self.end_fade();
                     self.redo.push(Redo::Clear(restored.iter().map(|drawn| drawn.id).collect()));
                     self.restore(restored);
                     break;
@@ -1690,7 +1772,7 @@ impl App {
 
     /// Fades out the strokes `which` picks, as one undoable step.
     fn clear(&mut self, which: impl Fn(&Drawn) -> bool) {
-        self.finish();
+        self.finish_stroke(true);
         let (gone, kept): (Vec<Drawn>, Vec<Drawn>) = std::mem::take(&mut self.strokes)
             .into_iter()
             .partition(|drawn| which(drawn));
@@ -1701,11 +1783,24 @@ impl App {
         let mut gone = gone;
         for drawn in &mut gone {
             drawn.settle();
+            drawn.pieces.clear();
         }
-        if gone.iter().any(|drawn| drawn.baked) {
-            self.rebake();
+        let ink_gone = gone.iter().any(|drawn| drawn.baked);
+        if ink_gone && !self.strokes.iter().any(|drawn| drawn.baked) {
+            // Everything in the ink layer goes, so the layer fades out as one picture, not each
+            // of its strokes drawn again every frame of the fade.
+            self.end_fade();
+            if let Some(gfx) = &mut self.gfx {
+                gfx.fade_ink();
+            }
+            self.fading_ink = gone.iter().filter(|drawn| drawn.baked).filter_map(|drawn| drawn.stroke.bounds()).reduce(Bounds::union);
+            self.clearing = gone.iter().filter(|drawn| !drawn.baked).map(|drawn| drawn.stroke.clone()).collect();
+        } else {
+            if ink_gone {
+                self.rebake();
+            }
+            self.clearing = gone.iter().map(|drawn| drawn.stroke.clone()).collect();
         }
-        self.clearing = gone.iter().map(|drawn| drawn.stroke.clone()).collect();
         self.cleared_at = Instant::now();
         self.undo.push(Edit::Cleared(gone));
         self.redo.clear();
@@ -1731,9 +1826,7 @@ impl App {
         let width = settings.look.width as i32 + i32::from(delta.signum());
         settings.look.width = width.clamp(2, 24) as u32;
         settings::set(settings);
-        unsafe {
-            SetTimer(Some(self.hwnd), TIMER_SAVE, SAVE_MS, None);
-        }
+        save_soon();
         self.notify(&format!("Thickness  {} px", settings.look.width));
     }
 
@@ -1765,6 +1858,8 @@ impl App {
         for stroke in &mut self.clearing {
             stroke.translate(dx, dy);
         }
+        // The layer set aside to fade went with the old buffers.
+        self.fading_ink = None;
         for ripple in &mut self.ripples {
             ripple.x += dx;
             ripple.y += dy;
@@ -1843,6 +1938,41 @@ impl App {
         // Only once the replacement is showing can the old ones go.
         self.pointer.evict(key);
     }
+    /// Makes one cursor frame the laser will need when it next ignites or is pressed, so none
+    /// has to be made mid-animation, where each costs a wait for the GPU. Returns whether it
+    /// made one, and so whether more may remain.
+    fn warm_cursor(&mut self) -> bool {
+        if !animations_enabled() {
+            return false;
+        }
+        let settings = settings::get();
+        let motion = cursors::STYLES[settings.cursor].motion;
+        let mut position = POINT::default();
+        if unsafe { GetCursorPos(&mut position) }.is_err() {
+            return false;
+        }
+        let dpi = monitor_dpi(position);
+        // Finely enough that no step of zoom or turn is skipped between samples.
+        let igniting = (0..=96).map(|i| motion.pose(i as f32 / 96.0, 0.0));
+        let pressing = (0..=32).map(|i| motion.pose(1.0, i as f32 / 32.0));
+        for (zoom, turn) in igniting.chain(pressing) {
+            let key = CursorKey {
+                style: settings.cursor,
+                color: settings.look.color,
+                dpi,
+                step: zoom_step(zoom),
+                turn: turn_step(turn),
+            };
+            if self.pointer.cursors.iter().any(|(cached, _)| *cached == key) {
+                continue;
+            }
+            let Some(cursor) = self.render_cursor(key) else { return false };
+            self.pointer.cursors.push((key, cursor));
+            return true;
+        }
+        false
+    }
+
     fn render_cursor(&self, key: CursorKey) -> Option<HCURSOR> {
         let style = &cursors::STYLES[key.style];
         let scale = key.dpi as f32 / 96.0;
@@ -1857,6 +1987,7 @@ impl App {
     }
     /// Bakes finished kept strokes into the ink layer, so they cost nothing to keep on screen.
     fn bake_finished(&mut self) {
+        let everywhere = self.full();
         let Some(gfx) = &mut self.gfx else { return };
         let (last, drawing) = (self.strokes.len().wrapping_sub(1), self.drawing);
         // Baking puts a stroke beneath everything still live, so it waits until every stroke
@@ -1882,7 +2013,7 @@ impl App {
                 for &index in &ready {
                     let Drawn { stroke, pieces, .. } = &mut strokes[index];
                     if stroke::grows(stroke) {
-                        stroke::draw_kept(&gfx.factory, &gfx.dc1, &gfx.brush, stroke, pieces, scratch);
+                        stroke::draw_kept(&gfx.factory, &gfx.dc1, &gfx.brush, stroke, pieces, everywhere, false, scratch);
                     } else {
                         stroke::draw(&gfx.factory, &gfx.dc, &gfx.brush, stroke, Instant::now(), 1.0, scratch);
                     }
@@ -1929,6 +2060,11 @@ impl App {
         }
         if now.duration_since(self.cleared_at).as_secs_f32() >= CLEAR_SECS {
             self.clearing.clear();
+            if self.fading_ink.take().is_some() {
+                if let Some(gfx) = &mut self.gfx {
+                    gfx.end_fade();
+                }
+            }
         }
         let last = self.strokes.len().wrapping_sub(1);
         let drawing = self.drawing;
@@ -1956,9 +2092,12 @@ impl App {
             .iter()
             .map(|drawn| if drawn.baked { None } else { drawn.stroke.bounds() })
             .collect();
-        for (drawn, bounds) in self.strokes.iter().zip(&live) {
-            // A kept stroke being drawn changes only where it's still growing.
-            let settled = if stroke::grows(&drawn.stroke) { drawn.pieces.settled() } else { 0 };
+        let growing = if self.drawing { self.strokes.len().checked_sub(1) } else { None };
+        for (index, (drawn, bounds)) in self.strokes.iter().zip(&live).enumerate() {
+            // A kept stroke being drawn changes only where it's still growing. Any other is
+            // repainted whole: it may have just come back from an undo, or be on its way out.
+            let still_growing = growing == Some(index) && stroke::grows(&drawn.stroke);
+            let settled = if still_growing { drawn.pieces.settled() } else { 0 };
             let changing = if settled > 0 { drawn.stroke.bounds_from(settled) } else { *bounds };
             if let Some(changing) = changing {
                 moving.add(changing);
@@ -1969,10 +2108,14 @@ impl App {
                 moving.add(bounds);
             }
         }
+        if let Some(area) = self.fading_ink {
+            moving.add(area);
+        }
         for ripple in &self.ripples {
             moving.add(ripple_bounds(ripple));
         }
-        if let Some((toast, _)) = &self.toast {
+        // A notice holding still is repainted only where something else changes over it.
+        if let Some((toast, _)) = self.toast.as_ref().filter(|_| self.toast_fading(now)) {
             moving.add(Graphics::toast_bounds(toast));
         }
 
@@ -2032,15 +2175,17 @@ impl App {
                     bottom: clip.bottom,
                 };
                 gfx.dc.PushAxisAlignedClip(&clip, D2D1_ANTIALIAS_MODE_ALIASED);
-                gfx.dc.Clear(Some(&D2D1_COLOR_F::default()));
-                gfx.draw_ink(clip);
+                gfx.start_with_ink(clip);
+                if self.fading_ink.is_some() {
+                    gfx.draw_fading(clip, clear_fade * clear_fade);
+                }
                 for (drawn, bounds) in self.strokes.iter_mut().zip(&live) {
                     if !bounds.is_some_and(|bounds| intersects(bounds, area)) {
                         continue;
                     }
                     let (stroke, pieces) = (&mut drawn.stroke, &mut drawn.pieces);
                     if stroke::grows(stroke) {
-                        stroke::draw_kept(&gfx.factory, &gfx.dc1, &gfx.brush, stroke, pieces, &mut self.scratch);
+                        stroke::draw_kept(&gfx.factory, &gfx.dc1, &gfx.brush, stroke, pieces, area, true, &mut self.scratch);
                     } else {
                         stroke::draw(&gfx.factory, &gfx.dc, &gfx.brush, stroke, now, 1.0, &mut self.scratch);
                     }
@@ -2076,9 +2221,9 @@ impl App {
             gfx.dc.EndDraw(None, None)
         };
         let whole = !self.presented;
-        let presented = drawn.and_then(|()| unsafe {
-            gfx.present(if whole { &mut [] } else { &mut rects[..count] })
-        });
+        // Presented even if drawing failed: the turn this frame took must go back.
+        let presented = unsafe { gfx.present(if whole { &mut [] } else { &mut rects[..count] }) };
+        let presented = drawn.and(presented);
 
         self.stale[back] = moving;
         self.ink_damage[back].clear();

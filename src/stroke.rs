@@ -19,10 +19,11 @@ use crate::settings::{Look, STYLE_GLOW, STYLE_NEON};
 
 // Dropping tiny moves keeps a slow hand from leaving a jittery cluster of points.
 pub const MIN_STEP: f32 = 2.0;
-// How far the curve between samples may stray from true once flattened, in DIPs, and how far
-// each flat piece may turn, so a wide glow's outer edge stays round as well.
+// How far the curve between samples may stray from true once flattened, in DIPs, and the range
+// each flat piece may turn through, so a wide glow's outer edge stays round as well.
 const CURVE_TOLERANCE: f32 = 0.1;
 const CURVE_TURN: f32 = 5.0 * PI / 180.0;
+const MAX_CURVE_TURN: f32 = 20.0 * PI / 180.0;
 const CAP_STEPS: usize = 8;
 
 #[derive(Clone, Copy, Debug)]
@@ -230,6 +231,7 @@ pub fn draw(
                 &scratch.path,
                 &scratch.radii[part],
                 CURVE_TOLERANCE * scale,
+                max_turn(&look, scale),
                 &mut scratch.centre,
                 &mut scratch.widths,
             );
@@ -320,6 +322,7 @@ fn curve_through(
     path: &[Vector2],
     radii: &[f32],
     tolerance: f32,
+    max_turn: f32,
     points: &mut Vec<Vector2>,
     widths: &mut Vec<f32>,
 ) {
@@ -343,7 +346,7 @@ fn curve_through(
         let by_error = (bend / (4.0 * tolerance)).sqrt();
         let (u, v) = ((control.X - from.X, control.Y - from.Y), (to.X - control.X, to.Y - control.Y));
         let turn = (u.0 * v.1 - u.1 * v.0).atan2(u.0 * v.0 + u.1 * v.1).abs();
-        let steps = (by_error.max(turn / CURVE_TURN).ceil() as usize).clamp(1, 16);
+        let steps = (by_error.max(turn / max_turn).ceil() as usize).clamp(1, 16);
         for k in 1..=steps {
             let t = k as f32 / steps as f32;
             let (a, b, c) = ((1.0 - t) * (1.0 - t), 2.0 * (1.0 - t) * t, t * t);
@@ -451,18 +454,27 @@ fn geometry(factory: &ID2D1Factory, outline: &[Vector2]) -> Result<ID2D1PathGeom
 const PIECE: usize = 192;
 const OVERLAP: usize = 6;
 
+/// A stretch of stroke tessellated for each pass, and where it paints.
+struct Tessellated {
+    bounds: Bounds,
+    passes: Vec<ID2D1GeometryRealization>,
+}
+
 /// A kept stroke grows for as long as the button is held, and drawing it whole every frame would
 /// cost more the longer it got. Its settled stretch is tessellated once, a piece at a time, so a
 /// frame costs the same however long the stroke is. Tied to the device that made it.
 #[derive(Default)]
 pub struct Pieces {
-    /// Each piece's bounds, and its tessellation for each pass.
-    done: Vec<(Bounds, Vec<ID2D1GeometryRealization>)>,
+    done: Vec<Tessellated>,
+    /// The stretch after them, kept for as long as the same points make it: a frame draws it
+    /// into each rectangle it repaints, and a stroke waiting to be baked doesn't change.
+    tail: Option<((usize, usize), Box<Tessellated>)>,
 }
 
 impl Pieces {
     pub fn clear(&mut self) {
         self.done.clear();
+        self.tail = None;
     }
 
     /// Where the stretch still drawn afresh each frame begins. Nothing before it changes, as
@@ -477,83 +489,115 @@ pub fn grows(stroke: &Stroke) -> bool {
     stroke.look.ink && !stroke.whole && stroke.breaks.is_empty()
 }
 
-/// The centre line of `points[range]` and its widths, smoothed as if the whole stroke were.
-fn centre_of(points: &[Point], range: std::ops::Range<usize>, look: &Look, scale: f32, scratch: &mut Scratch) {
-    let span = look.smoothing as usize;
-    let (from, to) = (range.start.saturating_sub(span), (range.end + span).min(points.len()));
-    smooth(&points[from..to], span, &mut scratch.path);
-    scratch.path.truncate(range.end - from);
-    scratch.path.drain(..range.start - from);
-    scratch.radii.clear();
-    scratch.radii.resize(scratch.path.len(), look.width as f32 / 2.0 * scale);
-    curve_through(&scratch.path, &scratch.radii, CURVE_TOLERANCE * scale, &mut scratch.centre, &mut scratch.widths);
+/// How far each flat piece of a curve may turn: as far as keeps the outer edge of the widest
+/// pass within the tolerance, which for a thin stroke is a good deal further than for a thick.
+fn max_turn(look: &Look, scale: f32) -> f32 {
+    let outer = look.width as f32 / 2.0 * scale * layers(look.style)[0].0;
+    let tolerance = CURVE_TOLERANCE * scale;
+    if outer <= tolerance {
+        return MAX_CURVE_TURN;
+    }
+    (2.0 * (1.0 - tolerance / outer).acos()).clamp(CURVE_TURN, MAX_CURVE_TURN)
 }
 
-/// Draws a kept stroke as `draw` would, from settled pieces and its newest stretch. Each pass is
-/// filled solid inside a layer of its opacity, so where pieces overlap they don't show darker.
+/// The centre line of `points[range]` and its widths, as the whole stroke would have it there.
+/// It takes a sample either side as context, so it begins and ends where the stroke's curve
+/// passes between samples, not on the sample beside it, which would bulge at each join.
+fn centre_of(points: &[Point], range: std::ops::Range<usize>, look: &Look, scale: f32, scratch: &mut Scratch) {
+    let span = look.smoothing as usize;
+    let (before, after) = (usize::from(range.start > 0), usize::from(range.end < points.len()));
+    let (start, end) = (range.start - before, range.end + after);
+    let (from, to) = (start.saturating_sub(span), (end + span).min(points.len()));
+    smooth(&points[from..to], span, &mut scratch.path);
+    scratch.path.truncate(end - from);
+    scratch.path.drain(..start - from);
+    scratch.radii.clear();
+    scratch.radii.resize(scratch.path.len(), look.width as f32 / 2.0 * scale);
+    let (tolerance, turn) = (CURVE_TOLERANCE * scale, max_turn(look, scale));
+    curve_through(&scratch.path, &scratch.radii, tolerance, turn, &mut scratch.centre, &mut scratch.widths);
+    if before == 1 && scratch.centre.len() > 1 {
+        scratch.centre.remove(0);
+        scratch.widths.remove(0);
+    }
+    if after == 1 && scratch.centre.len() > 1 {
+        scratch.centre.pop();
+        scratch.widths.pop();
+    }
+}
+
+/// Tessellates the centre line in `scratch` for each pass.
+fn tessellate(factory: &ID2D1Factory, dc: &ID2D1DeviceContext1, look: &Look, scratch: &mut Scratch) -> Option<Tessellated> {
+    if scratch.centre.is_empty() {
+        return None;
+    }
+    let mut passes = Vec::with_capacity(4);
+    let mut bounds = None;
+    for &(width, _, _) in layers(look.style) {
+        scratch.layer.clear();
+        scratch.layer.extend(scratch.widths.iter().map(|radius| radius * width));
+        outline(&scratch.centre, &scratch.layer, &mut scratch.outline);
+        bounds = union(bounds, extent(&scratch.outline));
+        let realization = geometry(factory, &scratch.outline)
+            .and_then(|geometry| unsafe { dc.CreateFilledGeometryRealization(&geometry, D2D1_DEFAULT_FLATTENING_TOLERANCE) })
+            .ok()?;
+        passes.push(realization);
+    }
+    Some(Tessellated { bounds: bounds?, passes })
+}
+
+fn overlap(a: Bounds, b: Bounds) -> Option<Bounds> {
+    let both = Bounds {
+        left: a.left.max(b.left),
+        top: a.top.max(b.top),
+        right: a.right.min(b.right),
+        bottom: a.bottom.min(b.bottom),
+    };
+    (both.left < both.right && both.top < both.bottom).then_some(both)
+}
+
+/// Draws a kept stroke as `draw` would, into `area`, from settled pieces and its newest
+/// stretch. Each pass is filled solid inside a layer of its opacity, so where pieces overlap
+/// they don't show darker. Settling makes new pieces as the stroke grows; a stroke drawn once,
+/// as when baked, needn't.
+#[allow(clippy::too_many_arguments)]
 pub fn draw_kept(
     factory: &ID2D1Factory,
     dc: &ID2D1DeviceContext1,
     brush: &ID2D1SolidColorBrush,
     stroke: &Stroke,
     pieces: &mut Pieces,
-    scratch: &mut Scratch,
-) {
-    draw_kept_settling(factory, dc, brush, stroke, pieces, scratch, true);
-}
-
-/// For tests: the same stroke drawn as one stretch, nothing settled.
-#[cfg(test)]
-pub fn draw_kept_unsettled(
-    factory: &ID2D1Factory,
-    dc: &ID2D1DeviceContext1,
-    brush: &ID2D1SolidColorBrush,
-    stroke: &Stroke,
-    scratch: &mut Scratch,
-) {
-    draw_kept_settling(factory, dc, brush, stroke, &mut Pieces::default(), scratch, false);
-}
-
-fn draw_kept_settling(
-    factory: &ID2D1Factory,
-    dc: &ID2D1DeviceContext1,
-    brush: &ID2D1SolidColorBrush,
-    stroke: &Stroke,
-    pieces: &mut Pieces,
-    scratch: &mut Scratch,
+    area: Bounds,
     settle: bool,
+    scratch: &mut Scratch,
 ) {
     let (points, look, scale) = (&stroke.points, stroke.look, stroke.scale);
-    let passes = layers(look.style);
     let span = look.smoothing as usize;
-    // A piece settles once every point that smooths its end is in.
-    while settle && (pieces.done.len() + 1) * PIECE + OVERLAP + span < points.len() {
+    // A piece settles once every point that smooths its end, and the one after, is in.
+    while settle && (pieces.done.len() + 1) * PIECE + OVERLAP + 1 + span < points.len() {
         let start = pieces.done.len() * PIECE;
         centre_of(points, start..start + PIECE + OVERLAP, &look, scale, scratch);
-        let mut tessellated = Vec::with_capacity(passes.len());
-        let mut bounds = None;
-        for &(width, _, _) in passes {
-            scratch.layer.clear();
-            scratch.layer.extend(scratch.widths.iter().map(|radius| radius * width));
-            outline(&scratch.centre, &scratch.layer, &mut scratch.outline);
-            bounds = union(bounds, extent(&scratch.outline));
-            let Ok(realization) = geometry(factory, &scratch.outline)
-                .and_then(|geometry| unsafe { dc.CreateFilledGeometryRealization(&geometry, D2D1_DEFAULT_FLATTENING_TOLERANCE) })
-            else {
-                return;
-            };
-            tessellated.push(realization);
+        let Some(piece) = tessellate(factory, dc, &look, scratch) else { return };
+        pieces.done.push(piece);
+        pieces.tail = None;
+    }
+    let made_from = (pieces.settled(), points.len());
+    if pieces.tail.as_ref().is_none_or(|(from, _)| *from != made_from) {
+        pieces.tail = None;
+        if made_from.0 < made_from.1 {
+            centre_of(points, made_from.0..made_from.1, &look, scale, scratch);
+            pieces.tail = tessellate(factory, dc, &look, scratch).map(|tail| (made_from, Box::new(tail)));
         }
-        let Some(bounds) = bounds else { return };
-        pieces.done.push((bounds, tessellated));
     }
-    let start = pieces.done.len() * PIECE;
-    let tail = start < points.len();
-    if tail {
-        centre_of(points, start..points.len(), &look, scale, scratch);
-    }
+    let shown: Vec<&Tessellated> = pieces
+        .done
+        .iter()
+        .chain(pieces.tail.as_ref().map(|(_, tail)| tail.as_ref()))
+        .filter(|stretch| overlap(stretch.bounds, area).is_some())
+        .collect();
+    let Some(bounds) = shown.iter().map(|stretch| stretch.bounds).reduce(Bounds::union) else { return };
+    let Some(bounds) = overlap(bounds, area) else { return };
     let opacity = look.opacity as f32 / 100.0;
-    for (pass, &(width, alpha, white)) in passes.iter().enumerate() {
+    for (pass, &(_, alpha, white)) in layers(look.style).iter().enumerate() {
         let mut color = rgba(look.color, 1.0);
         color.r += (1.0 - color.r) * white;
         color.g += (1.0 - color.g) * white;
@@ -561,7 +605,7 @@ fn draw_kept_settling(
         unsafe {
             dc.PushLayer(
                 &D2D1_LAYER_PARAMETERS1 {
-                    contentBounds: crate::graphics::rect_f(stroke.bounds().unwrap_or(Bounds::around(0.0, 0.0, 0.0))),
+                    contentBounds: crate::graphics::rect_f(bounds),
                     maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
                     maskTransform: Matrix3x2::identity(),
                     opacity: alpha * opacity,
@@ -571,22 +615,8 @@ fn draw_kept_settling(
                 None,
             );
             brush.SetColor(&color);
-            for (_, tessellated) in &pieces.done {
-                dc.DrawGeometryRealization(&tessellated[pass], brush);
-            }
-            if tail {
-                scratch.layer.clear();
-                scratch.layer.extend(scratch.widths.iter().map(|radius| radius * width));
-                outline(&scratch.centre, &scratch.layer, &mut scratch.outline);
-                // Tessellated like the pieces, though it changes every frame, so a stretch doesn't
-                // shift by a pixel as it settles into one.
-                if scratch.outline.len() >= 3 {
-                    if let Ok(realization) = geometry(factory, &scratch.outline)
-                        .and_then(|geometry| dc.CreateFilledGeometryRealization(&geometry, D2D1_DEFAULT_FLATTENING_TOLERANCE))
-                    {
-                        dc.DrawGeometryRealization(&realization, brush);
-                    }
-                }
+            for stretch in &shown {
+                dc.DrawGeometryRealization(&stretch.passes[pass], brush);
             }
             dc.PopLayer();
         }

@@ -76,6 +76,8 @@ struct State {
     tray_pending: Cell<bool>,
     /// What the tray icon shows now, so an unchanged one isn't drawn and sent to Explorer again.
     tray_shows: Cell<u64>,
+    /// The panel had the app's shortcuts let go, last time they were claimed.
+    keys_released: Cell<bool>,
 }
 
 // Cells rather than one RefCell: most of these Win32 calls re-enter a window procedure.
@@ -162,8 +164,9 @@ pub fn shutdown() {
     }
 }
 
-pub fn panel_open() -> bool {
-    !state(|s| s.flyout.get()).is_invalid()
+/// The panel is recording a shortcut or taking a name, so keys must reach it, not the app.
+pub fn panel_wants_keys() -> bool {
+    with_panel(|panel| panel.wants_keys()).unwrap_or(false)
 }
 
 /// Redraws the tray icon if something changed it. Called once the overlay's frame is out, since
@@ -473,8 +476,7 @@ unsafe fn open_panel() -> Result<()> {
     style_window(hwnd, &panel);
     PANEL.with(|slot| *slot.borrow_mut() = Some(panel));
     state(|s| s.flyout.set(hwnd));
-    // The panel has the keyboard now; let go of every shortcut so they can be typed into it.
-    crate::sync_hotkeys();
+
     SetTimer(Some(hwnd), TIMER_PREVIEW, 16, None);
     let _ = ShowWindow(hwnd, SW_SHOW);
     let _ = SetForegroundWindow(hwnd);
@@ -576,6 +578,7 @@ extern "system" fn panel_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
                 state(|s| {
                     s.flyout.set(HWND::default());
                     s.closed_at.set(Some(Instant::now()));
+                    s.keys_released.set(false);
                 });
                 crate::sync_hotkeys();
                 update_tray(false);
@@ -587,6 +590,12 @@ extern "system" fn panel_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
 }
 
 unsafe fn act(hwnd: HWND, action: Option<Action>) {
+    // Shortcuts stay working while the panel is open, and let go only while it records one or
+    // takes a name.
+    let wants = panel_wants_keys();
+    if state(|s| s.keys_released.replace(wants)) != wants {
+        crate::sync_hotkeys();
+    }
     match action {
         Some(Action::Redraw) => {
             let _ = InvalidateRect(Some(hwnd), None, false);

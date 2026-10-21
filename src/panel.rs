@@ -636,6 +636,11 @@ impl Panel {
         self.theme = Theme::current();
     }
 
+    /// Recording a shortcut or typing a preset's name, so the app's own shortcuts must let go.
+    pub fn wants_keys(&self) -> bool {
+        self.capturing.is_some() || self.renaming.is_some()
+    }
+
     /// Advances the preview's pretend hand along a figure of eight. Returns whether anything on
     /// screen is moving, so an idle tab isn't repainted sixty times a second.
     pub fn tick(&mut self) -> bool {
@@ -885,6 +890,7 @@ impl Panel {
                     return Action::None;
                 }
                 settings::apply_preset(index);
+                settings::save();
                 return Action::SettingsChanged;
             }
             Widget::MorePresets => {
