@@ -25,6 +25,11 @@ jobs:
           if ((Get-Content Cargo.toml -Raw) -notmatch '(?m)^version = "(.+)"') { throw 'No version in Cargo.toml' }
           if ("v$($Matches[1])" -ne $env:GITHUB_REF_NAME) { throw "Tag $env:GITHUB_REF_NAME doesn't match version $($Matches[1])" }
 
+      # A tag can point anywhere, so what it releases is checked here too, not only by CI.
+      - run: rustup component add clippy
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
+
       - name: Build and package
         shell: pwsh
         env:

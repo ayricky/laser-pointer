@@ -10,7 +10,6 @@
   const TRAY = colour => `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path d="M2.5 13C5 13.6 7.4 11.6 7.6 9.4C7.9 6.6 4.6 6.4 4.4 8.6C4.2 11 9 11.4 12.2 4.6" fill="none" stroke="#888" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12.4" cy="4" r="2" fill="${colour}"/></svg>`;
   const WC = '<span class="wc">—&nbsp;&nbsp;▢&nbsp;&nbsp;✕</span>';
   /** After this long without the visitor, the film starts again. */
-  const IDLE_MS = 15000;
 
   const DESKTOP = `
     <div class="window shown" data-scene="present">
@@ -185,12 +184,8 @@
     }
 
     // ---- Your turn -------------------------------------------------------------------------------
-    let idleTimer = 0;
-    /** While the visitor has the laser, the film comes back after IDLE_MS without input. */
-    function idle() {
-      clearTimeout(idleTimer);
-      if (film.driving) idleTimer = setTimeout(() => stage.drawing ? idle() : play(film.chapter), IDLE_MS);
-    }
+    // Once the visitor takes the laser, the film stays stopped until they ask for it back: a page
+    // that starts moving again by itself is one nobody can pause.
     function setDriving(on) {
       film.driving = on;
       screen.classList.toggle('driving', on);
@@ -201,7 +196,6 @@
       if (!on && tools.contains(focused) && badge) badge.focus();
       if (on && badge && badge === focused) m('presets').firstElementChild.focus();
       call('mode', on);
-      idle();
     }
     /** The visitor takes the laser. With a press, that press starts their first stroke. */
     function drive(press) {
@@ -214,7 +208,6 @@
         caption('Your turn. Draw anywhere on the screen.');
       }
       if (!stage.on) stage.setOn(true);
-      idle();
       if (press) {
         const r = stage.canvas.getBoundingClientRect();
         stage.pointer = { x: press.clientX - r.left, y: press.clientY - r.top };
@@ -239,12 +232,10 @@
     screen.addEventListener('pointerleave', () => screen.classList.remove('hover'));
     const follow = m('follow');
     screen.addEventListener('pointermove', e => {
-      if (film.driving) idle();
       if (!follow) return;
       const r = screen.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
       follow.style.transform = `translate(${Math.min(x + 18, r.width - follow.offsetWidth - 8)}px, ${y + 22}px)`;
     });
-    addEventListener('keydown', () => { if (film.driving) idle(); });
 
     if (m('badge')) m('badge').addEventListener('click', () => drive());
 
@@ -268,8 +259,8 @@
       b.addEventListener('click', () => { stage.setCursor(c); changed(); });
       m('curs').append(b);
     }
-    // Tools are buttons, not the screen: using them shouldn't draw or count as idle.
-    m('tools').addEventListener('pointerdown', e => { idle(); e.stopPropagation(); });
+    // Tools are buttons, not the screen: using them shouldn't draw.
+    m('tools').addEventListener('pointerdown', e => e.stopPropagation());
 
     changed();
     return film;

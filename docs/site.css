@@ -124,5 +124,5 @@ footer .wrap { display: flex; gap: 20px; align-items: center; flex-wrap: wrap; }
 
 @media (max-width: 960px) { .deck { grid-template-columns: 1fr; } .side { justify-content: start; } .chapters { grid-template-columns: 1fr 1fr; }
   .bento { grid-template-columns: 1fr 1fr; } .card, .card.wide { grid-column: span 1; } .keys-grid { grid-template-columns: 1fr 1fr; } .price { grid-template-columns: 1fr; } }
-@media (max-width: 640px) { .monitor { padding: 6px; border-radius: 16px; } .film-tools { display: none !important; } .bento, .keys-grid { grid-template-columns: 1fr; } }
+@media (max-width: 640px) { .monitor { padding: 6px; border-radius: 16px; } .bento, .keys-grid { grid-template-columns: 1fr; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } .monitor { opacity: 1; transform: none; } h1 .hot path { stroke-dashoffset: 0; } }
