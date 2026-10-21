@@ -34,7 +34,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     MF_SEPARATOR, MF_STRING, SM_CXSMICON, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOW,
     SW_SHOWNORMAL,
     TPM_BOTTOMALIGN, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WA_INACTIVE, WM_ACTIVATE,
-    WM_APP, WM_CHAR, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_KEYDOWN,
+    WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_KEYDOWN,
     WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NULL, WM_PAINT,
     WM_SETTINGCHANGE, WM_SYSCHAR, WM_SYSKEYDOWN, WM_THEMECHANGED, WM_TIMER, WNDCLASSW,
     WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
@@ -583,8 +583,16 @@ extern "system" fn panel_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
                 });
                 DefWindowProcW(hwnd, msg, wparam, lparam)
             }
+            // A drag cut short, by Alt+Tab say, still keeps what it set.
+            WM_CAPTURECHANGED => {
+                act(hwnd, with_panel(Panel::mouse_up));
+                LRESULT(0)
+            }
             WM_DESTROY => {
                 let _ = KillTimer(Some(hwnd), TIMER_PREVIEW);
+                if matches!(with_panel(Panel::mouse_up), Some(Action::SettingsChanged)) {
+                    crate::settings_changed();
+                }
                 PANEL.with(|slot| slot.borrow_mut().take());
                 state(|s| {
                     s.flyout.set(HWND::default());

@@ -62,8 +62,8 @@ const PICKER: D2D_RECT_F = rect(MARGIN, SWATCH_TOP + 40.0, INNER, 138.0);
 const HUE_BAR: D2D_RECT_F = rect(PICKER.left + 16.0, PICKER.top + 46.0, INNER - 32.0, 12.0);
 const SHADE_BAR: D2D_RECT_F = rect(PICKER.left + 16.0, PICKER.top + 78.0, INNER - 32.0, 12.0);
 const PICKER_DONE: D2D_RECT_F = rect(PICKER.right - 16.0 - 76.0, PICKER.top + 100.0, 76.0, 28.0);
-/// How light the picker's shade bar runs, from its dark end to its pale end.
-const SHADES: (f32, f32) = (0.2, 0.8);
+/// How light the picker's shade bar runs, from black to white.
+const SHADES: (f32, f32) = (0.0, 1.0);
 /// How long the pointer rests on an icon before its tooltip shows.
 const TIP_DELAY: Duration = Duration::from_millis(400);
 
@@ -297,9 +297,12 @@ fn faded(color: D2D1_COLOR_F, alpha: f32) -> D2D1_COLOR_F {
     }
 }
 
-/// A fully saturated colour from its hue (0 to 1 round the wheel) and lightness.
-fn from_hue(hue: f32, light: f32) -> u32 {
-    let chroma = (1.0 - (2.0 * light - 1.0).abs()).max(0.0);
+/// Hue (0 to 1 round the wheel), saturation and lightness, as the colour picker holds them.
+type Hsl = (f32, f32, f32);
+
+/// A colour from its hue, saturation and lightness.
+fn from_hsl((hue, saturation, light): Hsl) -> u32 {
+    let chroma = (1.0 - (2.0 * light - 1.0).abs()).max(0.0) * saturation.clamp(0.0, 1.0);
     let h = hue.rem_euclid(1.0) * 6.0;
     let x = chroma * (1.0 - (h % 2.0 - 1.0).abs());
     let (r, g, b) = match h as u32 {
@@ -315,16 +318,17 @@ fn from_hue(hue: f32, light: f32) -> u32 {
     byte(r) << 16 | byte(g) << 8 | byte(b)
 }
 
-/// The hue and lightness of a colour, as the picker places them.
-fn to_hue(rgb: u32) -> (f32, f32) {
+/// The hue, saturation and lightness of a colour, as the picker places them.
+fn to_hsl(rgb: u32) -> Hsl {
     let channel = |shift: u32| ((rgb >> shift) & 0xff) as f32 / 255.0;
     let (r, g, b) = (channel(16), channel(8), channel(0));
     let (max, min) = (r.max(g).max(b), r.min(g).min(b));
     let light = (max + min) / 2.0;
     let delta = max - min;
     if delta < 1e-6 {
-        return (0.0, light);
+        return (0.0, 0.0, light);
     }
+    let saturation = delta / (1.0 - (2.0 * light - 1.0).abs()).max(1e-6);
     let hue = if max == r {
         ((g - b) / delta).rem_euclid(6.0)
     } else if max == g {
@@ -332,7 +336,7 @@ fn to_hue(rgb: u32) -> (f32, f32) {
     } else {
         (r - g) / delta + 4.0
     };
-    (hue / 6.0, light)
+    (hue / 6.0, saturation.min(1.0), light)
 }
 
 fn wide(text: &str) -> Vec<u16> {
@@ -500,11 +504,13 @@ pub struct Panel {
     pub scale: f32,
     tab: usize,
     hover: Option<Widget>,
-    /// When the pointer came to rest on what it's over, for tooltips.
+    /// When the pointer came to rest on what it's over, for tooltips, and whether that one's
+    /// tooltip has been drawn.
     hover_since: Instant,
+    tip_shown: bool,
     dragging: Option<Drag>,
-    /// The colour picker is open, at this hue and lightness.
-    picking: Option<(f32, f32)>,
+    /// The colour picker is open, at this hue, saturation and lightness.
+    picking: Option<Hsl>,
     /// A preset's delete button was clicked once; a second click deletes it.
     confirm_delete: Option<usize>,
     capturing: Option<Slot>,
@@ -719,6 +725,7 @@ impl Panel {
             tab: PEN,
             hover: None,
             hover_since: Instant::now(),
+            tip_shown: false,
             dragging: None,
             picking: None,
             confirm_delete: None,
@@ -743,9 +750,23 @@ impl Panel {
         self.theme = Theme::current();
     }
 
-    /// Recording a shortcut or typing a preset's name, so the app's own shortcuts must let go.
+    /// Recording a shortcut, typing a preset's name, or open on something Esc closes, so the
+    /// app's own shortcuts must let go.
     pub fn wants_keys(&self) -> bool {
-        self.capturing.is_some() || self.renaming.is_some()
+        self.capturing.is_some() || self.renaming.is_some() || self.picking.is_some() || self.confirm_delete.is_some()
+    }
+
+    fn status_showing(&self) -> bool {
+        self.status.as_ref().is_some_and(|(_, at, _)| at.elapsed() < Duration::from_secs(5))
+    }
+
+    /// Moves to another tab, leaving behind anything open on this one.
+    fn switch_tab(&mut self, index: usize) {
+        self.tab = index;
+        self.status = None;
+        self.scroll = 0.0;
+        self.picking = None;
+        self.confirm_delete = None;
     }
 
     /// Advances the preview's pretend hand along a figure of eight. Returns whether anything on
@@ -757,7 +778,7 @@ impl Panel {
             .as_ref()
             .is_some_and(|(_, at, _)| at.elapsed() < Duration::from_millis(5100));
         // A tooltip is due to show.
-        let tip_due = self.tip().is_some() && self.hover_since.elapsed() < TIP_DELAY + Duration::from_millis(50);
+        let tip_due = self.tip().is_some() && !self.tip_shown;
         if self.tab != PEN {
             return self.renaming.is_some() || status_showing || tip_due;
         }
@@ -921,8 +942,11 @@ impl Panel {
                 for index in 0..TOGGLES.len() {
                     widgets.push((Widget::Toggle(index), rect(MARGIN - 8.0, TOGGLES_TOP + index as f32 * TOGGLE_STEP, INNER + 16.0, 44.0)));
                 }
-                for (index, area) in self.link_rects().into_iter().enumerate() {
-                    widgets.push((Widget::Link(index), area));
+                // A status message takes the version line's place, links and all.
+                if !self.status_showing() {
+                    for (index, area) in self.link_rects().into_iter().enumerate() {
+                        widgets.push((Widget::Link(index), area));
+                    }
                 }
                 widgets.push((Widget::Reset, RESET));
                 widgets.push((Widget::Quit, QUIT));
@@ -971,6 +995,7 @@ impl Panel {
         }
         self.hover = hover;
         self.hover_since = Instant::now();
+        self.tip_shown = false;
         // Moving off a delete button that was clicked once puts it back.
         if self.confirm_delete.is_some_and(|index| hover != Some(Widget::PresetDelete(index))) {
             self.confirm_delete = None;
@@ -1013,9 +1038,7 @@ impl Panel {
         match widget {
             Widget::Power => return Action::Toggle(!crate::laser_on()),
             Widget::Tab(index) => {
-                self.tab = index;
-                self.status = None;
-                self.scroll = 0.0;
+                self.switch_tab(index);
                 return Action::Redraw;
             }
             Widget::PresetRow(index) => {
@@ -1033,7 +1056,7 @@ impl Panel {
             Widget::Swatch(_) => {
                 self.picking = match self.picking {
                     Some(_) => None,
-                    None => Some(to_hue(current.look.color)),
+                    None => Some(to_hsl(current.look.color)),
                 };
                 return Action::Redraw;
             }
@@ -1178,14 +1201,18 @@ impl Panel {
                 (slider.set)(&mut current.look, value);
             }
             Drag::Hue | Drag::Shade => {
-                let Some((hue, light)) = &mut self.picking else { return Action::None };
+                let Some(picked) = &mut self.picking else { return Action::None };
                 let k = ((x - HUE_BAR.left) / (HUE_BAR.right - HUE_BAR.left)).clamp(0.0, 1.0);
                 if drag == Drag::Hue {
-                    *hue = k;
+                    picked.0 = k;
+                    // A grey has no hue to move; choosing one makes it a colour.
+                    if picked.1 < 0.1 {
+                        picked.1 = 1.0;
+                    }
                 } else {
-                    *light = SHADES.0 + (SHADES.1 - SHADES.0) * k;
+                    picked.2 = SHADES.0 + (SHADES.1 - SHADES.0) * k;
                 }
-                current.look.color = from_hue(*hue, *light);
+                current.look.color = from_hsl(*picked);
             }
         }
         settings::set(current);
@@ -1261,8 +1288,7 @@ impl Panel {
         // Ctrl+Tab moves between tabs, like most tabbed windows.
         if is(VK_TAB) && modifiers_held() & MOD_CONTROL.0 != 0 {
             let back = modifiers_held() & MOD_SHIFT.0 != 0;
-            self.tab = (self.tab + if back { TABS.len() - 1 } else { 1 }) % TABS.len();
-            self.scroll = 0.0;
+            self.switch_tab((self.tab + if back { TABS.len() - 1 } else { 1 }) % TABS.len());
             return Action::Redraw;
         }
         Action::None
@@ -1325,7 +1351,7 @@ impl Panel {
             OPTIONS => self.draw_options(&settings),
             _ => {}
         }
-        self.draw_tip();
+        self.tip_shown = self.draw_tip();
         self.target.EndDraw(None, None)
     }
 
@@ -1344,12 +1370,13 @@ impl Panel {
     }
 
     /// A tooltip under the hovered icon once the pointer has rested on it, kept inside the panel.
-    unsafe fn draw_tip(&self) {
+    /// Returns whether it drew one.
+    unsafe fn draw_tip(&self) -> bool {
         let (Some(text), Some(anchor)) = (self.tip(), self.hover.and_then(|hover| self.area_of(hover))) else {
-            return;
+            return false;
         };
         if self.hover_since.elapsed() < TIP_DELAY && !matches!(self.hover, Some(Widget::PresetDelete(index)) if self.confirm_delete == Some(index)) {
-            return;
+            return false;
         }
         let theme = &self.theme;
         let width = self.measure(text, &self.fonts.small_line) + 18.0;
@@ -1363,6 +1390,7 @@ impl Panel {
         self.fill_round(bubble, 4.0, theme.control);
         self.outline_round(bubble, 4.0, theme.control_border, 1.0);
         self.text(text, &self.fonts.small_line, rect(left + 9.0, top, width - 18.0, 26.0), theme.text);
+        true
     }
 
     fn area_of(&self, widget: Widget) -> Option<D2D_RECT_F> {
@@ -1410,6 +1438,10 @@ impl Panel {
     }
 
     unsafe fn draw_pen(&mut self, settings: &Settings) {
+        // The colour changed some other way while the picker was open, a preset or the tray say.
+        if self.picking.is_some_and(|picked| self.dragging.is_none() && from_hsl(picked) != settings.look.color) {
+            self.picking = Some(to_hsl(settings.look.color));
+        }
         self.draw_preview(&settings.look, settings.cursor);
         self.section("Colour", COLOUR_TOP);
         if self.picking.is_none() {
@@ -1434,7 +1466,7 @@ impl Panel {
 
     /// The colour picker: a hue bar, a shade bar from dark to pale, and the colour they make.
     unsafe fn draw_picker(&self, color: u32) {
-        let Some((hue, light)) = self.picking else { return };
+        let Some((hue, saturation, light)) = self.picking else { return };
         let theme = &self.theme;
         self.fill_round(rect(PICKER.left, PICKER.top + 2.0, INNER, PICKER.bottom - PICKER.top), 8.0, faded(hex(0x000000), 0.22));
         self.fill_round(PICKER, 8.0, theme.control);
@@ -1460,8 +1492,10 @@ impl Panel {
             self.ring(x, y, 9.0, faded(hex(0x000000), 0.35), 1.0);
             self.circle(x, y, 6.0, hex(paint(at)));
         };
-        bar(HUE_BAR, &|k| from_hue(k, 0.5), hue);
-        bar(SHADE_BAR, &|k| from_hue(hue, SHADES.0 + (SHADES.1 - SHADES.0) * k), (light - SHADES.0) / (SHADES.1 - SHADES.0));
+        bar(HUE_BAR, &|k| from_hsl((k, 1.0, 0.5)), hue);
+        let shade = |k: f32| SHADES.0 + (SHADES.1 - SHADES.0) * k;
+        let at = ((light - SHADES.0) / (SHADES.1 - SHADES.0)).clamp(0.0, 1.0);
+        bar(SHADE_BAR, &|k| from_hsl((hue, saturation, shade(k))), at);
         let hovered = self.hover == Some(Widget::PickerDone);
         self.button(PICKER_DONE, "Done", hovered, theme.text);
     }
@@ -1754,7 +1788,7 @@ impl Panel {
             theme.muted,
         );
         let line = rect(MARGIN, Self::VERSION_TOP, INNER, 20.0);
-        if let Some((text, ..)) = self.status.as_ref().filter(|(_, at, _)| at.elapsed() < Duration::from_secs(5)) {
+        if let Some((text, ..)) = self.status.as_ref().filter(|_| self.status_showing()) {
             self.text(text, &self.fonts.small_line, line, theme.muted);
             return;
         }
@@ -2041,16 +2075,24 @@ mod tests {
     #[test]
     fn the_picker_reads_back_the_colours_it_makes() {
         for hue in [0.0, 0.13, 0.4, 0.58, 0.83] {
-            for light in [SHADES.0, 0.5, SHADES.1] {
-                let (h, l) = to_hue(from_hue(hue, light));
-                assert!((h - hue).abs() < 0.01 && (l - light).abs() < 0.01, "{hue}, {light} came back as {h}, {l}");
+            for saturation in [0.4, 1.0] {
+                for light in [0.2, 0.5, 0.8] {
+                    let (h, s, l) = to_hsl(from_hsl((hue, saturation, light)));
+                    let close = (h - hue).abs() < 0.01 && (s - saturation).abs() < 0.02 && (l - light).abs() < 0.01;
+                    assert!(close, "{hue}, {saturation}, {light} came back as {h}, {s}, {l}");
+                }
             }
         }
-        // A softer colour opens the picker at its own hue.
-        assert!((to_hue(0x2ecc40).0 - 0.355).abs() < 0.01);
-        assert_eq!(from_hue(0.0, 0.5), 0xff0000);
-        assert_eq!(from_hue(1.0 / 3.0, 0.5), 0x00ff00);
-        assert_eq!(from_hue(2.0 / 3.0, 0.5), 0x0000ff);
+        // The swatches, softer colours, greys, black and white all come back as themselves, so
+        // opening the picker never changes the colour.
+        for rgb in [0xff2a2a, 0x2ecc40, 0x1e90ff, 0x808080, 0x000000, 0xffffff, 0x6b8e23] {
+            let back = from_hsl(to_hsl(rgb));
+            let close = |shift: u32| ((rgb >> shift) & 0xff).abs_diff((back >> shift) & 0xff) <= 1;
+            assert!(close(16) && close(8) && close(0), "{rgb:06x} came back as {back:06x}");
+        }
+        assert_eq!(from_hsl((0.0, 1.0, 0.5)), 0xff0000);
+        assert_eq!(from_hsl((1.0 / 3.0, 1.0, 0.5)), 0x00ff00);
+        assert_eq!(from_hsl((2.0 / 3.0, 1.0, 0.5)), 0x0000ff);
     }
 
     #[test]
@@ -2087,7 +2129,7 @@ mod tests {
                     unsafe { panel.draw() };
                     canvas.save(&format!("panel-{name}-{theme}-{dpi}.png"));
                     if tab == PEN {
-                        panel.picking = Some(to_hue(0x1e90ff));
+                        panel.picking = Some(to_hsl(0x1e90ff));
                         unsafe { panel.draw() };
                         canvas.save(&format!("panel-picker-{theme}-{dpi}.png"));
                     }

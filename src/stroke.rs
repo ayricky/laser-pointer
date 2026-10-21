@@ -603,6 +603,9 @@ pub fn draw_shape(
 ) -> Result<()> {
     let (points, look) = (&stroke.points, stroke.look);
     if pieces.shape.is_empty() {
+        // Kept only once every part is made, so a failure part-way is tried again next frame
+        // rather than leaving a part missing for good.
+        let mut parts = Vec::new();
         let base = look.width as f32 / 2.0 * stroke.scale;
         let mut start = 0;
         for end in stroke.breaks.iter().copied().chain([points.len()]) {
@@ -614,10 +617,9 @@ pub fn draw_shape(
             smooth(&points[part], look.smoothing as usize, &mut scratch.centre);
             scratch.widths.clear();
             scratch.widths.resize(scratch.centre.len(), base);
-            if let Some(part) = tessellate(factory, dc, &look, scratch)? {
-                pieces.shape.push(part);
-            }
+            parts.extend(tessellate(factory, dc, &look, scratch)?);
         }
+        pieces.shape = parts;
     }
     let opacity = look.opacity as f32 / 100.0 * shape_life(points, now, &look);
     for part in &pieces.shape {

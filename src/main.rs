@@ -201,17 +201,22 @@ impl Drawn {
         }
         let moving = elapsed < SNAP_SECS;
         if !moving {
-            self.settle();
+            self.land();
         }
         moving
     }
 
-    /// Jumps a snapping stroke to its final shape, before it is put aside for undo or redo.
-    fn settle(&mut self) {
-        self.stroke.flash = None;
+    /// Puts a snapping stroke on its final shape. Its flash, if any, glows on until it's done.
+    fn land(&mut self) {
         if let Some(morph) = self.morph.take() {
             set_parts(&mut self.stroke, &shapes::lean(&morph.to.parts), morph.at);
         }
+    }
+
+    /// Jumps a snapping stroke to its final shape, unlit, before it is put aside for undo or redo.
+    fn settle(&mut self) {
+        self.stroke.flash = None;
+        self.land();
     }
 }
 
@@ -1283,7 +1288,9 @@ impl App {
             || self.fading_ink.is_some()
             || self.pulse.is_some()
             || (self.drawing && self.led)
-            || (self.pointer.moving && (laser_on() || self.pointer.extinguished.is_some()))
+            // Frames end the cursor's exit even if animations are switched off partway.
+            || self.pointer.extinguished.is_some()
+            || (self.pointer.moving && laser_on())
     }
 
     /// A notice changes only as it fades in and out; while it holds, nothing needs drawing.
@@ -1450,7 +1457,7 @@ impl App {
             self.pointer.moving = false;
             return;
         }
-        if now.duration_since(at).as_secs_f32() >= cursors::EXTINGUISH_SECS {
+        if !animations_enabled() || now.duration_since(at).as_secs_f32() >= cursors::EXTINGUISH_SECS {
             self.pointer.extinguished = None;
             self.pointer.moving = false;
             self.pointer.current = None;
@@ -2658,6 +2665,29 @@ mod tests {
         assert!(peak > 1.0 && peak < 1.06, "{peak}");
         assert!((spring(SNAP_SECS - 0.001) - 1.0).abs() < 0.01);
         assert_eq!(spring(SNAP_SECS), 1.0);
+    }
+
+    /// A snap's flash glows on after the stroke lands, and only putting it aside cuts it short.
+    #[test]
+    fn a_snap_lands_still_glowing_and_the_glow_runs_its_course() {
+        let line: Vec<(f32, f32)> = (0..=60).map(|i| (i as f32 * 5.0, (i as f32 * 0.4).sin() * 6.0)).collect();
+        let correction = shapes::correct(&line, 1.0, 0.5).expect("a wobbly line snaps");
+        let at = Instant::now();
+        let mut stroke = Stroke::new(Point { x: 0.0, y: 0.0, at }, settings::get().look, 1.0);
+        stroke.whole = true;
+        stroke.flash = Some(at);
+        set_parts(&mut stroke, &correction.parts, at);
+        let mut drawn = Drawn::new(1, stroke);
+        drawn.morph = Some(Morph { from: shapes::correspondence(&line, &correction), to: correction, at });
+        let after = |ms: u64| at + Duration::from_millis(ms);
+        assert!(drawn.advance_morph(after(100)));
+        assert!(!drawn.advance_morph(after(300)));
+        assert!(drawn.morph.is_none());
+        assert!(drawn.stroke.settle_flash(after(300)), "the flash ended with the morph");
+        assert!(!drawn.stroke.settle_flash(after(410)));
+        drawn.stroke.flash = Some(at);
+        drawn.settle();
+        assert!(drawn.stroke.flash.is_none());
     }
 
     #[test]

@@ -317,7 +317,7 @@ fn the_head_follows_the_cursor_and_is_never_kept() {
         app.live_cursor = || Some(POINT { x: 400, y: CURSOR_Y.load(Ordering::Relaxed) });
         let waitable = app.waitable().unwrap();
         let frame = |app: &mut App| {
-            let _ = WaitForSingleObject(waitable, 100) == WAIT_OBJECT_0;
+            assert_eq!(WaitForSingleObject(waitable, 100), WAIT_OBJECT_0, "a frame went without a present");
             app.dirty = true;
             app.render();
         };
@@ -325,12 +325,16 @@ fn the_head_follows_the_cursor_and_is_never_kept() {
             let pixels = app.gfx.as_ref().unwrap().read_back();
             pixels[(y * size as usize + 400) * 4 + 3] > 0
         };
-        for ink in [false, true] {
+        // A short stroke, fading and kept, and a kept one long enough to have settled pieces,
+        // coiled up away from where the head goes.
+        let coil: Vec<(f32, f32)> = (0..900).map(|i| { let t = i as f32 * 0.05; let r = 10.0 + t * 1.6; (100.0 + r * t.cos(), 100.0 + r * t.sin()) }).collect();
+        for (ink, path) in [(false, vec![(100.0, 300.0), (200.0, 300.0)]), (true, vec![(100.0, 300.0), (200.0, 300.0)]), (true, coil)] {
             let now = Instant::now();
             let mut look = settings::get().look;
             look.ink = ink;
-            let mut stroke = Stroke::new(Point { x: 100.0, y: 300.0, at: now }, look, 1.0);
-            stroke.points.push(Point { x: 200.0, y: 300.0, at: now });
+            let mut stroke = Stroke::new(Point { x: path[0].0, y: path[0].1, at: now }, look, 1.0);
+            stroke.points = path.iter().map(|&(x, y)| Point { x, y, at: now }).collect();
+            let length = stroke.points.len();
             app.strokes = vec![Drawn::new(1, stroke)];
             app.drawing = true;
             // Straight on from the stroke, then off to one side, the stroke as long as before.
@@ -340,10 +344,13 @@ fn the_head_follows_the_cursor_and_is_never_kept() {
                 for _ in 0..3 {
                     frame(&mut app);
                 }
-                assert!(painted_at(&app, y as usize), "ink {ink}: no head at the cursor, {y}");
-                assert_eq!(app.strokes[0].stroke.points.len(), 2, "the head was kept");
+                assert!(painted_at(&app, y as usize), "ink {ink}, {length} points: no head at the cursor, {y}");
+                assert_eq!(app.strokes[0].stroke.points.len(), length, "the head was kept");
             }
-            assert!(!painted_at(&app, 300), "ink {ink}: the head drawn before stayed");
+            assert!(!painted_at(&app, 300), "ink {ink}, {length} points: the head drawn before stayed");
+            if length > 600 {
+                assert!(app.strokes[0].pieces.settled() > 0, "the long stroke never settled a piece");
+            }
             app.drawing = false;
             app.strokes.clear();
             for _ in 0..3 {

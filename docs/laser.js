@@ -74,7 +74,6 @@
     if (!s.ink && stroke.whole) {
       const newest = Math.max(...pts.map(p => p.t));
       const k = Math.min(1, Math.max(0, (now - newest - s.fade) / SHAPE_FADE_MS));
-      radii.fill(base * (1 - 0.3 * k));
       life = 1 - k * k * (3 - 2 * k);
     } else if (!s.ink) {
       for (let i = 0; i < n; i++) radii[i] = base * easeOut4(Math.max(0, 1 - (now - pts[i].t) / s.fade));
