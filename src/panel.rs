@@ -14,7 +14,7 @@ use windows::Win32::Graphics::Direct2D::{
     ID2D1SolidColorBrush, ID2D1SvgDocument,
     D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_ELLIPSE,
     D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_HWND_RENDER_TARGET_PROPERTIES,
-    D2D1_PRESENT_OPTIONS_NONE, D2D1_RENDER_TARGET_PROPERTIES, D2D1_ROUNDED_RECT,
+    D2D1_PRESENT_OPTIONS_IMMEDIATELY, D2D1_RENDER_TARGET_PROPERTIES, D2D1_ROUNDED_RECT,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, IDWriteFontCollection, IDWriteTextFormat,
@@ -564,7 +564,8 @@ impl Panel {
             &D2D1_HWND_RENDER_TARGET_PROPERTIES {
                 hwnd,
                 pixelSize: D2D_SIZE_U { width, height },
-                presentOptions: D2D1_PRESENT_OPTIONS_NONE,
+                // Waiting for the display here would hold up the overlay, which shares the thread.
+                presentOptions: D2D1_PRESENT_OPTIONS_IMMEDIATELY,
             },
         )?
         .cast()

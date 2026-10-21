@@ -8,7 +8,7 @@ use windows::Win32::Graphics::Direct2D::Common::{
     D2D_SIZE_U,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1CreateFactory, ID2D1Bitmap1, ID2D1DeviceContext, ID2D1DeviceContext5, ID2D1Factory1,
+    D2D1CreateFactory, ID2D1Bitmap1, ID2D1DeviceContext, ID2D1DeviceContext1, ID2D1DeviceContext5, ID2D1Factory1,
     ID2D1SolidColorBrush, D2D1_BITMAP_OPTIONS, D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
     D2D1_BITMAP_OPTIONS_CPU_READ, D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1,
     D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_FACTORY_TYPE_SINGLE_THREADED,
@@ -96,6 +96,8 @@ pub struct Graphics {
     waitable: Waitable,
     pub factory: ID2D1Factory1,
     pub dc: ID2D1DeviceContext,
+    /// The same context, for kept strokes' tessellated pieces.
+    pub dc1: ID2D1DeviceContext1,
     target: Option<ID2D1Bitmap1>,
     /// Kept strokes, drawn once and copied into each frame; created on first use.
     ink: Option<ID2D1Bitmap1>,
@@ -128,7 +130,7 @@ unsafe fn create_device(driver: D3D_DRIVER_TYPE) -> Result<IDXGIDevice> {
     d3d.ok_or_else(|| windows::core::Error::from(E_FAIL))?.cast()
 }
 
-fn bitmap_properties(options: D2D1_BITMAP_OPTIONS) -> D2D1_BITMAP_PROPERTIES1 {
+pub(crate) fn bitmap_properties(options: D2D1_BITMAP_OPTIONS) -> D2D1_BITMAP_PROPERTIES1 {
     D2D1_BITMAP_PROPERTIES1 {
         pixelFormat: D2D1_PIXEL_FORMAT {
             format: DXGI_FORMAT_B8G8R8A8_UNORM,
@@ -184,6 +186,7 @@ impl Graphics {
         let dc = d2d
             .CreateDevice(&dxgi)?
             .CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)?;
+        let dc1: ID2D1DeviceContext1 = dc.cast()?;
         let brush = dc.CreateSolidColorBrush(&D2D1_COLOR_F::default(), None)?;
         let dwrite: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
 
@@ -199,6 +202,7 @@ impl Graphics {
             waitable,
             factory: d2d,
             dc,
+            dc1,
             target: None,
             ink: None,
             brush,
@@ -339,6 +343,40 @@ impl Graphics {
         self.swap_chain
             .Present1(1, DXGI_PRESENT(0), &parameters)
             .ok()
+    }
+
+    /// For tests: the swap chain's back buffer, which holds the frame presented two before, as
+    /// BGRA rows.
+    #[cfg(test)]
+    pub unsafe fn read_back(&self) -> Vec<u8> {
+        use windows::Win32::Graphics::Direct3D11::{
+            ID3D11Texture2D, D3D11_CPU_ACCESS_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_TEXTURE2D_DESC,
+            D3D11_USAGE_STAGING,
+        };
+        let buffer: ID3D11Texture2D = self.swap_chain.GetBuffer(0).unwrap();
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        buffer.GetDesc(&mut desc);
+        desc.Usage = D3D11_USAGE_STAGING;
+        desc.BindFlags = 0;
+        desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
+        desc.MiscFlags = 0;
+        let device = buffer.GetDevice().unwrap();
+        let mut staging = None;
+        device.CreateTexture2D(&desc, None, Some(&mut staging)).unwrap();
+        let staging = staging.unwrap();
+        let context = device.GetImmediateContext().unwrap();
+        context.CopyResource(&staging, &buffer);
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+        context.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped)).unwrap();
+        let mut out = Vec::with_capacity((desc.Width * desc.Height * 4) as usize);
+        for row in 0..desc.Height as usize {
+            out.extend_from_slice(std::slice::from_raw_parts(
+                (mapped.pData as *const u8).add(row * mapped.RowPitch as usize),
+                desc.Width as usize * 4,
+            ));
+        }
+        context.Unmap(&staging, 0);
+        out
     }
 
     /// A pill near the bottom of the screen, laid out at the DPI of the monitor it shows on.

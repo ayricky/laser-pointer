@@ -7,7 +7,12 @@ use windows::core::Result;
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED, D2D1_FILL_MODE_WINDING,
 };
-use windows::Win32::Graphics::Direct2D::{ID2D1Factory, ID2D1RenderTarget, ID2D1SolidColorBrush};
+use windows::Win32::Graphics::Direct2D::{
+    ID2D1DeviceContext1, ID2D1Factory, ID2D1GeometryRealization, ID2D1PathGeometry, ID2D1RenderTarget,
+    ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_DEFAULT_FLATTENING_TOLERANCE,
+    D2D1_LAYER_OPTIONS1_NONE, D2D1_LAYER_PARAMETERS1,
+};
+use windows_numerics::Matrix3x2;
 use windows_numerics::Vector2;
 
 use crate::settings::{Look, STYLE_GLOW, STYLE_NEON};
@@ -51,10 +56,16 @@ impl Stroke {
 
     /// Where it could paint, glow included, without building its geometry.
     pub fn bounds(&self) -> Option<Bounds> {
-        let first = self.points.first()?;
+        self.bounds_from(0)
+    }
+
+    /// The same for its points from `start` on.
+    pub fn bounds_from(&self, start: usize) -> Option<Bounds> {
+        let points = self.points.get(start..)?;
+        let first = points.first()?;
         let reach = self.look.width as f32 / 2.0 * self.scale * layers(self.look.style)[0].0 + 2.0;
         let mut bounds = Bounds::around(first.x, first.y, reach);
-        for point in &self.points {
+        for point in points {
             bounds = bounds.union(Bounds::around(point.x, point.y, reach));
         }
         Some(bounds)
@@ -420,6 +431,11 @@ fn fill(
     if outline.len() < 3 {
         return Ok(());
     }
+    unsafe { target.FillGeometry(&geometry(factory, outline)?, brush, None) };
+    Ok(())
+}
+
+fn geometry(factory: &ID2D1Factory, outline: &[Vector2]) -> Result<ID2D1PathGeometry> {
     unsafe {
         let geometry = factory.CreatePathGeometry()?;
         let sink = geometry.Open()?;
@@ -428,7 +444,153 @@ fn fill(
         sink.AddLines(&outline[1..]);
         sink.EndFigure(D2D1_FIGURE_END_CLOSED);
         sink.Close()?;
-        target.FillGeometry(&geometry, brush, None);
+        Ok(geometry)
     }
-    Ok(())
+}
+
+/// Points of a kept stroke in each settled piece, and how many each shares with the next, so
+/// the pieces join without a seam.
+const PIECE: usize = 192;
+const OVERLAP: usize = 6;
+
+/// A kept stroke grows for as long as the button is held, and drawing it whole every frame would
+/// cost more the longer it got. Its settled stretch is tessellated once, a piece at a time, so a
+/// frame costs the same however long the stroke is. Tied to the device that made it.
+#[derive(Default)]
+pub struct Pieces {
+    /// Each piece's bounds, and its tessellation for each pass.
+    done: Vec<(Bounds, Vec<ID2D1GeometryRealization>)>,
+}
+
+impl Pieces {
+    pub fn clear(&mut self) {
+        self.done.clear();
+    }
+
+    /// Where the stretch still drawn afresh each frame begins. Nothing before it changes, as
+    /// long as the pieces are drawn.
+    pub fn settled(&self) -> usize {
+        self.done.len() * PIECE
+    }
+}
+
+/// Whether `draw_kept` applies: a kept stroke, drawn as one piece of freehand.
+pub fn grows(stroke: &Stroke) -> bool {
+    stroke.look.ink && !stroke.whole && stroke.breaks.is_empty()
+}
+
+/// The centre line of `points[range]` and its widths, smoothed as if the whole stroke were.
+fn centre_of(points: &[Point], range: std::ops::Range<usize>, look: &Look, scale: f32, scratch: &mut Scratch) {
+    let span = look.smoothing as usize;
+    let (from, to) = (range.start.saturating_sub(span), (range.end + span).min(points.len()));
+    smooth(&points[from..to], span, &mut scratch.path);
+    scratch.path.truncate(range.end - from);
+    scratch.path.drain(..range.start - from);
+    scratch.radii.clear();
+    scratch.radii.resize(scratch.path.len(), look.width as f32 / 2.0 * scale);
+    curve_through(&scratch.path, &scratch.radii, CURVE_STEP * scale, &mut scratch.centre, &mut scratch.widths);
+}
+
+/// Draws a kept stroke as `draw` would, from settled pieces and its newest stretch. Each pass is
+/// filled solid inside a layer of its opacity, so where pieces overlap they don't show darker.
+pub fn draw_kept(
+    factory: &ID2D1Factory,
+    dc: &ID2D1DeviceContext1,
+    brush: &ID2D1SolidColorBrush,
+    stroke: &Stroke,
+    pieces: &mut Pieces,
+    scratch: &mut Scratch,
+) {
+    draw_kept_settling(factory, dc, brush, stroke, pieces, scratch, true);
+}
+
+/// For tests: the same stroke drawn as one stretch, nothing settled.
+#[cfg(test)]
+pub fn draw_kept_unsettled(
+    factory: &ID2D1Factory,
+    dc: &ID2D1DeviceContext1,
+    brush: &ID2D1SolidColorBrush,
+    stroke: &Stroke,
+    scratch: &mut Scratch,
+) {
+    draw_kept_settling(factory, dc, brush, stroke, &mut Pieces::default(), scratch, false);
+}
+
+fn draw_kept_settling(
+    factory: &ID2D1Factory,
+    dc: &ID2D1DeviceContext1,
+    brush: &ID2D1SolidColorBrush,
+    stroke: &Stroke,
+    pieces: &mut Pieces,
+    scratch: &mut Scratch,
+    settle: bool,
+) {
+    let (points, look, scale) = (&stroke.points, stroke.look, stroke.scale);
+    let passes = layers(look.style);
+    let span = look.smoothing as usize;
+    // A piece settles once every point that smooths its end is in.
+    while settle && (pieces.done.len() + 1) * PIECE + OVERLAP + span < points.len() {
+        let start = pieces.done.len() * PIECE;
+        centre_of(points, start..start + PIECE + OVERLAP, &look, scale, scratch);
+        let mut tessellated = Vec::with_capacity(passes.len());
+        let mut bounds = None;
+        for &(width, _, _) in passes {
+            scratch.layer.clear();
+            scratch.layer.extend(scratch.widths.iter().map(|radius| radius * width));
+            outline(&scratch.centre, &scratch.layer, &mut scratch.outline);
+            bounds = union(bounds, extent(&scratch.outline));
+            let Ok(realization) = geometry(factory, &scratch.outline)
+                .and_then(|geometry| unsafe { dc.CreateFilledGeometryRealization(&geometry, D2D1_DEFAULT_FLATTENING_TOLERANCE) })
+            else {
+                return;
+            };
+            tessellated.push(realization);
+        }
+        let Some(bounds) = bounds else { return };
+        pieces.done.push((bounds, tessellated));
+    }
+    let start = pieces.done.len() * PIECE;
+    let tail = start < points.len();
+    if tail {
+        centre_of(points, start..points.len(), &look, scale, scratch);
+    }
+    let opacity = look.opacity as f32 / 100.0;
+    for (pass, &(width, alpha, white)) in passes.iter().enumerate() {
+        let mut color = rgba(look.color, 1.0);
+        color.r += (1.0 - color.r) * white;
+        color.g += (1.0 - color.g) * white;
+        color.b += (1.0 - color.b) * white;
+        unsafe {
+            dc.PushLayer(
+                &D2D1_LAYER_PARAMETERS1 {
+                    contentBounds: crate::graphics::rect_f(stroke.bounds().unwrap_or(Bounds::around(0.0, 0.0, 0.0))),
+                    maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                    maskTransform: Matrix3x2::identity(),
+                    opacity: alpha * opacity,
+                    layerOptions: D2D1_LAYER_OPTIONS1_NONE,
+                    ..Default::default()
+                },
+                None,
+            );
+            brush.SetColor(&color);
+            for (_, tessellated) in &pieces.done {
+                dc.DrawGeometryRealization(&tessellated[pass], brush);
+            }
+            if tail {
+                scratch.layer.clear();
+                scratch.layer.extend(scratch.widths.iter().map(|radius| radius * width));
+                outline(&scratch.centre, &scratch.layer, &mut scratch.outline);
+                // Tessellated like the pieces, though it changes every frame, so a stretch doesn't
+                // shift by a pixel as it settles into one.
+                if scratch.outline.len() >= 3 {
+                    if let Ok(realization) = geometry(factory, &scratch.outline)
+                        .and_then(|geometry| dc.CreateFilledGeometryRealization(&geometry, D2D1_DEFAULT_FLATTENING_TOLERANCE))
+                    {
+                        dc.DrawGeometryRealization(&realization, brush);
+                    }
+                }
+            }
+            dc.PopLayer();
+        }
+    }
 }

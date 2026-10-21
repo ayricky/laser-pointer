@@ -35,7 +35,7 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::SystemInformation::GetTickCount;
-use windows::Win32::System::Threading::{CreateMutexW, INFINITE};
+use windows::Win32::System::Threading::{CreateMutexW, WaitForSingleObject, INFINITE};
 use windows::Win32::UI::Accessibility::HWINEVENTHOOK;
 use windows::Win32::UI::HiDpi::{
     GetDpiForMonitor, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
@@ -82,14 +82,15 @@ const HOTKEY_PROBE: i32 = 99;
 const TIMER_PASSTHROUGH: usize = 1;
 const TIMER_RECOVER: usize = 2;
 const TIMER_TRIM: usize = 3;
-const TIMER_CURSOR: usize = 4;
 const TIMER_GAME: usize = 5;
+const TIMER_SAVE: usize = 6;
 /// How soon after taking the foreground to check the game didn't minimise itself.
 const GAME_CHECK_MS: u32 = 300;
 const PASSTHROUGH_MS: u32 = 80;
 const RECOVER_MS: u32 = 1000;
 const TRIM_MS: u32 = 3000;
-const CURSOR_FRAME_MS: u32 = 16;
+/// Ctrl+scroll saves the new thickness once the wheel stops, not at every notch.
+const SAVE_MS: u32 = 700;
 
 // wParam flag on WM_MOUSEWHEEL.
 const MK_CONTROL: usize = 0x8;
@@ -100,6 +101,9 @@ const VK_MASK: VIRTUAL_KEY = VIRTUAL_KEY(0xE8);
 const RIPPLE_SECS: f32 = 0.45;
 const MORPH_SECS: f32 = 0.1;
 const TOAST_SECS: f32 = 1.4;
+/// How long a notice takes to fade in, and to fade out at the end of TOAST_SECS.
+const TOAST_IN: f32 = 0.08;
+const TOAST_OUT: f32 = 0.3;
 const CLEAR_SECS: f32 = 0.22;
 
 static LASER_ON: AtomicBool = AtomicBool::new(false);
@@ -138,10 +142,23 @@ struct Drawn {
     stroke: Stroke,
     baked: bool,
     morph: Option<Morph>,
+    /// While a kept stroke is drawn, its settled stretch, ready to draw.
+    pieces: stroke::Pieces,
 }
 
 impl Drawn {
+    fn new(id: u64, stroke: Stroke) -> Self {
+        Self {
+            id,
+            stroke,
+            baked: false,
+            morph: None,
+            pieces: stroke::Pieces::default(),
+        }
+    }
+
     fn translate(&mut self, dx: f32, dy: f32) {
+        self.pieces.clear();
         self.stroke.translate(dx, dy);
         if let Some(morph) = &mut self.morph {
             for point in morph.from.iter_mut().chain(morph.to.parts.iter_mut().flatten()) {
@@ -242,6 +259,8 @@ struct Pointer {
     ignited: Option<Instant>,
     /// Button state and when it last changed.
     pressed: Option<(bool, Instant)>,
+    /// Still igniting or pressing, as of the last pose: frames keep coming until it settles.
+    moving: bool,
 }
 
 /// Puts the laser's current cursor on screen, recording it as in use.
@@ -312,7 +331,8 @@ impl Pointer {
             false
         });
         // Oldest first, but never the frame in use or the one on screen.
-        while self.cursors.len() > 48 {
+        // A style's ignite and press frames, at every monitor's scale, all stay; each is small.
+        while self.cursors.len() > 160 {
             let spare = self
                 .cursors
                 .iter()
@@ -464,8 +484,11 @@ unsafe fn run() {
             Some(handle) => std::slice::from_ref(handle),
             None => &[],
         };
+        let timeout = with_app(|app| app.wake_in())
+            .flatten()
+            .map_or(INFINITE, |wait: Duration| wait.as_millis().min(u128::from(INFINITE - 1)) as u32 + 1);
         let woke =
-            MsgWaitForMultipleObjectsEx(Some(handles), INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+            MsgWaitForMultipleObjectsEx(Some(handles), timeout, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
         while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
             if msg.message == WM_QUIT {
                 return;
@@ -473,8 +496,13 @@ unsafe fn run() {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
-        if waitable.is_some() && woke == WAIT_OBJECT_0 {
+        let rendered = waitable.is_some() && woke == WAIT_OBJECT_0;
+        if rendered {
             with_app(App::render);
+        }
+        // Explorer can be slow to answer, so the tray waits until the frame is out.
+        if rendered || waitable.is_none() {
+            ui::flush_tray();
         }
     }
 }
@@ -489,6 +517,11 @@ fn with_app<R>(action: impl FnOnce(&mut App) -> R) -> Option<R> {
 
 fn overlay() -> HWND {
     HWND(OVERLAY.load(Ordering::Relaxed) as _)
+}
+
+/// A stroke is being drawn, so nothing else on this thread should hold up its frames.
+pub fn drawing() -> bool {
+    with_app(|app| app.drawing).unwrap_or(false)
 }
 
 pub fn laser_on() -> bool {
@@ -640,9 +673,8 @@ pub fn shortcut_free(binding: Binding) -> bool {
     }
 }
 
-pub fn tray_icon(on: bool, size: u32) -> Option<HICON> {
-    let svg = tray_svg(on, settings::get().look.color);
-    with_app(|app| unsafe { app.gfx.as_ref()?.svg_icon(&svg, size, None, 1.0, 0.0).ok() })?
+pub fn tray_icon(svg: &str, size: u32) -> Option<HICON> {
+    with_app(|app| unsafe { app.gfx.as_ref()?.svg_icon(svg, size, None, 1.0, 0.0).ok() })?
 }
 
 /// Renders a cursor style for the settings panel's picker.
@@ -658,7 +690,7 @@ pub fn cursor_preview(style: usize, color: u32, size: u32) -> Option<HICON> {
 
 /// The lasso glyph, drawn in the taskbar's own text colour, its dot lit in the laser colour
 /// while the laser is on. The taskbar has its own light or dark theme, separate from apps'.
-fn tray_svg(on: bool, color: u32) -> String {
+pub fn tray_svg(on: bool, color: u32) -> String {
     let light = panel::read_dword(
         w!(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"),
         w!("SystemUsesLightTheme"),
@@ -793,8 +825,9 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                         let _ = KillTimer(Some(hwnd), TIMER_GAME);
                         with_app(App::check_game);
                     }
-                    TIMER_CURSOR => {
-                        with_app(App::refresh_cursor);
+                    TIMER_SAVE => {
+                        let _ = KillTimer(Some(hwnd), TIMER_SAVE);
+                        settings::save();
                     }
                     _ => {}
                 }
@@ -1003,6 +1036,10 @@ impl App {
 
     fn shutdown(&mut self) {
         games::remove_hook(self.foreground_hook);
+        // A thickness change may still be waiting to be saved.
+        if unsafe { KillTimer(Some(self.hwnd), TIMER_SAVE) }.is_ok() {
+            settings::save();
+        }
         // Put a stock cursor up first: a cursor in use mustn't be destroyed.
         if let Ok(arrow) = unsafe { LoadCursorW(None, IDC_ARROW) } {
             unsafe {
@@ -1043,8 +1080,26 @@ impl App {
             drawn.morph.is_some() || (!drawn.stroke.look.ink && !drawn.stroke.points.is_empty())
         })
             || !self.ripples.is_empty()
-            || self.toast.is_some()
+            || self.toast_fading(Instant::now())
             || !self.clearing.is_empty()
+            || (self.pointer.moving && laser_on())
+    }
+
+    /// A notice changes only as it fades in and out; while it holds, nothing needs drawing.
+    fn toast_fading(&self, now: Instant) -> bool {
+        self.toast.as_ref().is_some_and(|(_, at)| {
+            let age = now.duration_since(*at).as_secs_f32();
+            !(TOAST_IN..TOAST_SECS - TOAST_OUT).contains(&age)
+        })
+    }
+
+    /// How long the loop may sleep before something changes by itself: a notice that holds
+    /// still begins to fade out.
+    fn wake_in(&self) -> Option<Duration> {
+        let (_, at) = self.toast.as_ref()?;
+        let hold = Duration::from_secs_f32(TOAST_SECS - TOAST_OUT);
+        // Once fading, frames come by themselves.
+        hold.checked_sub(at.elapsed()).filter(|wait| !wait.is_zero())
     }
 
     /// Anything left to show once the laser is off: kept strokes, a fading tail, a notice.
@@ -1106,14 +1161,16 @@ impl App {
         unsafe {
             set_click_through(self.hwnd, !on);
             if on {
+                // The cursor is the first thing to show, so it's made while the GPU is idle,
+                // before the notice's frame.
+                self.pointer.ignited = Some(Instant::now());
+                self.refresh_cursor();
+                install_cursor();
                 self.notify("Laser on");
                 self.show();
                 // Another always-on-top window (a slide show, say) may have been raised since.
                 self.raise();
                 self.take_mouse_from_game();
-                self.pointer.ignited = Some(Instant::now());
-                self.refresh_cursor();
-                install_cursor();
             } else {
                 self.notify("Laser off");
                 let _ = ReleaseCapture();
@@ -1204,11 +1261,23 @@ impl App {
                 self.presented = false;
             }
         }
-        self.render();
+        self.render_now();
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
         }
         self.shown = true;
+    }
+
+    /// Renders outside the message loop's pacing. Every frame still takes its turn from the swap
+    /// chain, as the loop's do: one that didn't would leave a turn spare, and frames would queue
+    /// up a refresh behind input. Idle, the turn is already there, so this doesn't wait.
+    fn render_now(&mut self) {
+        if let Some(gfx) = self.gfx.as_ref().filter(|gfx| !gfx.trimmed) {
+            unsafe {
+                WaitForSingleObject(gfx.waitable(), 100);
+            }
+        }
+        self.render();
     }
 
     /// Hiding starts a timer that hands the screen-sized buffers back if nothing shows up soon.
@@ -1247,6 +1316,10 @@ impl App {
         match unsafe { Graphics::new(self.hwnd, width, height) } {
             Ok(gfx) => {
                 self.gfx = Some(gfx);
+                // Tessellations belonged to the device that went.
+                for drawn in &mut self.strokes {
+                    drawn.pieces.clear();
+                }
                 self.presented = false;
                 self.stale = Default::default();
                 self.pointer.current = None;
@@ -1330,12 +1403,7 @@ impl App {
             monitor_scale(screen),
         );
         self.next_id += 1;
-        self.strokes.push(Drawn {
-            id: self.next_id,
-            stroke,
-            baked: false,
-            morph: None,
-        });
+        self.strokes.push(Drawn::new(self.next_id, stroke));
         self.path.clear();
         self.path.push(point);
         self.undo.push(Edit::Added(self.next_id));
@@ -1663,7 +1731,9 @@ impl App {
         let width = settings.look.width as i32 + i32::from(delta.signum());
         settings.look.width = width.clamp(2, 24) as u32;
         settings::set(settings);
-        settings::save();
+        unsafe {
+            SetTimer(Some(self.hwnd), TIMER_SAVE, SAVE_MS, None);
+        }
         self.notify(&format!("Thickness  {} px", settings.look.width));
     }
 
@@ -1724,22 +1794,18 @@ impl App {
     }
 
     /// Picks the cursor for the current style, colour, monitor and animation frame, rendering it
-    /// the first time it's needed. Keeps a timer running only while the cursor is animating.
-    /// Picks the cursor for the current style, colour, monitor and animation frame, rendering it
-    /// the first time it's needed. Keeps a timer running only while the cursor is animating.
+    /// the first time it's needed. While it animates, each frame calls this again, so it moves
+    /// at the display's rate.
     fn refresh_cursor(&mut self) {
         let settings = settings::get();
         let motion = cursors::STYLES[settings.cursor].motion;
         let (zoom, turn, animating) = self.pointer.pose(motion, Instant::now());
+        self.pointer.moving = animating;
+        if animating {
+            self.dirty = true;
+        }
         let mut position = POINT::default();
         let located = unsafe { GetCursorPos(&mut position) }.is_ok();
-        unsafe {
-            if animating && located && laser_on() {
-                SetTimer(Some(self.hwnd), TIMER_CURSOR, CURSOR_FRAME_MS, None);
-            } else {
-                let _ = KillTimer(Some(self.hwnd), TIMER_CURSOR);
-            }
-        }
         if !located {
             return;
         }
@@ -1790,45 +1856,66 @@ impl App {
         Some(HCURSOR(icon.0))
     }
     /// Bakes finished kept strokes into the ink layer, so they cost nothing to keep on screen.
-    /// Bakes finished kept strokes into the ink layer, so they cost nothing to keep on screen.
     fn bake_finished(&mut self) {
         let Some(gfx) = &mut self.gfx else { return };
-        let last = self.strokes.len().wrapping_sub(1);
+        let (last, drawing) = (self.strokes.len().wrapping_sub(1), self.drawing);
+        // Baking puts a stroke beneath everything still live, so it waits until every stroke
+        // drawn before it is baked or gone; the ink keeps the order things were drawn in.
+        let ready: Vec<usize> = self
+            .strokes
+            .iter()
+            .enumerate()
+            .take_while(|&(index, drawn)| {
+                drawn.baked || (drawn.stroke.look.ink && !(drawing && index == last) && drawn.morph.is_none())
+            })
+            .filter(|(_, drawn)| !drawn.baked)
+            .map(|(index, _)| index)
+            .collect();
+        if ready.is_empty() {
+            return;
+        }
+        // All in one pass: each pass has a cost of its own, which an undo baking every kept
+        // stroke again would pay once per stroke.
+        let (strokes, scratch) = (&mut self.strokes, &mut self.scratch);
+        let baked = unsafe {
+            gfx.bake(|gfx| {
+                for &index in &ready {
+                    let Drawn { stroke, pieces, .. } = &mut strokes[index];
+                    if stroke::grows(stroke) {
+                        stroke::draw_kept(&gfx.factory, &gfx.dc1, &gfx.brush, stroke, pieces, scratch);
+                    } else {
+                        stroke::draw(&gfx.factory, &gfx.dc, &gfx.brush, stroke, Instant::now(), 1.0, scratch);
+                    }
+                }
+            })
+        };
         let mut damaged = Region::default();
-        let mut lost = false;
-        for (index, drawn) in self.strokes.iter_mut().enumerate() {
-            let in_progress = self.drawing && index == last;
-            if drawn.baked {
-                continue;
+        for &index in &ready {
+            let drawn = &mut strokes[index];
+            // Baked, it's drawn from the ink layer; the pieces were only for while it grew.
+            drawn.pieces.clear();
+            if baked.is_ok() {
+                drawn.baked = true;
+                if let Some(bounds) = drawn.stroke.bounds() {
+                    damaged.add(bounds);
+                }
             }
-            // Baking puts a stroke beneath everything still live, so it waits until every stroke
-            // drawn before it is baked or gone; the ink keeps the order things were drawn in.
-            if !drawn.stroke.look.ink || in_progress || drawn.morph.is_some() {
-                break;
+        }
+        if let Err(error) = baked {
+            if device_lost(&error) {
+                self.lose_device();
             }
-            let (scratch, stroke) = (&mut self.scratch, &mut drawn.stroke);
-            let baked = unsafe {
-                gfx.bake(|gfx| {
-                    stroke::draw(&gfx.factory, &gfx.dc, &gfx.brush, stroke, Instant::now(), 1.0, scratch);
-                })
-            };
-            if let Err(error) = baked {
-                lost = device_lost(&error);
-                break;
-            }
-            drawn.baked = true;
-            if let Some(bounds) = drawn.stroke.bounds() {
-                damaged.add(bounds);
-            }
+            return;
         }
         for bounds in damaged.rects() {
             self.damage_ink(bounds);
         }
-        if lost {
-            self.lose_device();
-        }
     }
+
     fn render(&mut self) {
+        if self.pointer.moving && laser_on() {
+            self.refresh_cursor();
+        }
         let now = Instant::now();
         let color = settings::get().look.color;
         self.ripples
@@ -1861,11 +1948,20 @@ impl App {
         }
         let size = gfx.size();
 
-        // What moves this frame, and where.
+        // What moves this frame, and where. Each stroke's bounds walk all its points, so
+        // they're found once for every rectangle below.
         let mut moving = Region::default();
-        for drawn in self.strokes.iter().filter(|drawn| !drawn.baked) {
-            if let Some(bounds) = drawn.stroke.bounds() {
-                moving.add(bounds);
+        let live: Vec<Option<Bounds>> = self
+            .strokes
+            .iter()
+            .map(|drawn| if drawn.baked { None } else { drawn.stroke.bounds() })
+            .collect();
+        for (drawn, bounds) in self.strokes.iter().zip(&live) {
+            // A kept stroke being drawn changes only where it's still growing.
+            let settled = if stroke::grows(&drawn.stroke) { drawn.pieces.settled() } else { 0 };
+            let changing = if settled > 0 { drawn.stroke.bounds_from(settled) } else { *bounds };
+            if let Some(changing) = changing {
+                moving.add(changing);
             }
         }
         for stroke in &self.clearing {
@@ -1938,9 +2034,14 @@ impl App {
                 gfx.dc.PushAxisAlignedClip(&clip, D2D1_ANTIALIAS_MODE_ALIASED);
                 gfx.dc.Clear(Some(&D2D1_COLOR_F::default()));
                 gfx.draw_ink(clip);
-                for drawn in self.strokes.iter_mut().filter(|drawn| !drawn.baked) {
-                    let stroke = &mut drawn.stroke;
-                    if stroke.bounds().is_some_and(|bounds| intersects(bounds, area)) {
+                for (drawn, bounds) in self.strokes.iter_mut().zip(&live) {
+                    if !bounds.is_some_and(|bounds| intersects(bounds, area)) {
+                        continue;
+                    }
+                    let (stroke, pieces) = (&mut drawn.stroke, &mut drawn.pieces);
+                    if stroke::grows(stroke) {
+                        stroke::draw_kept(&gfx.factory, &gfx.dc1, &gfx.brush, stroke, pieces, &mut self.scratch);
+                    } else {
                         stroke::draw(&gfx.factory, &gfx.dc, &gfx.brush, stroke, now, 1.0, &mut self.scratch);
                     }
                 }
@@ -1966,7 +2067,7 @@ impl App {
                 if let Some((toast, at)) = &self.toast {
                     if intersects(Graphics::toast_bounds(toast), area) {
                         let age = now.duration_since(*at).as_secs_f32();
-                        let alpha = (age / 0.08).min(1.0).min((TOAST_SECS - age) / 0.3).max(0.0);
+                        let alpha = (age / TOAST_IN).min(1.0).min((TOAST_SECS - age) / TOAST_OUT).max(0.0);
                         gfx.draw_toast(toast, color, alpha);
                     }
                 }

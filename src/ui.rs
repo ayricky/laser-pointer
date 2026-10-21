@@ -72,6 +72,10 @@ struct State {
     tracking: Cell<bool>,
     taskbar_created: Cell<u32>,
     show_message: Cell<u32>,
+    /// The tray icon needs redrawing, once the overlay's next frame is out.
+    tray_pending: Cell<bool>,
+    /// What the tray icon shows now, so an unchanged one isn't drawn and sent to Explorer again.
+    tray_shows: Cell<u64>,
 }
 
 // Cells rather than one RefCell: most of these Win32 calls re-enter a window procedure.
@@ -162,9 +166,17 @@ pub fn panel_open() -> bool {
     !state(|s| s.flyout.get()).is_invalid()
 }
 
+/// Redraws the tray icon if something changed it. Called once the overlay's frame is out, since
+/// Explorer can take a while to answer.
+pub fn flush_tray() {
+    if state(|s| s.tray_pending.replace(false)) {
+        unsafe { update_tray(false) };
+    }
+}
+
 pub fn laser_changed() {
     unsafe {
-        update_tray(false);
+        state(|s| s.tray_pending.set(true));
         let flyout = state(|s| s.flyout.get());
         if !flyout.is_invalid() {
             // Switching on raises the overlay; keep the panel above it so it stays usable.
@@ -184,7 +196,7 @@ pub fn laser_changed() {
 
 pub fn settings_changed() {
     unsafe {
-        update_tray(false);
+        state(|s| s.tray_pending.set(true));
         let flyout = state(|s| s.flyout.get());
         if !flyout.is_invalid() {
             let _ = InvalidateRect(Some(flyout), None, false);
@@ -256,19 +268,31 @@ unsafe fn update_tray(add: bool) {
     let on = crate::laser_on();
     let current = settings::get();
     let size = GetSystemMetricsForDpi(SM_CXSMICON, GetDpiForSystem()) as u32;
-    let (icon, owned) = match crate::tray_icon(on, size) {
-        Some(icon) => (icon, true),
-        None => (LoadIconW(None, IDI_APPLICATION).unwrap_or_default(), false),
-    };
-    let mut data = notify_data();
-    data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
-    data.uCallbackMessage = WM_TRAY;
-    data.hIcon = icon;
+    let svg = crate::tray_svg(on, current.look.color);
     let tip = format!(
         "Laser pointer: {} ({})",
         if on { "on" } else { "off" },
         shortcut_name(current.key(Command::Toggle))
     );
+    let shows = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::hash::DefaultHasher::new();
+        (&svg, &tip, size).hash(&mut hasher);
+        hasher.finish()
+    };
+    if !add && state(|s| s.tray_shows.get()) == shows {
+        return;
+    }
+    let (icon, owned) = match crate::tray_icon(&svg, size) {
+        Some(icon) => (icon, true),
+        None => (LoadIconW(None, IDI_APPLICATION).unwrap_or_default(), false),
+    };
+    // A stand-in, drawn while the GPU is away, is replaced once it's back.
+    state(|s| s.tray_shows.set(if owned { shows } else { 0 }));
+    let mut data = notify_data();
+    data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
+    data.uCallbackMessage = WM_TRAY;
+    data.hIcon = icon;
     copy_text(&mut data.szTip, &tip);
     if add {
         let _ = Shell_NotifyIconW(NIM_ADD, &data);
@@ -488,7 +512,8 @@ extern "system" fn panel_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
             }
             WM_ERASEBKGND => LRESULT(1),
             WM_TIMER if wparam.0 == TIMER_PREVIEW => {
-                if with_panel(Panel::tick).unwrap_or(false) {
+                // The preview waits while a real stroke is drawn, so it doesn't take its frames.
+                if !crate::drawing() && with_panel(Panel::tick).unwrap_or(false) {
                     let _ = InvalidateRect(Some(hwnd), None, false);
                 }
                 LRESULT(0)

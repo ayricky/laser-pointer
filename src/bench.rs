@@ -48,34 +48,180 @@ fn circle(n: usize, r: f32, at: Instant) -> Vec<Point> {
         .collect()
 }
 
+/// A window like the overlay that is never shown, to draw into.
+unsafe fn hidden_window(x: i32, y: i32, width: i32, height: i32) -> HWND {
+    let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    let instance = GetModuleHandleW(None).unwrap();
+    RegisterClassW(&WNDCLASSW {
+        lpfnWndProc: Some(quiet),
+        hInstance: instance.into(),
+        lpszClassName: w!("LaserPointerBench"),
+        ..Default::default()
+    });
+    CreateWindowExW(
+        WS_EX_NOREDIRECTIONBITMAP | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+        w!("LaserPointerBench"),
+        w!("bench"),
+        WS_POPUP,
+        x,
+        y,
+        width,
+        height,
+        None,
+        None,
+        Some(instance.into()),
+        None,
+    )
+    .unwrap()
+}
+
+/// A long kept stroke drawn in settled pieces looks the same as drawn in one go: no seams where
+/// the pieces meet, nothing darker where they overlap, and so nothing shifts as a stretch
+/// settles. Also compared with plain `draw`, which kept strokes used before.
+#[test]
+#[ignore = "needs a GPU"]
+fn kept_pieces_look_like_the_whole_stroke() {
+    use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D_SIZE_U};
+    use windows::Win32::Graphics::Direct2D::{
+        D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_CPU_READ, D2D1_BITMAP_OPTIONS_TARGET, D2D1_MAP_OPTIONS_READ,
+    };
+    use crate::graphics::bitmap_properties;
+    use crate::settings::{STYLE_GLOW, STYLE_NEON};
+    use crate::stroke::{self, Pieces, Scratch};
+    unsafe {
+        let size = 900u32;
+        let hwnd = hidden_window(0, 0, size as i32, size as i32);
+        let gfx = Graphics::new(hwnd, size, size).unwrap();
+        let extent = D2D_SIZE_U { width: size, height: size };
+        let pixels = |draw: &dyn Fn()| -> Vec<u8> {
+            let canvas = gfx.dc.CreateBitmap(extent, None, 0, &bitmap_properties(D2D1_BITMAP_OPTIONS_TARGET)).unwrap();
+            let readback = gfx.dc.CreateBitmap(extent, None, 0, &bitmap_properties(D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW)).unwrap();
+            gfx.dc.SetTarget(&canvas);
+            gfx.dc.BeginDraw();
+            gfx.dc.Clear(Some(&D2D1_COLOR_F::default()));
+            draw();
+            gfx.dc.EndDraw(None, None).unwrap();
+            readback.CopyFromBitmap(None, &canvas, None).unwrap();
+            let mapped = readback.Map(D2D1_MAP_OPTIONS_READ).unwrap();
+            let mut out = Vec::new();
+            for row in 0..size as usize {
+                out.extend_from_slice(std::slice::from_raw_parts(mapped.bits.add(row * mapped.pitch as usize), size as usize * 4));
+            }
+            readback.Unmap().unwrap();
+            out
+        };
+        let now = Instant::now();
+        for (style, smoothing) in [(STYLE_GLOW, 2), (STYLE_NEON, 0), (0, 4)] {
+            let mut look = settings::get().look;
+            (look.ink, look.style, look.smoothing, look.width) = (true, style, smoothing, 6);
+            let mut stroke = Stroke::new(Point { x: 0.0, y: 0.0, at: now }, look, 1.0);
+            // A spiral with a wobble, sampled as a hand moves: near and far apart.
+            stroke.points = (0..1400)
+                .map(|i| {
+                    let t = i as f32 * 0.021 + 0.004 * (i as f32 * 0.37).sin() * i as f32 / 100.0;
+                    let r = 40.0 + t * 13.0 + 3.0 * (t * 7.0).sin();
+                    Point { x: 450.0 + r * t.cos(), y: 450.0 + r * t.sin(), at: now }
+                })
+                .collect();
+            let whole = pixels(&|| {
+                stroke::draw_kept_unsettled(&gfx.factory, &gfx.dc1, &gfx.brush, &stroke, &mut Scratch::default());
+            });
+            let plain = pixels(&|| {
+                let mut copy = stroke.clone();
+                stroke::draw(&gfx.factory, &gfx.dc, &gfx.brush, &mut copy, now, 1.0, &mut Scratch::default());
+            });
+            let pieced = pixels(&|| {
+                stroke::draw_kept(&gfx.factory, &gfx.dc1, &gfx.brush, &stroke, &mut Pieces::default(), &mut Scratch::default());
+            });
+            if let Ok(directory) = std::env::var("PIECES_DUMP") {
+                for (name, data) in [("whole", &whole), ("pieced", &pieced)] {
+                    std::fs::write(format!("{directory}/{name}-{style}.raw"), data).unwrap();
+                }
+            }
+            // Compared as seen, over 3 x 3 pixels: the pieces' tessellation may put an edge a
+            // fraction of a pixel from where a live fill does, but a seam or a darker overlap
+            // spans more than that.
+            let seen = |pixels: &[u8], x: usize, y: usize| -> f32 {
+                let n = size as usize;
+                (0..9).map(|k| f32::from(pixels[((y + k / 3 - 1) * n + x + k % 3 - 1) * 4 + 3])).sum::<f32>() / 9.0
+            };
+            let compare = |a: &[u8], b: &[u8]| {
+                let (mut visible, mut worst) = (0, 0.0f32);
+                for y in 1..size as usize - 1 {
+                    for x in 1..size as usize - 1 {
+                        let difference = (seen(a, x, y) - seen(b, x, y)).abs();
+                        worst = worst.max(difference);
+                        if difference > 24.0 {
+                            visible += 1;
+                        }
+                    }
+                }
+                (visible, worst)
+            };
+            let painted = whole.chunks(4).filter(|p| p[3] > 0).count();
+            let (visible, worst) = compare(&whole, &pieced);
+            let (plainly, plain_worst) = compare(&plain, &pieced);
+            eprintln!("style {style}: against one go, {visible} of {painted} painted pixels look different, worst by {worst:.0} of 255; against plain draw, {plainly}, worst {plain_worst:.0}");
+            assert!(worst < 32.0 && visible * 1000 < painted, "style {style}: {visible} of {painted}, worst {worst}");
+            // Plain draw puts some flat edges a pixel lighter; nothing more than that.
+            assert!(plain_worst < 64.0 && plainly * 100 < painted, "style {style}: {plainly} of {painted}, worst {plain_worst}");
+        }
+    }
+}
+
+/// Drawing a kept stroke repaints only where it's still growing. What's left on screen once it
+/// stops must be what a full repaint shows: nothing missing, nothing smeared.
+#[test]
+#[ignore = "needs a GPU"]
+fn a_growing_kept_stroke_leaves_what_a_full_repaint_shows() {
+    use windows::Win32::Foundation::WAIT_OBJECT_0;
+    unsafe {
+        let size = 900u32;
+        let hwnd = hidden_window(0, 0, size as i32, size as i32);
+        let gfx = Graphics::new(hwnd, size, size).unwrap();
+        let mut app = App::new(hwnd, gfx, (0, 0), (size, size));
+        let waitable = app.waitable().unwrap();
+        let frame = |app: &mut App| {
+            let _ = WaitForSingleObject(waitable, 100) == WAIT_OBJECT_0;
+            app.dirty = true;
+            app.render();
+        };
+        let now = Instant::now();
+        let mut look = settings::get().look;
+        look.ink = true;
+        app.strokes.push(Drawn::new(1, Stroke::new(Point { x: 450.0, y: 450.0, at: now }, look, 1.0)));
+        app.drawing = true;
+        for i in 1..1500 {
+            let t = i as f32 * 0.02;
+            let r = 20.0 + t * 13.0;
+            app.strokes[0].stroke.points.push(Point { x: 450.0 + r * t.cos(), y: 450.0 + r * t.sin(), at: now });
+            if i % 4 == 0 {
+                frame(&mut app);
+            }
+        }
+        assert!(app.strokes[0].pieces.settled() > 0, "the stroke never settled a piece");
+        for _ in 0..3 {
+            frame(&mut app);
+        }
+        let grown = app.gfx.as_ref().unwrap().read_back();
+        app.presented = false;
+        frame(&mut app);
+        app.presented = false;
+        frame(&mut app);
+        let repainted = app.gfx.as_ref().unwrap().read_back();
+        let painted = repainted.chunks(4).filter(|p| p[3] > 0).count();
+        let differ = grown.chunks(4).zip(repainted.chunks(4)).filter(|(a, b)| a[3].abs_diff(b[3]) > 24).count();
+        eprintln!("{differ} of {painted} painted pixels differ");
+        assert!(painted > 10_000 && differ * 1000 < painted, "{differ} of {painted}");
+    }
+}
+
 #[test]
 #[ignore = "prints timings"]
 fn perf_report() {
     unsafe {
-        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-        let instance = GetModuleHandleW(None).unwrap();
-        RegisterClassW(&WNDCLASSW {
-            lpfnWndProc: Some(quiet),
-            hInstance: instance.into(),
-            lpszClassName: w!("LaserPointerBench"),
-            ..Default::default()
-        });
         let (x, y, width, height) = virtual_screen();
-        let hwnd = CreateWindowExW(
-            WS_EX_NOREDIRECTIONBITMAP | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
-            w!("LaserPointerBench"),
-            w!("bench"),
-            WS_POPUP,
-            x,
-            y,
-            width,
-            height,
-            None,
-            None,
-            Some(instance.into()),
-            None,
-        )
-        .unwrap();
+        let hwnd = hidden_window(x, y, width, height);
         eprintln!("virtual screen {width} x {height}");
         let size = (width as u32, height as u32);
         let started = Instant::now();
@@ -167,10 +313,66 @@ fn perf_report() {
             }
         }
 
+        // Frames drawn outside the message loop, as on turning on, must take their turn from the
+        // swap chain too: the waitable counts, so each that didn't would leave a spare signal and
+        // let frames queue behind input.
+        {
+            std::thread::sleep(Duration::from_millis(50));
+            let drain = || (0..8).take_while(|_| WaitForSingleObject(waitable, 0) == windows::Win32::Foundation::WAIT_OBJECT_0).count();
+            let before = drain();
+            for _ in 0..3 {
+                app.presented = false;
+                app.render_now();
+                std::thread::sleep(Duration::from_millis(30));
+            }
+            eprintln!("{:<44} {before} before, {} after three frames from show()", "spare waitable signals", drain());
+        }
+
+        // A kept stroke still being drawn, long enough to have been held for a while.
+        {
+            let (now, mut ink) = (Instant::now(), settings::get().look);
+            ink.ink = true;
+            for n in [500, 2500] {
+                app.strokes.clear();
+                let mut stroke = Stroke::new(Point { x: 300.0, y: 300.0, at: now }, ink, 1.0);
+                stroke.points = (0..n).map(|i| { let t = i as f32 * 0.02; Point { x: 900.0 + (200.0 + t * 8.0) * t.cos(), y: 900.0 + (200.0 + t * 8.0) * t.sin(), at: now } }).collect();
+                app.strokes.push(Drawn::new(30, stroke));
+                app.drawing = true;
+                report(&format!("frame while drawing a kept stroke, {n} points"), 20, || {
+                    app.dirty = true;
+                    frame(&mut app)
+                });
+            }
+            // The worst case for the GPU: a kept stroke across the whole desktop, each pass a
+            // layer that size. More than a refresh of GPU work would show here as two.
+            app.strokes.clear();
+            let mut stroke = Stroke::new(Point { x: 0.0, y: 0.0, at: now }, ink, 1.0);
+            stroke.points = (0..2500)
+                .map(|i| {
+                    let t = i as f32 / 2500.0;
+                    Point { x: 50.0 + t * (width as f32 - 100.0), y: height as f32 / 2.0 + (t * 40.0).sin() * (height as f32 / 2.0 - 60.0), at: now }
+                })
+                .collect();
+            app.strokes.push(Drawn::new(31, stroke));
+            report("kept stroke across the desktop, GPU done", 10, || {
+                WaitForSingleObject(waitable, 100);
+                app.dirty = true;
+                app.render();
+                let started = Instant::now();
+                WaitForSingleObject(waitable, 100);
+                let done = started.elapsed();
+                app.dirty = true;
+                app.render();
+                done
+            });
+            app.drawing = false;
+            app.strokes.clear();
+        }
+
         // Drawing: a laser stroke growing a point a frame, as the hand moves.
         let look = settings::get().look;
         let now = Instant::now();
-        app.strokes.push(Drawn { id: 1, stroke: Stroke::new(Point { x: 300.0, y: 300.0, at: now }, look, 1.0), baked: false, morph: None });
+        app.strokes.push(Drawn::new(1, Stroke::new(Point { x: 300.0, y: 300.0, at: now }, look, 1.0)));
         app.drawing = true;
         let mut i = 0;
         report("frame while drawing (laser, glow)", 120, || {
@@ -208,12 +410,12 @@ fn perf_report() {
                 crate::set_parts(&mut stroke, &parts, now);
                 stroke.whole = true;
                 stroke.look.smoothing = 0;
-                app.strokes.push(Drawn { id: 10 + k as u64, stroke, baked: false, morph: None });
+                app.strokes.push(Drawn::new(10 + k as u64, stroke));
             }
             let points: usize = app.strokes.iter().map(|d| d.stroke.points.len()).sum();
             let mut trail = Stroke::new(Point { x: 200.0, y: 200.0, at: now }, look, 1.0);
             trail.points = (0..200).map(|i| Point { x: 200.0 + i as f32 * 6.0, y: 300.0 + (i as f32 * 0.1).sin() * 300.0, at: Instant::now() }).collect();
-            app.strokes.push(Drawn { id: 20, stroke: trail, baked: false, morph: None });
+            app.strokes.push(Drawn::new(20, trail));
             let label = format!("six snapped shapes fading, {points} points");
             report(&label, 40, || {
                 for drawn in &mut app.strokes {
