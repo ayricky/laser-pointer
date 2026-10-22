@@ -45,5 +45,6 @@ jobs:
 
       - name: Publish the release
         shell: pwsh
+        env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create $env:GITHUB_REF_NAME (Get-ChildItem dist/*.zip) --title "Laser Pointer $env:GITHUB_REF_NAME" --generate-notes
