@@ -3,14 +3,15 @@
 //! has no licence and is never limited, and nor is the Store build when its licence can't be
 //! read: a paying user must never be locked out by an error.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use windows::core::{w, Interface, HSTRING, PCWSTR};
 use windows::Services::Store::StoreContext;
-use windows::Win32::Foundation::HWND;
+use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::System::SystemInformation::GetSystemTimeAsFileTime;
 use windows::Win32::UI::Shell::{IInitializeWithWindow, ShellExecuteW};
-use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, SW_SHOWNORMAL, WM_APP};
 
 use crate::settings;
 
@@ -20,8 +21,13 @@ const PRODUCT_PAGE: &str = "ms-windows-store://pdp/?productid=9MT6DPQK4631";
 /// 100 ns ticks, as Windows counts time.
 const DAY: i64 = 24 * 60 * 60 * 10_000_000;
 
+/// Posted to the overlay whenever a check has a fresh answer, read with `licence`.
+pub const WM_LICENCE: u32 = WM_APP + 10;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Licence {
+    /// Not read yet: the Store build has only just started.
+    Unknown,
     /// Bought, the plain exe, or a licence that couldn't be read.
     Full,
     /// In the free trial, with this many days left, counting a part day as one.
@@ -30,25 +36,54 @@ pub enum Licence {
     Unlicensed { trial_over: bool },
 }
 
-static LICENCE: Mutex<Licence> = Mutex::new(Licence::Full);
+static LICENCE: Mutex<Licence> = Mutex::new(Licence::Unknown);
+/// A worker is reading the licence.
+static BUSY: AtomicBool = AtomicBool::new(false);
+/// Asked for again since the worker began its read, so that read may be out of date.
+static AGAIN: AtomicBool = AtomicBool::new(false);
 
 pub fn licence() -> Licence {
     *LICENCE.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Reads the licence again on a worker thread, as the Store may take a moment to answer, then
-/// calls `then` there with what it found. `owner` is the window the Store's dialogs would belong
-/// to; a desktop app has to name one or the Store may answer wrongly.
-pub fn check(owner: HWND, then: impl FnOnce(Licence) + Send + 'static) {
+fn set(licence: Licence) {
+    *LICENCE.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = licence;
+}
+
+/// Reads the licence again, then posts WM_LICENCE to `owner`, which is also the window the
+/// Store's dialogs would belong to: a desktop app has to name one or the Store may answer wrongly.
+/// The Store may take a while, so one worker thread reads at a time; asking while it's busy makes
+/// it read once more before it answers, so the answer is never older than the last request.
+pub fn check(owner: HWND) {
     if settings::package_family().is_none() {
-        return then(Licence::Full);
+        return set(Licence::Full);
+    }
+    AGAIN.store(true, Ordering::SeqCst);
+    if BUSY.swap(true, Ordering::SeqCst) {
+        return;
     }
     let owner = owner.0 as isize;
-    std::thread::spawn(move || {
-        let licence = read(HWND(owner as _)).unwrap_or(Licence::Full);
-        *LICENCE.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = licence;
-        then(licence);
+    let worker = std::thread::Builder::new().spawn(move || {
+        loop {
+            AGAIN.store(false, Ordering::SeqCst);
+            set(read(HWND(owner as _)).unwrap_or(Licence::Full));
+            if AGAIN.load(Ordering::SeqCst) {
+                continue;
+            }
+            BUSY.store(false, Ordering::SeqCst);
+            // A request between the last look and letting go found it busy and left it to us.
+            if !AGAIN.load(Ordering::SeqCst) || BUSY.swap(true, Ordering::SeqCst) {
+                break;
+            }
+        }
+        unsafe {
+            let _ = PostMessageW(Some(HWND(owner as _)), WM_LICENCE, WPARAM(0), LPARAM(0));
+        }
     });
+    if worker.is_err() {
+        // No thread to ask with: leave the licence as it was rather than lock anyone out.
+        BUSY.store(false, Ordering::SeqCst);
+    }
 }
 
 fn read(owner: HWND) -> windows::core::Result<Licence> {

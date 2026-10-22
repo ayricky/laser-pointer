@@ -21,7 +21,7 @@ mod store;
 mod stroke;
 mod ui;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
@@ -57,14 +57,14 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyCursor, DispatchMessageW, GetCursorInfo, GetCursorPos,
     GetMessageTime, GetSystemMetrics, GetWindowLongPtrW, KillTimer, LoadCursorW,
-    MsgWaitForMultipleObjectsEx, PeekMessageW, PostMessageW, PostQuitMessage, RegisterClassW, SetCursor, SetCursorPos,
+    MsgWaitForMultipleObjectsEx, PeekMessageW, PostQuitMessage, RegisterClassW, SetCursor, SetCursorPos,
     SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
     SystemParametersInfoW, TranslateMessage, CURSORINFO, GWL_EXSTYLE, HCURSOR, HICON, HWND_TOPMOST,
     IDC_ARROW, IDC_CROSS, LWA_ALPHA, MA_NOACTIVATE, MSG, MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT,
     SC_CLOSE, SC_KEYMENU, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
     SM_YVIRTUALSCREEN, SPI_GETCLIENTAREAANIMATION, SWP_NOACTIVATE, SWP_NOMOVE,
     SWP_NOOWNERZORDER, SWP_NOSIZE, SW_HIDE, SW_SHOWNOACTIVATE, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
-    WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_HOTKEY, WM_KEYDOWN,
+    WM_CAPTURECHANGED, WM_CHAR, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_HOTKEY, WM_KEYDOWN,
     WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEACTIVATE,
     WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP,
     WM_SETCURSOR, WM_SETTINGCHANGE, WM_SYSCHAR, WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER,
@@ -617,7 +617,7 @@ fn main() -> Result<()> {
         with_app(App::refresh_cursor);
         // Shortcuts first: adding the tray icon can take Explorer a few seconds.
         sync_hotkeys();
-        store::check(hwnd, |_| {});
+        store::check(hwnd);
         ui::init(instance.into())?;
         if first_run {
             let shortcut = ui::shortcut_name(settings::get().key(Command::Toggle));
@@ -730,32 +730,23 @@ pub fn strokes_on_screen() -> bool {
     INK_VISIBLE.load(Ordering::Relaxed)
 }
 
-/// Posted to the overlay with what a fresh look at the licence found, when the laser was asked
-/// for without one: wparam LICENSED, TRIAL_OVER or NO_LICENCE.
-const WM_LICENCE: u32 = WM_APP + 10;
-const LICENSED: usize = 1;
-const TRIAL_OVER: usize = 2;
-const NO_LICENCE: usize = 3;
+thread_local! {
+    /// The laser was asked for without a licence and waits on the Store's answer.
+    static WANTS_LASER: Cell<bool> = const { Cell::new(false) };
+}
 
 pub fn set_laser(on: bool) {
+    WANTS_LASER.with(|wants| wants.set(false));
     if on {
         match store::licence() {
             store::Licence::Full => {}
-            // Looked at again each time, so a trial that ends while the app runs is noticed.
-            store::Licence::Trial(_) => store::check(overlay(), |_| {}),
+            // On at once, and looked at again each time, so a trial that ends while the app runs
+            // switches the laser off as soon as the Store says so.
+            store::Licence::Unknown | store::Licence::Trial(_) => store::check(overlay()),
             // It may have been bought since: ask the Store before saying no.
             store::Licence::Unlicensed { .. } => {
-                let window = overlay().0 as isize;
-                store::check(overlay(), move |licence| {
-                    let answer = match licence {
-                        store::Licence::Unlicensed { trial_over: true } => TRIAL_OVER,
-                        store::Licence::Unlicensed { trial_over: false } => NO_LICENCE,
-                        _ => LICENSED,
-                    };
-                    unsafe {
-                        let _ = PostMessageW(Some(HWND(window as _)), WM_LICENCE, WPARAM(answer), LPARAM(0));
-                    }
-                });
+                WANTS_LASER.with(|wants| wants.set(true));
+                store::check(overlay());
                 return;
             }
         }
@@ -971,18 +962,27 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 }
                 LRESULT(0)
             }
-            WM_LICENCE => {
-                if wparam.0 == LICENSED {
-                    set_laser(true);
-                } else {
-                    let notice = if wparam.0 == TRIAL_OVER {
-                        "Your free week is over. Buy Screen Laser Pointer to keep drawing"
-                    } else {
-                        "The Store has no licence for this app on your account"
-                    };
-                    with_app(|app| app.notify_for(notice, 5.0));
-                    store::open_product_page();
+            store::WM_LICENCE => {
+                let wanted = WANTS_LASER.with(|wants| wants.replace(false));
+                match store::licence() {
+                    store::Licence::Unlicensed { trial_over } if wanted || laser_on() => {
+                        if laser_on() {
+                            set_laser(false);
+                        }
+                        let notice = if trial_over {
+                            "Your free week is over. Buy Screen Laser Pointer to keep drawing"
+                        } else {
+                            "The Store has no licence for this app on your account"
+                        };
+                        with_app(|app| app.notify_for(notice, 5.0));
+                        store::open_product_page();
+                    }
+                    store::Licence::Unlicensed { .. } => {}
+                    _ if wanted => set_laser(true),
+                    _ => {}
                 }
+                // The panel's Buy link counts the days left.
+                ui::settings_changed();
                 LRESULT(0)
             }
             WM_SETCURSOR if laser_on() => {

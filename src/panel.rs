@@ -252,8 +252,8 @@ fn links() -> [(String, String); 2] {
             (format!("Buy \u{b7} {days} day{plural} of trial left"), store::product_page())
         }
         (Licence::Unlicensed { .. }, _) => ("Buy in the Store".into(), store::product_page()),
-        (Licence::Full, Some(family)) => ("Rate in the Store".into(), format!("ms-windows-store://review/?PFN={family}")),
-        (Licence::Full, None) => ("Release notes".into(), "https://github.com/ayricky/laser-pointer/releases".into()),
+        (Licence::Full | Licence::Unknown, Some(family)) => ("Rate in the Store".into(), format!("ms-windows-store://review/?PFN={family}")),
+        (Licence::Full | Licence::Unknown, None) => ("Release notes".into(), "https://github.com/ayricky/laser-pointer/releases".into()),
     };
     [first, ("Report a problem".into(), "https://github.com/ayricky/laser-pointer/issues/new".into())]
 }
@@ -647,11 +647,7 @@ impl Panel {
         panel.window = Some((hwnd, dpi, width, height));
         panel.ask_autostart(None);
         // The trial's days left are counted afresh each time the panel opens.
-        let window = hwnd.0 as isize;
-        store::check(hwnd, move |_| {
-            // Safe from any thread; a window closed in the meantime just ignores it.
-            let _ = InvalidateRect(Some(HWND(window as _)), None, false);
-        });
+        store::check(crate::overlay());
         Ok(panel)
     }
 
