@@ -348,20 +348,26 @@
     return { shape: 'ellipse', parts: [points] };
   }
 
-  function rectangle(corners, tol, scale) {
+  // The box `corners` were meant as, squared up, or null if squaring it would move it off the
+  // stroke `loop`, as it would a thin parallelogram's.
+  function rectangle(corners, loop, tol, scale) {
     for (let i = 0; i < 4; i++) {
       if (Math.abs(turnAt(corners[(i + 3) % 4], corners[i], corners[(i + 1) % 4]) - Math.PI / 2) >= tol.angle * 3) return null;
     }
+    // The sides' directions averaged modulo a right angle, the longer sides counting for more.
     let sx = 0, sy = 0;
-    for (let i = 0; i < 4; i++) { const a = corners[i], b = corners[(i + 1) % 4], t = 4 * Math.atan2(b[1] - a[1], b[0] - a[0]); sx += Math.cos(t); sy += Math.sin(t); }
-    const angle = snapAngle(Math.atan2(sy, sx) / 4, Math.PI / 2, tol.angle), centre = centroid(corners);
-    const local = corners.map(c => rotate(c, centre, -angle));
+    for (let i = 0; i < 4; i++) { const a = corners[i], b = corners[(i + 1) % 4], t = 4 * Math.atan2(b[1] - a[1], b[0] - a[0]); sx += d2(a, b) * Math.cos(t); sy += d2(a, b) * Math.sin(t); }
+    const drawn = Math.atan2(sy, sx) / 4, centre = centroid(corners);
+    const local = corners.map(c => rotate(c, centre, -drawn));
     const xs = local.map(p => p[0]).sort((p, q) => p - q), ys = local.map(p => p[1]).sort((p, q) => p - q);
     let width = (xs[3] - xs[0] + (xs[2] + xs[3]) / 2 - (xs[0] + xs[1]) / 2) / 2;
     let height = (ys[3] - ys[0] + (ys[2] + ys[3]) / 2 - (ys[0] + ys[1]) / 2) / 2;
     if (Math.abs(width - height) / Math.max(width, height) < tol.equal) width = height = (width + height) / 2;
     const lc = [(xs[0] + xs[3]) / 2, (ys[0] + ys[3]) / 2];
-    const box = [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([kx, ky]) => rotate([lc[0] + kx * width / 2, lc[1] + ky * height / 2], centre, angle));
+    const boxAt = angle => [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([kx, ky]) => rotate([lc[0] + kx * width / 2, lc[1] + ky * height / 2], centre, angle));
+    // Squared up but not yet turned to the nearest right angle, it must still follow the stroke.
+    if (reach(loop, boxAt(drawn)) > FIT_REACH) return null;
+    const box = boxAt(snapAngle(drawn, Math.PI / 2, tol.angle));
     let area = 0;
     for (let i = 0; i < 4; i++) area += corners[i][0] * corners[(i + 1) % 4][1] - corners[(i + 1) % 4][0] * corners[i][1];
     const ordered = area > 0 ? box : box.slice().reverse();
@@ -369,23 +375,132 @@
     return { shape: 'rectangle', parts: [polyline(ordered, scale)] };
   }
 
+  // The path without `fraction` of its length at each end.
+  function trim(pts, fraction) {
+    const total = pathLength(pts), from = fraction * total, to = (1 - fraction) * total, out = [];
+    let walked = 0;
+    for (let i = 1; i < pts.length; i++) {
+      const a = pts[i - 1], b = pts[i], step = d2(a, b);
+      const pointAt = d => { const k = step > 0 ? Math.min(1, Math.max(0, (d - walked) / step)) : 0; return [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k]; };
+      if (!out.length && walked + step >= from) out.push(pointAt(from));
+      if (walked + step >= to) { out.push(pointAt(to)); break; }
+      if (out.length) out.push(b);
+      walked += step;
+    }
+    return out;
+  }
+
+  // Where the line through a and b meets the line through c and d.
+  function meeting(a, b, c, d) {
+    const r = [b[0] - a[0], b[1] - a[1]], s = [d[0] - c[0], d[1] - c[1]], den = r[0] * s[1] - r[1] * s[0];
+    if (Math.abs(den) < 1e-6 * Math.max(Math.hypot(...r) * Math.hypot(...s), 1e-6)) return null;
+    const t = ((c[0] - a[0]) * s[1] - (c[1] - a[1]) * s[0]) / den;
+    return [a[0] + r[0] * t, a[1] + r[1] * t];
+  }
+
+  // The corners of a closed outline as {first, last, at}. A hand rounds corners off, which the
+  // outline keeps as two or three gentler bends close together, so neighbouring bends the same
+  // way are taken as one corner where the sides either side of them meet.
+  function cornersOf(open) {
+    const n = open.length, at = i => open[i % n], deg = Math.PI / 180;
+    const turn = i => signedTurn(at(i + n - 1), at(i), at(i + 1)), side = i => d2(at(i), at(i + 1));
+    // Start after the longest side: no rounded corner has its ends either side of it.
+    let longest = 0;
+    for (let i = 1; i < n; i++) if (side(i) >= side(longest)) longest = i;
+    const found = [];
+    for (let i = longest + 1; i <= longest + n;) {
+      const first = i;
+      let last = i, total = turn(i);
+      // The next bend joins while it turns the same way, neither is sharp enough to be a corner of
+      // its own, and the edge between is short beside the side leading in.
+      while (last < longest + n) {
+        const next = turn(last + 1);
+        const gentle = total * next > 0 && Math.abs(turn(last)) < 120 * deg && Math.abs(next) < 120 * deg;
+        if (!gentle || side(last) >= 0.4 * side(first + n - 1) || Math.abs(total + next) > 150 * deg) break;
+        last++;
+        total += next;
+      }
+      if (Math.abs(total) > 35 * deg) {
+        let point = at(first);
+        if (first !== last) {
+          const b = at(first), c = at(last), met = meeting(at(first + n - 1), b, c, at(last + 1));
+          const group = [];
+          for (let k = first; k <= last; k++) group.push(at(k));
+          point = met && d2(met, b) < 2 * d2(b, c) ? met : centroid(group);
+        }
+        found.push({ first: first % n, last: last % n, at: point });
+      }
+      i = last + 1;
+    }
+    return found;
+  }
+
   function polygon(loop, tol, scale) {
     const [, , major, minor] = principalAxis(loop), size = (Math.sqrt(major) + Math.sqrt(minor)) * 2;
-    const open = simplify(loop, 0.06 * size).slice(0, -1), n = open.length;
+    // Finer for a thin shape, whose corners could otherwise sit within the tolerance.
+    const open = simplify(loop, Math.min(0.06 * size, 0.5 * Math.sqrt(minor))).slice(0, -1), n = open.length;
     if (n < 3) return null;
-    const corners = open.filter((_, i) => turnAt(open[(i + n - 1) % n], open[i], open[(i + 1) % n]) > 35 * Math.PI / 180);
-    const indices = corners.map(c => Math.max(0, loop.indexOf(c)));
-    for (let k = 0; k < indices.length; k++) {
-      const from = indices[k], to = indices[(k + 1) % indices.length];
+    const found = cornersOf(open), corners = found.map(c => c.at);
+    // Each side must be straight between its corners, leaving out the rounding at each end.
+    for (let k = 0; k < found.length; k++) {
+      const from = Math.max(0, loop.indexOf(open[found[k].last])), to = Math.max(0, loop.indexOf(open[found[(k + 1) % found.length].first]));
       const side = from <= to ? loop.slice(from, to + 1) : loop.slice(from).concat(loop.slice(0, to + 1));
-      if (side.length >= 3 && bend(side) >= tol.side) return null;
+      if (side.length >= 3 && bend(trim(side, 0.15)) >= tol.side) return null;
     }
-    if (corners.length === 3) return { shape: 'triangle', parts: [beginNear(polyline([...corners, corners[0]], scale), loop[0])] };
+    // The shape must follow the stroke: not cut across a thin loop, nor put a corner out where the
+    // stroke never went, as when two corners either end of a short side are taken for one.
+    if (corners.length >= 3) {
+      const [across, reach] = fit(loop, corners);
+      if (across > FIT_ACROSS || reach > FIT_REACH) return null;
+    }
+    let shape = null;
+    if (corners.length === 3) shape = { shape: 'triangle', parts: [beginNear(polyline([...corners, corners[0]], scale), loop[0])] };
     if (corners.length === 4) {
-      const r = rectangle(corners, tol, scale);
-      return r && { shape: 'rectangle', parts: [beginNear(r.parts[0], loop[0])] };
+      const r = rectangle(corners, loop, tol, scale);
+      shape = r && { shape: 'rectangle', parts: [beginNear(r.parts[0], loop[0])] };
     }
-    return null;
+    return shape;
+  }
+
+  // How far a box or triangle may lie from its stroke, relative to how thick the stroke's loop is,
+  // and how far out any corner may reach, relative to the sides there. Rounded corners pass; a
+  // trapezoid whose top is a third of its base or more doesn't become a triangle.
+  const FIT_ACROSS = 0.55, FIT_REACH = 0.25;
+
+  const nearestOnPath = (p, line) => { let best = Infinity; for (let i = 1; i < line.length; i++) best = Math.min(best, d2(p, nearestOn(p, line[i - 1], line[i]))); return best; };
+
+  // How well the polygon through `corners` follows a closed stroke, as found, before it is squared
+  // up: [furthest any stroke point lies from it, relative to the stroke's spread across its main
+  // axis; how far out its corners reach, as reach() measures it].
+  function fit(pts, corners) {
+    const [, , , minor] = principalAxis(pts), ring = [...corners, corners[0]];
+    let across = 0;
+    for (const p of pts) across = Math.max(across, nearestOnPath(p, ring));
+    return [across / Math.max(Math.sqrt(minor), 1e-3), reach(pts, corners)];
+  }
+
+  // The furthest any of a closed polygon's corners lies from the stroke, relative to the shorter
+  // side either side of it.
+  function reach(pts, corners) {
+    const n = corners.length;
+    let most = 0;
+    for (let k = 0; k < n; k++) {
+      const before = corners[(k + n - 1) % n], at = corners[k], after = corners[(k + 1) % n];
+      most = Math.max(most, nearestOnPath(at, pts) / Math.max(Math.min(d2(before, at), d2(at, after)), 1e-3));
+    }
+    return most;
+  }
+
+  // How far a stroke lies from a shape: the root mean square of each point's distance to it.
+  function misfit(pts, shape) {
+    const outline = shape.parts.flat();
+    let squares = 0;
+    for (const p of pts) {
+      let best = Infinity;
+      for (let i = 1; i < outline.length; i++) best = Math.min(best, d2(p, nearestOn(p, outline[i - 1], outline[i])));
+      squares += best * best;
+    }
+    return Math.sqrt(squares / pts.length);
   }
 
   /** `points` as [[x, y]], `strength` 0..1. Returns `{shape, parts}` or null. */
@@ -396,8 +511,12 @@
     // Bends finer than the samples are lost to them; whatever goes that much further isn't a shape.
     if (pathLength(path) < 0.5 * walked) return null;
     const tol = tolerances(strength), loop = closedPart(path, tol);
-    const ideal = loop ? polygon(loop, tol, scale) || ellipse(loop, tol, scale) : arrow(path, tol, strength, scale) || line(path, tol, strength, scale);
-    return ideal;
+    if (!loop) return arrow(path, tol, strength, scale) || line(path, tol, strength, scale);
+    // A box with rounded corners may pass for an ellipse too, and a lumpy circle for a box:
+    // whichever lies closer to the stroke is the one meant.
+    const box = polygon(loop, tol, scale), round = ellipse(loop, tol, scale);
+    if (box && round) return misfit(loop, box) <= misfit(loop, round) ? box : round;
+    return box || round;
   }
 
   function correspondence(drawn, correction) {
@@ -480,12 +599,12 @@
     Highlighter: { color: '#ffd400', width: 18, opacity: 40, fade: 3000, smoothing: 2, style: 'solid', ink: false, snap: 60 },
     Pen: { color: '#1e90ff', width: 4, opacity: 100, fade: 1000, smoothing: 2, style: 'solid', ink: true, snap: 50 },
   };
-  const SNAP_MS = 250, CLEAR_MS = 220, RIPPLE_MS = 400, RIPPLE_REACH = 60, TOAST_MS = 1400, TOAST_IN = 250, TOAST_OUT = 167;
+  const SNAP_MS = 160, CLEAR_MS = 220, RIPPLE_MS = 400, RIPPLE_REACH = 60, TOAST_MS = 1400, TOAST_IN = 250, TOAST_OUT = 167;
   /** How far a snapping stroke has moved towards its shape, `ms` in: a spring that sets off at
    *  once, overshoots by a few percent and lands exactly at SNAP_MS, as in src/main.rs. */
   function spring(ms) {
     if (ms >= SNAP_MS) return 1;
-    const t = ms / 1000, decay = 20.2, frequency = 19.4, start = 12;
+    const t = ms / 1000, decay = 31.6, frequency = 30.3, start = 18.8;
     return 1 - Math.exp(-decay * t) * (Math.cos(frequency * t) + (decay - start) / frequency * Math.sin(frequency * t));
   }
 
