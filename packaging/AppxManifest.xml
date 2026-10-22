@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- The Store package's manifest. package.ps1 fills in the {{...}} fields: the identity comes from
-     the app's reservation in Partner Center, the version from Cargo.toml. -->
+     the app's reservation in Partner Center, the version from Cargo.toml. "Laser Pointer" was
+     already reserved by someone else, so the Store name, which DisplayName must match, is
+     "Screen Laser Pointer". -->
 <Package
   xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
   xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
@@ -11,7 +13,7 @@
   <Identity Name="{{Name}}" Publisher="{{Publisher}}" Version="{{Version}}" ProcessorArchitecture="{{Architecture}}" />
 
   <Properties>
-    <DisplayName>Laser Pointer</DisplayName>
+    <DisplayName>Screen Laser Pointer</DisplayName>
     <PublisherDisplayName>{{PublisherDisplayName}}</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
   </Properties>
@@ -27,7 +29,7 @@
   <Applications>
     <Application Id="LaserPointer" Executable="laser-pointer.exe" EntryPoint="Windows.FullTrustApplication">
       <uap:VisualElements
-        DisplayName="Laser Pointer"
+        DisplayName="Screen Laser Pointer"
         Description="Draw over anything on your screen with a laser that fades by itself."
         BackgroundColor="transparent"
         Square150x150Logo="Assets\Square150x150Logo.png"
@@ -37,7 +39,7 @@
       <Extensions>
         <!-- "Start with Windows" in the settings turns this on; src/settings.rs uses the same TaskId. -->
         <desktop:Extension Category="windows.startupTask">
-          <desktop:StartupTask TaskId="LaserPointerStartup" Enabled="false" DisplayName="Laser Pointer" />
+          <desktop:StartupTask TaskId="LaserPointerStartup" Enabled="false" DisplayName="Screen Laser Pointer" />
         </desktop:Extension>
       </Extensions>
     </Application>

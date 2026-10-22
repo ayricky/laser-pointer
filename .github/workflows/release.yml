@@ -1,7 +1,6 @@
 # Pushing a tag like v1.0.0 (matching Cargo.toml) builds both architectures and publishes a GitHub
 # release with the exes. The Store bundle is kept as a workflow artifact, to upload in Partner
-# Center; its identity comes from the repository variables STORE_NAME, STORE_PUBLISHER and
-# STORE_PUBLISHER_DISPLAY_NAME (Partner Center > the app > Product identity).
+# Center.
 name: Release
 
 on:
@@ -32,16 +31,8 @@ jobs:
 
       - name: Build and package
         shell: pwsh
-        env:
-          STORE_NAME: ${{ vars.STORE_NAME }}
-          STORE_PUBLISHER: ${{ vars.STORE_PUBLISHER }}
-          STORE_PUBLISHER_DISPLAY_NAME: ${{ vars.STORE_PUBLISHER_DISPLAY_NAME }}
         run: |
-          $identity = @{}
-          if ($env:STORE_NAME) { $identity.Name = $env:STORE_NAME }
-          if ($env:STORE_PUBLISHER) { $identity.Publisher = $env:STORE_PUBLISHER }
-          if ($env:STORE_PUBLISHER_DISPLAY_NAME) { $identity.PublisherDisplayName = $env:STORE_PUBLISHER_DISPLAY_NAME }
-          ./packaging/package.ps1 -Architectures x64,arm64 @identity
+          ./packaging/package.ps1 -Architectures x64,arm64
           foreach ($architecture in 'x64', 'arm64') {
             Compress-Archive -Path "dist/$architecture/laser-pointer.exe", LICENSE, README.md `
               -DestinationPath "dist/laser-pointer-$env:GITHUB_REF_NAME-windows-$architecture.zip"
@@ -54,6 +45,5 @@ jobs:
 
       - name: Publish the release
         shell: pwsh
-        env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create $env:GITHUB_REF_NAME (Get-ChildItem dist/*.zip) --title "Laser Pointer $env:GITHUB_REF_NAME" --generate-notes

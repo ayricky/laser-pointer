@@ -2,7 +2,9 @@
 
 Text for Partner Center (Store listings → English (United States)). Limits are Partner Center's.
 
-**Product name:** Laser Pointer
+**Product name:** Screen Laser Pointer ("Laser Pointer" was already reserved by someone else)
+
+**Store ID:** 9MT6DPQK4631, at https://apps.microsoft.com/detail/9MT6DPQK4631
 
 **Short description** (shown in some Windows 10 layouts; ≤ 1,000 characters, 270 or fewer recommended)
 
@@ -35,8 +37,9 @@ Text for Partner Center (Store listings → English (United States)). Limits are
 > the notification area, and it handles every monitor's scaling. No account, no telemetry, no
 > network connections.
 >
-> Laser Pointer is also free and open source (MIT); the website links to the source. Buying it
-> here gets you the signed, self-updating version and supports its development.
+> Screen Laser Pointer is the Store edition of Laser Pointer, which is free and open source (MIT);
+> the website links to the source. Buying it here gets you the signed, self-updating version and
+> supports its development.
 
 **What's new in this version:** leave blank for the first submission, as Partner Center advises.
 
