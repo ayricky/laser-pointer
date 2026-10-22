@@ -3,9 +3,8 @@
 Builds the Microsoft Store package: an MSIX per architecture, and a bundle when there are several.
 
 .DESCRIPTION
-Partner Center lists the identity to use under the app's Product management > Product identity:
-Package/Identity/Name, Package/Identity/Publisher and Package/Properties/PublisherDisplayName.
-Without them the package gets a placeholder identity, good for testing only.
+The identity defaults to the one Partner Center assigned the Store app (Product management >
+Product identity), so the bundle can be uploaded as it is.
 
 Everything is written to dist/. Nothing is signed: the Store signs what it publishes. To try a
 build on this PC, turn on Developer Mode and register its folder:
@@ -13,13 +12,13 @@ build on this PC, turn on Developer Mode and register its folder:
 
 .EXAMPLE
 ./packaging/package.ps1
-./packaging/package.ps1 -Architectures x64,arm64 -Name 12345RicardoMariano.LaserPointer -Publisher 'CN=...'
+./packaging/package.ps1 -Architectures x64,arm64
 #>
 param(
     [string[]] $Architectures = @('x64'),
-    [string] $Name = 'RicardoMariano.LaserPointer',
-    [string] $Publisher = 'CN=Ricardo Mariano',
-    [string] $PublisherDisplayName = 'Ricardo Mariano',
+    [string] $Name = 'ayricky.ScreenLaserPointer',
+    [string] $Publisher = 'CN=16A8F02B-6B7E-43C2-A153-37AA3E4897B6',
+    [string] $PublisherDisplayName = 'ayricky',
     # Package what's already in target/<triple>/release instead of building it.
     [switch] $SkipBuild
 )
