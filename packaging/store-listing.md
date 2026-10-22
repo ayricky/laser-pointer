@@ -4,15 +4,15 @@ Text for Partner Center (Store listings → English (United States)). Limits are
 
 **Product name:** Laser Pointer
 
-**Short description** (shown in some Windows 10 layouts, ≤ 270 characters)
+**Short description** (shown in some Windows 10 layouts; ≤ 1,000 characters, 270 or fewer recommended)
 
 > A laser pointer for your screen. Draw over slides, code, a browser or a call; the trail fades
-> by itself a second later. Rough shapes snap clean, Alt keeps lines straight, and right-clicks
-> and scrolling still reach the app underneath.
+> by itself a second later. Rough shapes snap clean, Alt keeps lines straight, right-click clicks
+> the app underneath, and the scroll wheel still scrolls.
 
 **Description** (≤ 10,000 characters)
 
-> Point at what matters. Press Alt+L and draw over anything on your screen: a slide, a
+> Point at what matters. Press Alt+L and draw over what's on your screen: a slide, a
 > spreadsheet, code in a review, a product demo, a video call. The laser trail tapers and fades
 > by itself a second later, so the screen is always ready for the next point.
 >
@@ -31,14 +31,14 @@ Text for Partner Center (Store listings → English (United States)). Limits are
 > readily shapes snap, or not at all; eight animated cursors; up to eight presets; and every
 > command's shortcut can be changed or turned off.
 >
-> It's tiny and native: under half a megabyte, no CPU while nothing moves, every monitor's
-> scaling handled. It sits in the notification area until you need it. No account, no
-> telemetry, no network connections.
+> It's tiny and native: the program is under half a megabyte, it uses no CPU while it waits in
+> the notification area, and it handles every monitor's scaling. No account, no telemetry, no
+> network connections.
 >
-> Laser Pointer is also free and open source (MIT) at github.com/ayricky/laser-pointer. Buying it
+> Laser Pointer is also free and open source (MIT); the website links to the source. Buying it
 > here gets you the signed, self-updating version and supports its development.
 
-**What's new in this version:** First release.
+**What's new in this version:** leave blank for the first submission, as Partner Center advises.
 
 **Product features** (≤ 20, ≤ 200 characters each)
 
@@ -51,7 +51,7 @@ Text for Partner Center (Store listings → English (United States)). Limits are
 7. Eight animated cursors in your laser colour
 8. Solid, Glow and Neon styles in any colour
 9. Every command's shortcut can be changed or turned off
-10. Under half a megabyte; no CPU while idle; per-monitor scaling
+10. A program under half a megabyte; no CPU while it waits; per-monitor scaling
 
 **Search terms** (≤ 7): laser pointer, screen annotation, draw on screen, presentation, highlighter, screen marker, teaching
 
