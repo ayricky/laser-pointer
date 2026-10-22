@@ -726,6 +726,11 @@ pub fn laser_on() -> bool {
     LASER_ON.load(Ordering::Relaxed)
 }
 
+/// On, or asked for and waiting on the Store's answer about the licence: what a toggle undoes.
+pub fn laser_wanted() -> bool {
+    laser_on() || WANTS_LASER.with(Cell::get)
+}
+
 pub fn strokes_on_screen() -> bool {
     INK_VISIBLE.load(Ordering::Relaxed)
 }
@@ -768,7 +773,7 @@ pub fn settings_changed() {
 
 pub fn run_command(command: Command) {
     match command {
-        Command::Toggle => set_laser(!laser_on()),
+        Command::Toggle => set_laser(!laser_wanted()),
         Command::Off => set_laser(false),
         Command::Undo => {
             with_app(App::undo);

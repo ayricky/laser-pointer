@@ -1046,7 +1046,7 @@ impl Panel {
         };
         let mut current = settings::get();
         match widget {
-            Widget::Power => return Action::Toggle(!crate::laser_on()),
+            Widget::Power => return Action::Toggle(!crate::laser_wanted()),
             Widget::Tab(index) => {
                 self.switch_tab(index);
                 return Action::Redraw;

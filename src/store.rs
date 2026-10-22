@@ -3,7 +3,7 @@
 //! has no licence and is never limited, and nor is the Store build when its licence can't be
 //! read: a paying user must never be locked out by an error.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use windows::core::{w, Interface, HSTRING, PCWSTR};
@@ -36,35 +36,40 @@ pub enum Licence {
     Unlicensed { trial_over: bool },
 }
 
-static LICENCE: Mutex<Licence> = Mutex::new(Licence::Unknown);
+/// The latest licence read, and how many checks had been asked for when that read began.
+static LICENCE: Mutex<(Licence, u64)> = Mutex::new((Licence::Unknown, 0));
+/// How many checks have been asked for.
+static ASKED: AtomicU64 = AtomicU64::new(0);
 /// A worker is reading the licence.
 static BUSY: AtomicBool = AtomicBool::new(false);
-/// Asked for again since the worker began its read, so that read may be out of date.
-static AGAIN: AtomicBool = AtomicBool::new(false);
+
+fn state() -> std::sync::MutexGuard<'static, (Licence, u64)> {
+    LICENCE.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 pub fn licence() -> Licence {
-    *LICENCE.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    state().0
 }
 
-/// No check is under way, so `licence` is the latest answer. A WM_LICENCE that arrives while
-/// another check runs is out of date; that check will post its own.
+/// `licence` answers every check asked for so far. A WM_LICENCE that arrives before then is out
+/// of date; the check still to answer posts its own.
 pub fn settled() -> bool {
-    !BUSY.load(Ordering::SeqCst)
+    state().1 == ASKED.load(Ordering::SeqCst)
 }
 
-fn set(licence: Licence) {
-    *LICENCE.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = licence;
+fn set(licence: Licence, asked: u64) {
+    *state() = (licence, asked);
 }
 
 /// Reads the licence again, then posts WM_LICENCE to `owner`, which is also the window the
 /// Store's dialogs would belong to: a desktop app has to name one or the Store may answer wrongly.
 /// The Store may take a while, so one worker thread reads at a time; asking while it's busy makes
-/// it read once more before it answers, so the answer is never older than the last request.
+/// it read again before it answers, so its answer covers every request.
 pub fn check(owner: HWND) {
+    let asked = ASKED.fetch_add(1, Ordering::SeqCst) + 1;
     if settings::package_family().is_none() {
-        return set(Licence::Full);
+        return set(Licence::Full, asked);
     }
-    AGAIN.store(true, Ordering::SeqCst);
     if BUSY.swap(true, Ordering::SeqCst) {
         return;
     }
@@ -74,14 +79,14 @@ pub fn check(owner: HWND) {
     };
     let worker = std::thread::Builder::new().spawn(move || {
         loop {
-            AGAIN.store(false, Ordering::SeqCst);
-            set(read(HWND(owner as _)).unwrap_or(Licence::Full));
-            if AGAIN.load(Ordering::SeqCst) {
+            let asked = ASKED.load(Ordering::SeqCst);
+            set(read(HWND(owner as _)).unwrap_or(Licence::Full), asked);
+            if ASKED.load(Ordering::SeqCst) != asked {
                 continue;
             }
             BUSY.store(false, Ordering::SeqCst);
             // A request between the last look and letting go found it busy and left it to us.
-            if !AGAIN.load(Ordering::SeqCst) || BUSY.swap(true, Ordering::SeqCst) {
+            if ASKED.load(Ordering::SeqCst) == asked || BUSY.swap(true, Ordering::SeqCst) {
                 break;
             }
         }
@@ -89,7 +94,7 @@ pub fn check(owner: HWND) {
     });
     if worker.is_err() {
         // No thread to ask the Store with: let the user draw rather than lock anyone out.
-        set(Licence::Full);
+        set(Licence::Full, ASKED.load(Ordering::SeqCst));
         BUSY.store(false, Ordering::SeqCst);
         answer();
     }
