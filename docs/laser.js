@@ -441,35 +441,39 @@
       const side = from <= to ? loop.slice(from, to + 1) : loop.slice(from).concat(loop.slice(0, to + 1));
       if (side.length >= 3 && bend(trim(side, 0.15)) >= tol.side) return null;
     }
+    // The shape must follow the stroke: not cut across a thin loop, nor put a corner out where the
+    // stroke never went, as when two corners either end of a short side are taken for one.
+    if (corners.length >= 3) {
+      const [across, reach] = fit(loop, corners);
+      if (across > FIT_ACROSS || reach > FIT_REACH) return null;
+    }
     let shape = null;
     if (corners.length === 3) shape = { shape: 'triangle', parts: [beginNear(polyline([...corners, corners[0]], scale), loop[0])] };
     if (corners.length === 4) {
       const r = rectangle(corners, tol, scale);
       shape = r && { shape: 'rectangle', parts: [beginNear(r.parts[0], loop[0])] };
     }
-    if (!shape) return null;
-    // The shape must follow the stroke: not cut across a thin loop, nor put a corner out where the
-    // stroke never went, as when two corners either end of a short side are taken for one.
-    const [across, away] = fit(loop, shape);
-    return across <= FIT_ACROSS && away <= FIT_AWAY ? shape : null;
+    return shape;
   }
 
-  // How far a box or triangle may lie from its stroke: on average, relative to how thick the
-  // stroke's loop is, and at its furthest, relative to the loop's size.
-  const FIT_ACROSS = 0.45, FIT_AWAY = 0.12;
+  // How far a box or triangle may lie from its stroke, relative to how thick the stroke's loop is,
+  // and how far out any corner may reach, relative to the sides there. Rounded corners pass; a
+  // trapezoid whose top is a third of its base or more doesn't become a triangle.
+  const FIT_ACROSS = 0.55, FIT_REACH = 0.3;
 
-  // How well a shape follows a stroke: [root mean square of each stroke point's distance to the
-  // shape, relative to the spread across the main axis; furthest any point of the shape lies from
-  // the stroke, relative to its size].
-  function fit(pts, shape) {
-    const [, , major, minor] = principalAxis(pts), size = (Math.sqrt(major) + Math.sqrt(minor)) * 2;
-    let away = 0;
-    for (const p of shape.parts.flat()) {
-      let best = Infinity;
-      for (let i = 1; i < pts.length; i++) best = Math.min(best, d2(p, nearestOn(p, pts[i - 1], pts[i])));
-      away = Math.max(away, best);
+  // How well the polygon through `corners` follows a closed stroke, as found, before it is squared
+  // up: [furthest any stroke point lies from it, relative to the stroke's spread across its main
+  // axis; furthest any corner lies from the stroke, relative to the shorter side either side of it].
+  function fit(pts, corners) {
+    const [, , , minor] = principalAxis(pts), n = corners.length, ring = [...corners, corners[0]];
+    const nearest = (p, line) => { let best = Infinity; for (let i = 1; i < line.length; i++) best = Math.min(best, d2(p, nearestOn(p, line[i - 1], line[i]))); return best; };
+    let across = 0, reach = 0;
+    for (const p of pts) across = Math.max(across, nearest(p, ring));
+    for (let k = 0; k < n; k++) {
+      const before = corners[(k + n - 1) % n], at = corners[k], after = corners[(k + 1) % n];
+      reach = Math.max(reach, nearest(at, pts) / Math.max(Math.min(d2(before, at), d2(at, after)), 1e-3));
     }
-    return [misfit(pts, shape) / Math.max(Math.sqrt(minor), 1e-3), away / size];
+    return [across / Math.max(Math.sqrt(minor), 1e-3), reach];
   }
 
   // How far a stroke lies from a shape: the root mean square of each point's distance to it.

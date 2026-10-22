@@ -310,18 +310,24 @@ pub fn correct(points: &[P], scale: f32, strength: f32) -> Option<Correction> {
     }
 }
 
-/// How well a shape follows a stroke, as (root mean square of each stroke point's distance to the
-/// shape, relative to the stroke's spread across its main axis; furthest any point of the shape
-/// lies from the stroke, relative to its size).
-fn fit(points: &[P], shape: &Correction) -> (f32, f32) {
-    let (_, _, major, minor) = principal_axis(points);
-    let size = (major.sqrt() + minor.sqrt()) * 2.0;
-    let outline: Vec<P> = shape.parts.iter().flatten().copied().collect();
-    let away = outline
-        .iter()
-        .map(|&p| points.windows(2).map(|edge| distance(p, nearest_on(p, edge[0], edge[1]))).fold(f32::MAX, f32::min))
+/// How well the polygon through `corners` follows a closed stroke, as found, before it is squared
+/// up: (furthest any stroke point lies from it, relative to the stroke's spread across its main
+/// axis; furthest any corner lies from the stroke, relative to the shorter side either side of it).
+fn fit(points: &[P], corners: &[P]) -> (f32, f32) {
+    let (_, _, _, minor) = principal_axis(points);
+    let n = corners.len();
+    let mut ring = corners.to_vec();
+    ring.push(corners[0]);
+    let to_ring = |p: P| ring.windows(2).map(|edge| distance(p, nearest_on(p, edge[0], edge[1]))).fold(f32::MAX, f32::min);
+    let across = points.iter().map(|&p| to_ring(p)).fold(0.0, f32::max);
+    let to_stroke = |p: P| points.windows(2).map(|edge| distance(p, nearest_on(p, edge[0], edge[1]))).fold(f32::MAX, f32::min);
+    let reach = (0..n)
+        .map(|k| {
+            let (before, at, after) = (corners[(k + n - 1) % n], corners[k], corners[(k + 1) % n]);
+            to_stroke(at) / distance(before, at).min(distance(at, after)).max(1e-3)
+        })
         .fold(0.0, f32::max);
-    (misfit(points, shape) / minor.sqrt().max(1e-3), away / size)
+    (across / minor.sqrt().max(1e-3), reach)
 }
 
 /// How far a stroke lies from a shape: the root mean square of each point's distance to it.
@@ -656,7 +662,15 @@ fn polygon(loop_: &[P], tolerance: &Tolerances, scale: f32) -> Option<Correction
     if !sides_straight {
         return None;
     }
-    let shape = match corner_points.len() {
+    // The shape must follow the stroke: not cut across a thin loop, nor put a corner out where
+    // the stroke never went, as when two corners either end of a short side are taken for one.
+    if corner_points.len() >= 3 {
+        let (across, reach) = fit(loop_, &corner_points);
+        if across > FIT_ACROSS || reach > FIT_REACH {
+            return None;
+        }
+    }
+    match corner_points.len() {
         3 => {
             let mut closed = corner_points.clone();
             closed.push(corner_points[0]);
@@ -670,17 +684,14 @@ fn polygon(loop_: &[P], tolerance: &Tolerances, scale: f32) -> Option<Correction
             ..rectangle
         }),
         _ => None,
-    }?;
-    // The shape must follow the stroke: not cut across a thin loop, nor put a corner out where
-    // the stroke never went, as when two corners either end of a short side are taken for one.
-    let (across, away) = fit(loop_, &shape);
-    (across <= FIT_ACROSS && away <= FIT_AWAY).then_some(shape)
+    }
 }
 
-/// How far a box or triangle may lie from its stroke: on average, relative to how thick the
-/// stroke's loop is, and at its furthest, relative to the loop's size.
-const FIT_ACROSS: f32 = 0.45;
-const FIT_AWAY: f32 = 0.12;
+/// How far a box or triangle may lie from its stroke, relative to how thick the stroke's loop is,
+/// and how far out any corner may reach, relative to the sides there. Rounded corners pass;
+/// a trapezoid whose top is a third of its base or more doesn't become a triangle.
+const FIT_ACROSS: f32 = 0.55;
+const FIT_REACH: f32 = 0.3;
 
 /// The path without `fraction` of its length at each end.
 fn trim(points: &[P], fraction: f32) -> Vec<P> {
@@ -1324,8 +1335,8 @@ mod tests {
         assert!(distance(rounded.at, (0.0, 0.0)) < 1e-3, "{:?}", rounded.at);
     }
 
-    /// Thin boxes keep all four corners, thin triangles stay triangles, and a trapezoid's corners
-    /// either end of its short side aren't one corner, whichever way each is drawn.
+    /// Thin boxes keep all four corners, thin and tilted shapes stay what they are, and a
+    /// trapezoid with a long enough top isn't a triangle, whichever way each is drawn.
     #[test]
     fn thin_shapes_and_trapezoids_keep_their_corners() {
         let both_ways = |corners: &[P]| {
@@ -1346,9 +1357,16 @@ mod tests {
                     assert_eq!(correct(&thin, 1.0, strength).map(|c| c.shape), Some(Shape::Triangle), "400x{height} triangle at {strength}");
                 }
             }
-            for top in [60.0, 100.0] {
-                for trapezoid in both_ways(&[(0.0, 0.0), (300.0, 0.0), (top, 200.0), (0.0, 200.0)]) {
-                    assert_ne!(correct(&trapezoid, 1.0, strength).map(|c| c.shape), Some(Shape::Triangle), "trapezoid with a {top} top at {strength}");
+            for (top, height) in [(100.0, 200.0), (150.0, 200.0), (100.0, 100.0), (150.0, 100.0)] {
+                for trapezoid in both_ways(&[(0.0, 0.0), (300.0, 0.0), (top, height), (0.0, height)]) {
+                    assert_ne!(correct(&trapezoid, 1.0, strength).map(|c| c.shape), Some(Shape::Triangle), "300x{height} trapezoid with a {top} top at {strength}");
+                }
+            }
+            // Tilted, so squaring it up turns it: what it is tested against is the box as drawn.
+            for (w, h, degrees) in [(400.0, 60.0, 8.0), (400.0, 100.0, 10.0), (300.0, 200.0, 20.0)] {
+                let corners: Vec<P> = [(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)].iter().map(|&p| rotate(p, (0.0, 0.0), f32::to_radians(degrees))).collect();
+                for tilted in both_ways(&corners) {
+                    assert_eq!(correct(&tilted, 1.0, strength).map(|c| c.shape), Some(Shape::Rectangle), "{w}x{h} box at {degrees} degrees, {strength}");
                 }
             }
             for b in [10.0, 20.0] {
