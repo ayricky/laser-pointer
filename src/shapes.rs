@@ -20,6 +20,7 @@ pub enum Shape {
 
 #[derive(Clone, Debug)]
 pub struct Correction {
+    #[allow(dead_code, reason = "the app draws the parts; the tests check what was recognised")]
     pub shape: Shape,
     /// Separate polylines; an arrow is its shaft and its head.
     pub parts: Vec<Vec<P>>,
@@ -635,10 +636,15 @@ fn polygon(loop_: &[P], tolerance: &Tolerances, scale: f32) -> Option<Correction
         } else {
             loop_[from..].iter().chain(&loop_[..=to]).copied().collect()
         };
-        let middle = trim(&side, 0.15);
-        middle.len() < 3 || bend(&middle) < tolerance.side
+        side.len() < 3 || bend(&trim(&side, 0.15)) < tolerance.side
     });
-    if !sides_straight {
+    // A corner that all but doubles back is a spike, as where a thin box's outline lost a
+    // corner, not a corner of a triangle or box.
+    let m = corner_points.len();
+    let spiked = (0..m).any(|k| {
+        turn_at(corner_points[(k + m - 1) % m], corner_points[k], corner_points[(k + 1) % m]) > 160f32.to_radians()
+    });
+    if !sides_straight || spiked {
         return None;
     }
     match corner_points.len() {
@@ -660,14 +666,27 @@ fn polygon(loop_: &[P], tolerance: &Tolerances, scale: f32) -> Option<Correction
 
 /// The path without `fraction` of its length at each end.
 fn trim(points: &[P], fraction: f32) -> Vec<P> {
-    let cut = fraction * length(points);
-    let mut walked = 0.0;
+    let total = length(points);
+    let (from, to) = (fraction * total, (1.0 - fraction) * total);
     let mut out = Vec::new();
+    let mut walked = 0.0;
     for pair in points.windows(2) {
-        walked += distance(pair[0], pair[1]);
-        if walked > cut && walked < length(points) - cut {
+        let step = distance(pair[0], pair[1]);
+        let point_at = |d: f32| {
+            let k = if step > 0.0 { ((d - walked) / step).clamp(0.0, 1.0) } else { 0.0 };
+            (pair[0].0 + (pair[1].0 - pair[0].0) * k, pair[0].1 + (pair[1].1 - pair[0].1) * k)
+        };
+        if out.is_empty() && walked + step >= from {
+            out.push(point_at(from));
+        }
+        if walked + step >= to {
+            out.push(point_at(to));
+            break;
+        }
+        if !out.is_empty() {
             out.push(pair[1]);
         }
+        walked += step;
     }
     out
 }
@@ -688,27 +707,25 @@ fn corners(open: &[P]) -> Vec<Corner> {
     let at = |i: usize| open[i % n];
     let turn = |i: usize| signed_turn(at(i + n - 1), at(i), at(i + 1));
     let side = |i: usize| distance(at(i), at(i + 1));
-    // Start after a vertex that isn't part of a rounded corner, so none is split in two.
-    let rounding = |i: usize, j: usize| {
-        let (a, b) = (turn(i), turn(j));
-        a * b > 0.0
-            && a.abs() < 120f32.to_radians()
-            && b.abs() < 120f32.to_radians()
-            && side(i) < 0.4 * side(i + n - 1).min(side(j))
-    };
-    let Some(begin) = (0..n).find(|&i| !rounding(i, i + 1)) else {
+    // Start after the longest side: no rounded corner has its ends either side of it.
+    let Some(longest) = (0..n).max_by(|&i, &j| side(i).total_cmp(&side(j))) else {
         return Vec::new();
     };
     let mut found = Vec::new();
-    let mut i = begin + 1;
-    while i <= begin + n {
+    let mut i = longest + 1;
+    while i <= longest + n {
         let (first, mut last, mut total) = (i, i, turn(i));
-        while last < begin + n
-            && rounding(last, last + 1)
-            && (total + turn(last + 1)).abs() <= 150f32.to_radians()
-        {
+        // The next bend joins while it turns the same way, neither is sharp enough to be a
+        // corner of its own, and the edge between is short beside the side leading in.
+        while last < longest + n {
+            let next = turn(last + 1);
+            let gentle = total * next > 0.0 && turn(last).abs() < 120f32.to_radians() && next.abs() < 120f32.to_radians();
+            let short = side(last) < 0.4 * side(first + n - 1);
+            if !gentle || !short || (total + next).abs() > 150f32.to_radians() {
+                break;
+            }
             last += 1;
-            total += turn(last);
+            total += next;
         }
         if total.abs() > 35f32.to_radians() {
             let point = if first == last {
@@ -1275,6 +1292,27 @@ mod tests {
         let shape = correct(&mid, 1.0, 0.8).unwrap();
         assert_eq!(shape.shape, Shape::Rectangle);
         assert!(distance(shape.parts[0][0], mid[0]) < 20.0);
+    }
+
+    /// A corner rounded into three bends, the first of them at the end of the outline and the
+    /// rest at its start, is one corner where the sides meet.
+    #[test]
+    fn a_corner_rounded_into_three_bends_is_one_corner() {
+        let open = [(7.0, 7.0), (24.0, 0.0), (300.0, 0.0), (300.0, 300.0), (0.0, 300.0), (0.0, 24.0)];
+        let found = corners(&open);
+        assert_eq!(found.len(), 4);
+        let rounded = found.iter().find(|corner| corner.first != corner.last).expect("the bends were merged");
+        assert_eq!((rounded.first, rounded.last), (5, 1));
+        assert!(distance(rounded.at, (0.0, 0.0)) < 1e-3, "{:?}", rounded.at);
+    }
+
+    /// Trimming a short side's ends mustn't leave too little of it to tell whether it bends.
+    #[test]
+    fn a_long_thin_box_is_not_a_triangle() {
+        let thin = polyline(&[(100.0, 100.0), (500.0, 100.0), (500.0, 120.0), (100.0, 120.0), (100.0, 100.0)], 1.0);
+        for strength in [LASER_DEFAULT, 0.6, 1.0] {
+            assert_ne!(correct(&thin, 1.0, strength).map(|c| c.shape), Some(Shape::Triangle), "at {strength}");
+        }
     }
 
     #[test]

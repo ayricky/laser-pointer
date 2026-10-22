@@ -220,21 +220,38 @@ impl Drawn {
     }
 }
 
-/// With LASER_POINTER_RECORD set to a file, each stroke that could have snapped is added to it
-/// as a line of JSON with what it was taken for, to tune the recogniser on real drawing.
+/// Development builds with the `record` feature only, so the app as shipped never keeps a
+/// drawing: with LASER_POINTER_RECORD set to a file, each stroke that could have snapped is added
+/// to it as a line of JSON with what it was taken for, to tune the recogniser on real drawing.
+/// A thread of its own writes them, so a slow disk can't hold up drawing.
+#[cfg(feature = "record")]
 fn record_stroke(path: &[(f32, f32)], scale: f32, snap: u32, correction: Option<&shapes::Correction>) {
     use std::io::Write;
-    static FILE: std::sync::OnceLock<Option<std::ffi::OsString>> = std::sync::OnceLock::new();
-    let Some(file) = FILE.get_or_init(|| std::env::var_os("LASER_POINTER_RECORD")) else {
+    use std::sync::mpsc::{sync_channel, SyncSender};
+    static WRITER: std::sync::OnceLock<Option<SyncSender<String>>> = std::sync::OnceLock::new();
+    let writer = WRITER.get_or_init(|| {
+        let file = std::env::var_os("LASER_POINTER_RECORD")?;
+        let (send, receive) = sync_channel::<String>(64);
+        std::thread::spawn(move || {
+            for line in receive {
+                if let Ok(mut out) = std::fs::OpenOptions::new().create(true).append(true).open(&file) {
+                    let _ = out.write_all(line.as_bytes());
+                }
+            }
+        });
+        Some(send)
+    });
+    let Some(writer) = writer else {
         return;
     };
     let points: Vec<String> = path.iter().map(|(x, y)| format!("[{x:.1},{y:.1}]")).collect();
     let shape = correction.map_or("null".to_owned(), |c| format!("\"{:?}\"", c.shape));
-    let line = format!("{{\"snap\":{snap},\"scale\":{scale},\"shape\":{shape},\"points\":[{}]}}
-", points.join(","));
-    if let Ok(mut out) = std::fs::OpenOptions::new().create(true).append(true).open(file) {
-        let _ = out.write_all(line.as_bytes());
-    }
+    // Dropped rather than waited for when the writer is behind.
+    let _ = writer.try_send(format!(
+        "{{\"snap\":{snap},\"scale\":{scale},\"shape\":{shape},\"points\":[{}]}}
+",
+        points.join(",")
+    ));
 }
 
 /// How long a stroke takes to settle onto the shape it snapped to.
@@ -1911,6 +1928,7 @@ impl App {
             return;
         }
         let correction = shapes::correct(&self.path, drawn.stroke.scale, snap as f32 / 100.0);
+        #[cfg(feature = "record")]
         record_stroke(&self.path, drawn.stroke.scale, snap, correction.as_ref());
         let Some(correction) = correction else {
             return;

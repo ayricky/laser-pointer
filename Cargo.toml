@@ -6,6 +6,10 @@ description = "A screen-wide laser pointer and annotation tool for presenting on
 license = "MIT"
 readme = "README.md"
 
+[features]
+# Development only: LASER_POINTER_RECORD=<file> logs each snappable stroke, for tuning shapes.rs.
+record = []
+
 [dependencies]
 windows-numerics = "0.3.1"
 

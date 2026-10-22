@@ -371,11 +371,15 @@
 
   // The path without `fraction` of its length at each end.
   function trim(pts, fraction) {
-    const total = pathLength(pts), cut = fraction * total, out = [];
+    const total = pathLength(pts), from = fraction * total, to = (1 - fraction) * total, out = [];
     let walked = 0;
     for (let i = 1; i < pts.length; i++) {
-      walked += d2(pts[i - 1], pts[i]);
-      if (walked > cut && walked < total - cut) out.push(pts[i]);
+      const a = pts[i - 1], b = pts[i], step = d2(a, b);
+      const pointAt = d => { const k = step > 0 ? Math.min(1, Math.max(0, (d - walked) / step)) : 0; return [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k]; };
+      if (!out.length && walked + step >= from) out.push(pointAt(from));
+      if (walked + step >= to) { out.push(pointAt(to)); break; }
+      if (out.length) out.push(b);
+      walked += step;
     }
     return out;
   }
@@ -394,18 +398,22 @@
   function cornersOf(open) {
     const n = open.length, at = i => open[i % n], deg = Math.PI / 180;
     const turn = i => signedTurn(at(i + n - 1), at(i), at(i + 1)), side = i => d2(at(i), at(i + 1));
-    const rounding = (i, j) => {
-      const a = turn(i), b = turn(j);
-      return a * b > 0 && Math.abs(a) < 120 * deg && Math.abs(b) < 120 * deg && side(i) < 0.4 * Math.min(side(i + n - 1), side(j));
-    };
-    let begin = -1;
-    for (let i = 0; i < n && begin < 0; i++) if (!rounding(i, i + 1)) begin = i;
-    if (begin < 0) return [];
+    // Start after the longest side: no rounded corner has its ends either side of it.
+    let longest = 0;
+    for (let i = 1; i < n; i++) if (side(i) >= side(longest)) longest = i;
     const found = [];
-    for (let i = begin + 1; i <= begin + n;) {
+    for (let i = longest + 1; i <= longest + n;) {
       const first = i;
       let last = i, total = turn(i);
-      while (last < begin + n && rounding(last, last + 1) && Math.abs(total + turn(last + 1)) <= 150 * deg) total += turn(++last);
+      // The next bend joins while it turns the same way, neither is sharp enough to be a corner of
+      // its own, and the edge between is short beside the side leading in.
+      while (last < longest + n) {
+        const next = turn(last + 1);
+        const gentle = total * next > 0 && Math.abs(turn(last)) < 120 * deg && Math.abs(next) < 120 * deg;
+        if (!gentle || side(last) >= 0.4 * side(first + n - 1) || Math.abs(total + next) > 150 * deg) break;
+        last++;
+        total += next;
+      }
       if (Math.abs(total) > 35 * deg) {
         let point = at(first);
         if (first !== last) {
@@ -429,9 +437,12 @@
     // Each side must be straight between its corners, leaving out the rounding at each end.
     for (let k = 0; k < found.length; k++) {
       const from = Math.max(0, loop.indexOf(open[found[k].last])), to = Math.max(0, loop.indexOf(open[found[(k + 1) % found.length].first]));
-      const side = trim(from <= to ? loop.slice(from, to + 1) : loop.slice(from).concat(loop.slice(0, to + 1)), 0.15);
-      if (side.length >= 3 && bend(side) >= tol.side) return null;
+      const side = from <= to ? loop.slice(from, to + 1) : loop.slice(from).concat(loop.slice(0, to + 1));
+      if (side.length >= 3 && bend(trim(side, 0.15)) >= tol.side) return null;
     }
+    // A corner that all but doubles back is a spike, as where a thin box's outline lost a corner.
+    const m = corners.length;
+    if (corners.some((c, k) => turnAt(corners[(k + m - 1) % m], c, corners[(k + 1) % m]) > 160 * Math.PI / 180)) return null;
     if (corners.length === 3) return { shape: 'triangle', parts: [beginNear(polyline([...corners, corners[0]], scale), loop[0])] };
     if (corners.length === 4) {
       const r = rectangle(corners, tol, scale);
