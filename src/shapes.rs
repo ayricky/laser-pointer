@@ -618,7 +618,8 @@ fn ellipse(loop_: &[P], tolerance: &Tolerances, scale: f32) -> Option<Correction
 fn polygon(loop_: &[P], tolerance: &Tolerances, scale: f32) -> Option<Correction> {
     let (_, _, major, minor) = principal_axis(loop_);
     let size = (major.sqrt() + minor.sqrt()) * 2.0;
-    let simple = simplify(loop_, 0.06 * size);
+    // Finer for a thin shape, whose corners could otherwise sit within the tolerance.
+    let simple = simplify(loop_, (0.06 * size).min(0.5 * minor.sqrt()));
     // The loop starts mid-side as often as at a corner: test every vertex, the start included.
     let open = &simple[..simple.len() - 1];
     let n = open.len();
@@ -638,13 +639,7 @@ fn polygon(loop_: &[P], tolerance: &Tolerances, scale: f32) -> Option<Correction
         };
         side.len() < 3 || bend(&trim(&side, 0.15)) < tolerance.side
     });
-    // A corner that all but doubles back is a spike, as where a thin box's outline lost a
-    // corner, not a corner of a triangle or box.
-    let m = corner_points.len();
-    let spiked = (0..m).any(|k| {
-        turn_at(corner_points[(k + m - 1) % m], corner_points[k], corner_points[(k + 1) % m]) > 160f32.to_radians()
-    });
-    if !sides_straight || spiked {
+    if !sides_straight {
         return None;
     }
     match corner_points.len() {
@@ -726,6 +721,12 @@ fn corners(open: &[P]) -> Vec<Corner> {
             }
             last += 1;
             total += next;
+        }
+        // All of it must be short beside the side leading out too: two real corners either end
+        // of a short side are each a corner.
+        let span: f32 = (first..last).map(side).sum();
+        if last > first && span >= 0.4 * side(last) {
+            (last, total) = (first, turn(first));
         }
         if total.abs() > 35f32.to_radians() {
             let point = if first == last {
@@ -1306,12 +1307,31 @@ mod tests {
         assert!(distance(rounded.at, (0.0, 0.0)) < 1e-3, "{:?}", rounded.at);
     }
 
-    /// Trimming a short side's ends mustn't leave too little of it to tell whether it bends.
+    /// Thin boxes keep all four corners, thin triangles stay triangles, and a trapezoid's corners
+    /// either end of its short side aren't one corner, whichever way each is drawn.
     #[test]
-    fn a_long_thin_box_is_not_a_triangle() {
-        let thin = polyline(&[(100.0, 100.0), (500.0, 100.0), (500.0, 120.0), (100.0, 120.0), (100.0, 100.0)], 1.0);
+    fn thin_shapes_and_trapezoids_keep_their_corners() {
+        let both_ways = |corners: &[P]| {
+            let mut ring = corners.to_vec();
+            ring.push(corners[0]);
+            let back: Vec<P> = ring.iter().rev().copied().collect();
+            [polyline(&ring, 1.0), polyline(&back, 1.0)]
+        };
         for strength in [LASER_DEFAULT, 0.6, 1.0] {
-            assert_ne!(correct(&thin, 1.0, strength).map(|c| c.shape), Some(Shape::Triangle), "at {strength}");
+            for height in [10.0, 20.0, 40.0, 80.0] {
+                for thin in both_ways(&[(100.0, 100.0), (500.0, 100.0), (500.0, 100.0 + height), (100.0, 100.0 + height)]) {
+                    let shape = correct(&thin, 1.0, strength).map(|c| c.shape);
+                    assert!(shape.is_none() || shape == Some(Shape::Rectangle), "400x{height} box at {strength}: {shape:?}");
+                }
+            }
+            for height in [60.0, 100.0] {
+                for thin in both_ways(&[(0.0, 0.0), (400.0, 0.0), (400.0, height)]) {
+                    assert_eq!(correct(&thin, 1.0, strength).map(|c| c.shape), Some(Shape::Triangle), "400x{height} triangle at {strength}");
+                }
+            }
+            for trapezoid in both_ways(&[(0.0, 0.0), (300.0, 0.0), (100.0, 200.0), (0.0, 200.0)]) {
+                assert_ne!(correct(&trapezoid, 1.0, strength).map(|c| c.shape), Some(Shape::Triangle), "trapezoid at {strength}");
+            }
         }
     }
 

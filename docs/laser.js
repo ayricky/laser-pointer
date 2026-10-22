@@ -414,6 +414,11 @@
         last++;
         total += next;
       }
+      // All of it must be short beside the side leading out too: two real corners either end of a
+      // short side are each a corner.
+      let span = 0;
+      for (let k = first; k < last; k++) span += side(k);
+      if (last > first && span >= 0.4 * side(last)) { last = first; total = turn(first); }
       if (Math.abs(total) > 35 * deg) {
         let point = at(first);
         if (first !== last) {
@@ -431,7 +436,8 @@
 
   function polygon(loop, tol, scale) {
     const [, , major, minor] = principalAxis(loop), size = (Math.sqrt(major) + Math.sqrt(minor)) * 2;
-    const open = simplify(loop, 0.06 * size).slice(0, -1), n = open.length;
+    // Finer for a thin shape, whose corners could otherwise sit within the tolerance.
+    const open = simplify(loop, Math.min(0.06 * size, 0.5 * Math.sqrt(minor))).slice(0, -1), n = open.length;
     if (n < 3) return null;
     const found = cornersOf(open), corners = found.map(c => c.at);
     // Each side must be straight between its corners, leaving out the rounding at each end.
@@ -440,9 +446,6 @@
       const side = from <= to ? loop.slice(from, to + 1) : loop.slice(from).concat(loop.slice(0, to + 1));
       if (side.length >= 3 && bend(trim(side, 0.15)) >= tol.side) return null;
     }
-    // A corner that all but doubles back is a spike, as where a thin box's outline lost a corner.
-    const m = corners.length;
-    if (corners.some((c, k) => turnAt(corners[(k + m - 1) % m], c, corners[(k + 1) % m]) > 160 * Math.PI / 180)) return null;
     if (corners.length === 3) return { shape: 'triangle', parts: [beginNear(polyline([...corners, corners[0]], scale), loop[0])] };
     if (corners.length === 4) {
       const r = rectangle(corners, tol, scale);
