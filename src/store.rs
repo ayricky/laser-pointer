@@ -46,6 +46,12 @@ pub fn licence() -> Licence {
     *LICENCE.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// No check is under way, so `licence` is the latest answer. A WM_LICENCE that arrives while
+/// another check runs is out of date; that check will post its own.
+pub fn settled() -> bool {
+    !BUSY.load(Ordering::SeqCst)
+}
+
 fn set(licence: Licence) {
     *LICENCE.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = licence;
 }
@@ -63,6 +69,9 @@ pub fn check(owner: HWND) {
         return;
     }
     let owner = owner.0 as isize;
+    let answer = move || unsafe {
+        let _ = PostMessageW(Some(HWND(owner as _)), WM_LICENCE, WPARAM(0), LPARAM(0));
+    };
     let worker = std::thread::Builder::new().spawn(move || {
         loop {
             AGAIN.store(false, Ordering::SeqCst);
@@ -76,13 +85,13 @@ pub fn check(owner: HWND) {
                 break;
             }
         }
-        unsafe {
-            let _ = PostMessageW(Some(HWND(owner as _)), WM_LICENCE, WPARAM(0), LPARAM(0));
-        }
+        answer();
     });
     if worker.is_err() {
-        // No thread to ask with: leave the licence as it was rather than lock anyone out.
+        // No thread to ask the Store with: let the user draw rather than lock anyone out.
+        set(Licence::Full);
         BUSY.store(false, Ordering::SeqCst);
+        answer();
     }
 }
 

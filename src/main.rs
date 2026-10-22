@@ -962,6 +962,8 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 }
                 LRESULT(0)
             }
+            // An answer from before a check still running is ignored; that check answers next.
+            store::WM_LICENCE if !store::settled() => LRESULT(0),
             store::WM_LICENCE => {
                 let wanted = WANTS_LASER.with(|wants| wants.replace(false));
                 match store::licence() {
