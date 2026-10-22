@@ -20,7 +20,6 @@ pub enum Shape {
 
 #[derive(Clone, Debug)]
 pub struct Correction {
-    #[allow(dead_code, reason = "the app draws the parts; the tests check what was recognised")]
     pub shape: Shape,
     /// Separate polylines; an arrow is its shaft and its head.
     pub parts: Vec<Vec<P>>,
@@ -294,12 +293,36 @@ pub fn correct(points: &[P], scale: f32, strength: f32) -> Option<Correction> {
     }
     let tolerance = Tolerances::new(strength);
     match closed_part(&path, &tolerance) {
-        Some(loop_) => polygon(&loop_, &tolerance, scale)
-            .or_else(|| ellipse(&loop_, &tolerance, scale)),
+        // A box with rounded corners may pass for an ellipse too, and a lumpy circle for a box:
+        // whichever lies closer to the stroke is the one meant.
+        Some(loop_) => match (polygon(&loop_, &tolerance, scale), ellipse(&loop_, &tolerance, scale)) {
+            (Some(polygon), Some(ellipse)) => Some(if misfit(&loop_, &polygon) <= misfit(&loop_, &ellipse) {
+                polygon
+            } else {
+                ellipse
+            }),
+            (polygon, ellipse) => polygon.or(ellipse),
+        },
         // An arrow's hook is short enough to pass for a wobble, so arrows are tried first.
         None => arrow(&path, &tolerance, strength, scale)
             .or_else(|| line(&path, &tolerance, strength, scale)),
     }
+}
+
+/// How far a stroke lies from a shape: the root mean square of each point's distance to it.
+fn misfit(points: &[P], shape: &Correction) -> f32 {
+    let outline: Vec<P> = shape.parts.iter().flatten().copied().collect();
+    let squares: f32 = points
+        .iter()
+        .map(|&p| {
+            outline
+                .windows(2)
+                .map(|edge| distance(p, nearest_on(p, edge[0], edge[1])))
+                .fold(f32::MAX, f32::min)
+                .powi(2)
+        })
+        .sum();
+    (squares / points.len() as f32).sqrt()
 }
 
 /// The same shape kept to the points that bend it, such as a box's corners, for drawing once it
@@ -601,23 +624,19 @@ fn polygon(loop_: &[P], tolerance: &Tolerances, scale: f32) -> Option<Correction
     if n < 3 {
         return None;
     }
-    let corners: Vec<usize> = (0..n)
-        .filter(|&i| turn_at(open[(i + n - 1) % n], open[i], open[(i + 1) % n]) > 35f32.to_radians())
-        .collect();
-    let corner_points: Vec<P> = corners.iter().map(|&i| open[i]).collect();
-    // Each side must be straight between its corners.
-    let indices: Vec<usize> = corner_points
-        .iter()
-        .map(|c| loop_.iter().position(|p| p == c).unwrap_or(0))
-        .collect();
-    let sides_straight = (0..indices.len()).all(|k| {
-        let (from, to) = (indices[k], indices[(k + 1) % indices.len()]);
+    let corners = corners(open);
+    let corner_points: Vec<P> = corners.iter().map(|corner| corner.at).collect();
+    // Each side must be straight between its corners, leaving out the rounding at each end.
+    let index = |p: P| loop_.iter().position(|&q| q == p).unwrap_or(0);
+    let sides_straight = (0..corners.len()).all(|k| {
+        let (from, to) = (index(open[corners[k].last]), index(open[corners[(k + 1) % corners.len()].first]));
         let side: Vec<P> = if from <= to {
             loop_[from..=to].to_vec()
         } else {
             loop_[from..].iter().chain(&loop_[..=to]).copied().collect()
         };
-        side.len() < 3 || bend(&side) < tolerance.side
+        let middle = trim(&side, 0.15);
+        middle.len() < 3 || bend(&middle) < tolerance.side
     });
     if !sides_straight {
         return None;
@@ -637,6 +656,85 @@ fn polygon(loop_: &[P], tolerance: &Tolerances, scale: f32) -> Option<Correction
         }),
         _ => None,
     }
+}
+
+/// The path without `fraction` of its length at each end.
+fn trim(points: &[P], fraction: f32) -> Vec<P> {
+    let cut = fraction * length(points);
+    let mut walked = 0.0;
+    let mut out = Vec::new();
+    for pair in points.windows(2) {
+        walked += distance(pair[0], pair[1]);
+        if walked > cut && walked < length(points) - cut {
+            out.push(pair[1]);
+        }
+    }
+    out
+}
+
+/// A corner of a closed outline: the outline's vertices `first..=last`, wrapping round, and
+/// where its sides would meet.
+struct Corner {
+    first: usize,
+    last: usize,
+    at: P,
+}
+
+/// The corners of a closed outline (no repeated last point). A hand rounds corners off, which
+/// the outline keeps as two or three gentler bends close together, so neighbouring bends the
+/// same way are taken as one corner where the sides either side of them meet.
+fn corners(open: &[P]) -> Vec<Corner> {
+    let n = open.len();
+    let at = |i: usize| open[i % n];
+    let turn = |i: usize| signed_turn(at(i + n - 1), at(i), at(i + 1));
+    let side = |i: usize| distance(at(i), at(i + 1));
+    // Start after a vertex that isn't part of a rounded corner, so none is split in two.
+    let rounding = |i: usize, j: usize| {
+        let (a, b) = (turn(i), turn(j));
+        a * b > 0.0
+            && a.abs() < 120f32.to_radians()
+            && b.abs() < 120f32.to_radians()
+            && side(i) < 0.4 * side(i + n - 1).min(side(j))
+    };
+    let Some(begin) = (0..n).find(|&i| !rounding(i, i + 1)) else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    let mut i = begin + 1;
+    while i <= begin + n {
+        let (first, mut last, mut total) = (i, i, turn(i));
+        while last < begin + n
+            && rounding(last, last + 1)
+            && (total + turn(last + 1)).abs() <= 150f32.to_radians()
+        {
+            last += 1;
+            total += turn(last);
+        }
+        if total.abs() > 35f32.to_radians() {
+            let point = if first == last {
+                at(first)
+            } else {
+                let (a, b, c, d) = (at(first + n - 1), at(first), at(last), at(last + 1));
+                meeting(a, b, c, d).filter(|&p| distance(p, b) < 2.0 * distance(b, c)).unwrap_or_else(|| {
+                    centroid(&(first..=last).map(at).collect::<Vec<P>>())
+                })
+            };
+            found.push(Corner { first: first % n, last: last % n, at: point });
+        }
+        i = last + 1;
+    }
+    found
+}
+
+/// Where the line through `a` and `b` meets the line through `c` and `d`.
+fn meeting(a: P, b: P, c: P, d: P) -> Option<P> {
+    let (r, s) = ((b.0 - a.0, b.1 - a.1), (d.0 - c.0, d.1 - c.1));
+    let denominator = r.0 * s.1 - r.1 * s.0;
+    if denominator.abs() < 1e-6 * (r.0.hypot(r.1) * s.0.hypot(s.1)).max(1e-6) {
+        return None;
+    }
+    let t = ((c.0 - a.0) * s.1 - (c.1 - a.1) * s.0) / denominator;
+    Some((a.0 + r.0 * t, a.1 + r.1 * t))
 }
 
 fn rectangle(corners: &[P], tolerance: &Tolerances, scale: f32) -> Option<Correction> {
@@ -899,6 +997,17 @@ mod tests {
             text += &format!(" loop-turn {:.2}pi abs {:.2}pi", signed / PI, absolute / PI);
             let simple = simplify(loop_, 0.06 * size);
             text += &format!(" dp {}", simple.len());
+            let open = &simple[..simple.len() - 1];
+            let found = corners(open);
+            let turns: Vec<i32> = (0..open.len()).map(|i| signed_turn(open[(i + open.len() - 1) % open.len()], open[i], open[(i + 1) % open.len()]).to_degrees() as i32).collect();
+            text += &format!(" turns {turns:?} corners {}", found.len());
+            let index = |p: P| loop_.iter().position(|&q| q == p).unwrap_or(0);
+            let bends: Vec<f32> = (0..found.len()).map(|k| {
+                let (from, to) = (index(open[found[k].last]), index(open[found[(k + 1) % found.len()].first]));
+                let side: Vec<P> = if from <= to { loop_[from..=to].to_vec() } else { loop_[from..].iter().chain(&loop_[..=to]).copied().collect() };
+                if side.len() < 3 { 0.0 } else { (bend(&side) * 1000.0).round() / 1000.0 }
+            }).collect();
+            text += &format!(" bends {bends:?} (tol {:.3})", tolerance.side);
             text += &format!(" poly {:?} ell {:?}", polygon(loop_, &tolerance, 1.0).map(|c| c.shape), ellipse(loop_, &tolerance, 1.0).map(|c| c.shape));
         } else {
             text += " open";
@@ -1289,5 +1398,278 @@ mod tests {
             target.EndDraw(None, None).unwrap();
         }
         canvas.save("shapes.png");
+    }
+
+    // ---- Shapes as a hand draws them with a mouse ------------------------------------------
+
+    /// Bows each side of `waypoints` out by up to `bow` of its length and rounds each inner
+    /// corner off, cutting `cut` of the shorter side next to it.
+    fn hand_path(random: &mut Random, waypoints: &[P], cut: f32, bow: f32) -> Vec<P> {
+        let n = waypoints.len();
+        // Where each side starts and ends once the corners are cut.
+        let mut sides: Vec<(P, P)> = (0..n - 1).map(|i| (waypoints[i], waypoints[i + 1])).collect();
+        let mut curves: Vec<Option<(P, P, P)>> = vec![None; n];
+        for i in 1..n - 1 {
+            let (a, c, b) = (waypoints[i - 1], waypoints[i], waypoints[i + 1]);
+            let d = cut * (0.5 + random.next()) * distance(a, c).min(distance(c, b));
+            let towards = |from: P, to: P, k: f32| {
+                let l = distance(from, to).max(1e-6);
+                (from.0 + (to.0 - from.0) * k / l, from.1 + (to.1 - from.1) * k / l)
+            };
+            let (p, q) = (towards(c, a, d), towards(c, b, d));
+            sides[i - 1].1 = p;
+            sides[i].0 = q;
+            curves[i] = Some((p, c, q));
+        }
+        let mut out = Vec::new();
+        for (i, &(a, b)) in sides.iter().enumerate() {
+            let l = distance(a, b);
+            let (nx, ny) = ((b.1 - a.1) / l.max(1e-6), -(b.0 - a.0) / l.max(1e-6));
+            let push = bow * random.signed() * l;
+            let steps = (l / 2.0).ceil().max(2.0) as usize;
+            out.extend((0..=steps).map(|k| {
+                let t = k as f32 / steps as f32;
+                let o = push * (t * PI).sin();
+                (a.0 + (b.0 - a.0) * t + nx * o, a.1 + (b.1 - a.1) * t + ny * o)
+            }));
+            if let Some((p, c, q)) = curves[i + 1] {
+                out.extend((1..12).map(|k| {
+                    let t = k as f32 / 12.0;
+                    let u = 1.0 - t;
+                    (u * u * p.0 + 2.0 * u * t * c.0 + t * t * q.0, u * u * p.1 + 2.0 * u * t * c.1 + t * t * q.1)
+                }));
+            }
+        }
+        out
+    }
+
+    /// A slow drift a hand adds over the whole stroke, `amount` pixels at most.
+    fn drift(random: &mut Random, points: Vec<P>, amount: f32) -> Vec<P> {
+        let phases: Vec<f32> = (0..4).map(|_| random.next() * TAU).collect();
+        let total = length(&points).max(1.0);
+        let mut walked = 0.0;
+        let mut previous = points[0];
+        points
+            .into_iter()
+            .map(|(x, y)| {
+                walked += distance(previous, (x, y));
+                previous = (x, y);
+                let t = walked / total * TAU;
+                let dx = amount * 0.67 * ((t * 1.5 + phases[0]).sin() + 0.5 * (t * 3.7 + phases[1]).sin());
+                let dy = amount * 0.67 * ((t * 1.3 + phases[2]).sin() + 0.5 * (t * 4.1 + phases[3]).sin());
+                (x + dx, y + dy)
+            })
+            .collect()
+    }
+
+    /// A closed polygon as drawn: started at a corner or partway along a side, corners rounded,
+    /// sides bowed, and the end landing short of the start, on it, or past it.
+    fn drawn_polygon(random: &mut Random, corners: &[P], cut: f32, bow: f32) -> Vec<P> {
+        let n = corners.len();
+        let jittered: Vec<P> = corners.iter().map(|&(x, y)| (x + random.signed() * 6.0, y + random.signed() * 6.0)).collect();
+        let size = jittered.iter().map(|&p| distance(p, centroid(&jittered))).fold(0.0, f32::max);
+        let along = |a: P, b: P, k: f32| (a.0 + (b.0 - a.0) * k, a.1 + (b.1 - a.1) * k);
+        // Start at a corner half the time, otherwise partway along the first side.
+        let lead = if random.next() < 0.5 { 0.0 } else { 0.1 + 0.4 * random.next() };
+        let start = along(jittered[0], jittered[1], lead);
+        let mut waypoints = vec![start];
+        waypoints.extend(jittered[1..].iter().copied());
+        waypoints.push(jittered[0]);
+        // Where the end lands: short of the start, or past it along the first side.
+        let land = lead + random.signed() * 0.12 + 0.06;
+        if land <= 0.0 {
+            let last = waypoints.pop().unwrap();
+            waypoints.push(along(last, jittered[n - 1], -land));
+        } else {
+            let mut end = along(jittered[0], jittered[1], land);
+            // Off the line a little: the hand doesn't land back exactly on the side.
+            end.0 += random.signed() * 0.04 * size;
+            end.1 += random.signed() * 0.04 * size;
+            waypoints.push(end);
+        }
+        let outline = hand_path(random, &waypoints, cut, bow);
+        let outline = drift(random, outline, 3.0);
+        mouse(random, &outline, 0.8)
+    }
+
+    fn drawn_rectangle(random: &mut Random, cut: f32) -> Vec<P> {
+        let (w, h) = (150.0 + random.next() * 300.0, 90.0 + random.next() * 200.0);
+        let tilt = random.signed() * 0.06;
+        let c = (300.0, 300.0);
+        let corners: Vec<P> = [(-w, -h), (w, -h), (w, h), (-w, h)].iter().map(|&(x, y)| rotate((c.0 + x / 2.0, c.1 + y / 2.0), c, tilt)).collect();
+        let corners = if random.next() < 0.5 { corners } else { corners.into_iter().rev().collect() };
+        let rolled = (random.next() * 4.0) as usize % 4;
+        let mut corners = corners;
+        corners.rotate_left(rolled);
+        drawn_polygon(random, &corners, cut, 0.03)
+    }
+
+    fn drawn_triangle(random: &mut Random, cut: f32) -> Vec<P> {
+        let s = 150.0 + random.next() * 250.0;
+        let apex = (200.0 + random.signed() * s * 0.25, 100.0);
+        let corners = vec![apex, (200.0 + s / 2.0, 100.0 + s * 0.85), (200.0 - s / 2.0, 100.0 + s * 0.85)];
+        let corners = if random.next() < 0.5 { corners } else { corners.into_iter().rev().collect() };
+        drawn_polygon(random, &corners, cut, 0.03)
+    }
+
+    /// A circle or ellipse as drawn: egg-shaped, started anywhere, ending short or past.
+    fn drawn_ellipse(random: &mut Random, round: bool) -> Vec<P> {
+        let a = 70.0 + random.next() * 200.0;
+        let b = if round { a } else { a * (0.4 + random.next() * 0.35) };
+        let (start, sweep) = (random.next() * TAU, TAU * (0.9 + random.next() * 0.25));
+        let (h2, p2, h3, p3) = (0.1 * random.next(), random.next() * TAU, 0.04 * random.next(), random.next() * TAU);
+        let direction = if random.next() < 0.5 { 1.0 } else { -1.0 };
+        let tilt = random.signed() * 0.5;
+        let steps = 200;
+        let outline: Vec<P> = (0..=steps)
+            .map(|i| {
+                let t = start + direction * sweep * i as f32 / steps as f32;
+                // The radius creeps in or out over the turn: the end doesn't come back level.
+                let creep = 1.0 + 0.06 * p2.sin() * i as f32 / steps as f32;
+                let r = creep * (1.0 + h2 * (2.0 * t + p2).sin() + h3 * (3.0 * t + p3).sin());
+                rotate((300.0 + a * r * t.cos(), 300.0 + b * r * t.sin()), (300.0, 300.0), tilt)
+            })
+            .collect();
+        let outline = drift(random, outline, 3.0);
+        mouse(random, &outline, 0.8)
+    }
+
+    /// A line as drawn: arced by the wrist, sometimes with a flick as the button is let go.
+    fn drawn_line(random: &mut Random) -> Vec<P> {
+        let len = 150.0 + random.next() * 450.0;
+        let angle = random.next() * TAU;
+        let bow = random.signed() * 0.035;
+        let mut outline: Vec<P> = (0..=100)
+            .map(|i| {
+                let t = i as f32 / 100.0;
+                let o = bow * len * (t * PI).sin();
+                rotate((300.0 + t * len, 300.0 + o), (300.0, 300.0), angle)
+            })
+            .collect();
+        if random.next() < 0.4 {
+            let end = outline[outline.len() - 1];
+            let turn = angle + random.signed().signum() * (0.5 + random.next());
+            let flick = 4.0 + random.next() * 10.0;
+            outline.extend((1..=5).map(|k| (end.0 + flick * k as f32 / 5.0 * turn.cos(), end.1 + flick * k as f32 / 5.0 * turn.sin())));
+        }
+        let outline = drift(random, outline, 2.0);
+        mouse(random, &outline, 0.8)
+    }
+
+    /// An arrow as drawn: a line, then one wing back, or a wing, back to the tip, and the other.
+    fn drawn_arrow(random: &mut Random, both: bool) -> Vec<P> {
+        let len = 200.0 + random.next() * 400.0;
+        let angle = random.next() * TAU;
+        let wing = len * (0.08 + random.next() * 0.17);
+        let spread = (20.0 + random.next() * 25.0).to_radians();
+        let start = (300.0, 300.0);
+        let tip = (start.0 + len * angle.cos(), start.1 + len * angle.sin());
+        let back = angle + PI;
+        let side = if random.next() < 0.5 { 1.0 } else { -1.0 };
+        let w = |s: f32, jitter: f32| {
+            let a = back + s * (spread + jitter * 0.15);
+            (tip.0 + wing * a.cos(), tip.1 + wing * a.sin())
+        };
+        let mut waypoints = vec![start, tip, w(side, random.signed())];
+        if both {
+            // Back to the tip, not exactly, and out the other side.
+            let near = (tip.0 + random.signed() * 0.12 * wing, tip.1 + random.signed() * 0.12 * wing);
+            waypoints.push(near);
+            waypoints.push(w(-side, random.signed()));
+        }
+        let outline = hand_path(random, &waypoints, 0.12, 0.02);
+        let outline = drift(random, outline, 2.0);
+        mouse(random, &outline, 0.8)
+    }
+
+    /// Things that aren't shapes and must stay as drawn.
+    fn not_shapes(random: &mut Random) -> Vec<(&'static str, Vec<P>)> {
+        let mut out = negatives(random);
+        // An open C, three quarters round.
+        let c: Vec<P> = (0..=80).map(|i| {
+            let t = 0.6 + i as f32 / 80.0 * TAU * 0.72;
+            (300.0 + 120.0 * t.cos(), 300.0 + 120.0 * t.sin())
+        }).collect();
+        out.push(("C", c));
+        out.push(("L", polyline(&[(100.0, 100.0), (100.0, 300.0), (260.0, 300.0)], 1.0)));
+        out.push(("U", polyline(&[(100.0, 100.0), (110.0, 300.0), (260.0, 300.0), (270.0, 100.0)], 1.0)));
+        out.push(("Z", polyline(&[(100.0, 100.0), (300.0, 100.0), (100.0, 300.0), (300.0, 300.0)], 1.0)));
+        out.push(("V", polyline(&[(100.0, 100.0), (200.0, 300.0), (300.0, 100.0)], 1.0)));
+        // An underline with a loop in it, as in handwriting.
+        let looped: Vec<P> = (0..=120).map(|i| {
+            let t = i as f32 / 120.0;
+            let l = (t * TAU * 1.0).sin();
+            (100.0 + 400.0 * t + 40.0 * (t * TAU * 1.0).cos() * (t * PI).sin(), 300.0 + 40.0 * l * (t * PI).sin())
+        }).collect();
+        out.push(("looped underline", looped));
+        out.into_iter().map(|(name, points)| (name, mouse(random, &points, 0.8))).collect()
+    }
+
+    type Make = Box<dyn Fn(&mut Random) -> Vec<P>>;
+
+    fn drawn_kinds() -> Vec<(&'static str, Make, Shape)> {
+        vec![
+            ("line", Box::new(drawn_line), Shape::Line),
+            ("arrow", Box::new(|r| drawn_arrow(r, false)), Shape::Arrow),
+            ("arrow, both wings", Box::new(|r| drawn_arrow(r, true)), Shape::Arrow),
+            ("circle", Box::new(|r| drawn_ellipse(r, true)), Shape::Ellipse),
+            ("ellipse", Box::new(|r| drawn_ellipse(r, false)), Shape::Ellipse),
+            ("rectangle, sharp", Box::new(|r| drawn_rectangle(r, 0.03)), Shape::Rectangle),
+            ("rectangle, rounded", Box::new(|r| drawn_rectangle(r, 0.12)), Shape::Rectangle),
+            ("rectangle, very round", Box::new(|r| drawn_rectangle(r, 0.22)), Shape::Rectangle),
+            ("triangle, sharp", Box::new(|r| drawn_triangle(r, 0.03)), Shape::Triangle),
+            ("triangle, rounded", Box::new(|r| drawn_triangle(r, 0.12)), Shape::Triangle),
+            ("triangle, very round", Box::new(|r| drawn_triangle(r, 0.22)), Shape::Triangle),
+        ]
+    }
+
+    /// Out of `samples` strokes: how many became `shape`, and what the others became.
+    fn tally(samples: usize, make: &Make, strength: f32, shape: Shape) -> (usize, std::collections::BTreeMap<String, usize>) {
+        let mut random = Random(0x2545_f491_4f6c_dd1d);
+        let mut others = std::collections::BTreeMap::new();
+        let mut hits = 0;
+        for _ in 0..samples {
+            match correct(&make(&mut random), 1.0, strength).map(|c| c.shape) {
+                Some(s) if s == shape => hits += 1,
+                other => *others.entry(other.map_or("freehand".to_owned(), |s| format!("{s:?}"))).or_insert(0) += 1,
+            }
+        }
+        (hits, others)
+    }
+
+    /// Mouse-drawn shapes, rounded corners and all, snap to what they are at the Laser's setting
+    /// and the most forgiving one, and never to something else.
+    #[test]
+    fn shapes_drawn_with_a_mouse_snap_to_what_they_are() {
+        for (name, make, shape) in drawn_kinds() {
+            for strength in [LASER_DEFAULT, 1.0] {
+                let (hits, others) = tally(60, &make, strength, shape);
+                let wrong: usize = others.iter().filter(|(k, _)| *k != "freehand").map(|(_, n)| n).sum();
+                assert!(hits >= 52 && wrong <= 6, "{name} at {strength}: {hits} of 60, else {others:?}");
+            }
+        }
+        for strength in [0.3, LASER_DEFAULT, 0.6, 1.0] {
+            let mut random = Random(77);
+            for _ in 0..5 {
+                for (name, points) in not_shapes(&mut random) {
+                    let result = correct(&points, 1.0, strength).map(|c| c.shape);
+                    let allowed = strength >= 0.7 && result == Some(Shape::Line) && ["wavy", "looped underline"].contains(&name);
+                    assert!(result.is_none() || allowed, "{name} at {strength} became {result:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "prints how often mouse-drawn shapes are recognised, and as what"]
+    fn mouse_drawn_rates() {
+        for (name, make, shape) in drawn_kinds() {
+            let mut line = format!("{name:24}");
+            for strength in [LASER_DEFAULT, 0.6, 1.0] {
+                let (hits, others) = tally(200, &make, strength, shape);
+                line += &format!(" | {strength:.2}: {:3}% {others:?}", hits / 2);
+            }
+            println!("{line}");
+        }
     }
 }

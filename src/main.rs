@@ -220,18 +220,35 @@ impl Drawn {
     }
 }
 
+/// With LASER_POINTER_RECORD set to a file, each stroke that could have snapped is added to it
+/// as a line of JSON with what it was taken for, to tune the recogniser on real drawing.
+fn record_stroke(path: &[(f32, f32)], scale: f32, snap: u32, correction: Option<&shapes::Correction>) {
+    use std::io::Write;
+    static FILE: std::sync::OnceLock<Option<std::ffi::OsString>> = std::sync::OnceLock::new();
+    let Some(file) = FILE.get_or_init(|| std::env::var_os("LASER_POINTER_RECORD")) else {
+        return;
+    };
+    let points: Vec<String> = path.iter().map(|(x, y)| format!("[{x:.1},{y:.1}]")).collect();
+    let shape = correction.map_or("null".to_owned(), |c| format!("\"{:?}\"", c.shape));
+    let line = format!("{{\"snap\":{snap},\"scale\":{scale},\"shape\":{shape},\"points\":[{}]}}
+", points.join(","));
+    if let Ok(mut out) = std::fs::OpenOptions::new().create(true).append(true).open(file) {
+        let _ = out.write_all(line.as_bytes());
+    }
+}
+
 /// How long a stroke takes to settle onto the shape it snapped to.
-const SNAP_SECS: f32 = 0.25;
+const SNAP_SECS: f32 = 0.16;
 
 /// How far a snapping stroke has moved towards its shape, `t` seconds in: a spring that sets off
 /// at once, overshoots by a few percent and has all but stopped by SNAP_SECS, where it lands
 /// exactly. A plain ease of the same length reads as a jump; this reads as quicker.
 fn spring(t: f32) -> f32 {
-    // Damped at 0.72 of critical, at 28 radians a second.
-    const DECAY: f32 = 20.2;
-    const FREQUENCY: f32 = 19.4;
+    // Damped at 0.72 of critical, at 44 radians a second.
+    const DECAY: f32 = 31.6;
+    const FREQUENCY: f32 = 30.3;
     // Its speed as it sets off, in shapes a second.
-    const START: f32 = 12.0;
+    const START: f32 = 18.8;
     if t >= SNAP_SECS {
         return 1.0;
     }
@@ -1893,8 +1910,9 @@ impl App {
         if self.locked || snap == 0 {
             return;
         }
-        let Some(correction) = shapes::correct(&self.path, drawn.stroke.scale, snap as f32 / 100.0)
-        else {
+        let correction = shapes::correct(&self.path, drawn.stroke.scale, snap as f32 / 100.0);
+        record_stroke(&self.path, drawn.stroke.scale, snap, correction.as_ref());
+        let Some(correction) = correction else {
             return;
         };
         let now = Instant::now();

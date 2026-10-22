@@ -369,15 +369,67 @@
     return { shape: 'rectangle', parts: [polyline(ordered, scale)] };
   }
 
+  // The path without `fraction` of its length at each end.
+  function trim(pts, fraction) {
+    const total = pathLength(pts), cut = fraction * total, out = [];
+    let walked = 0;
+    for (let i = 1; i < pts.length; i++) {
+      walked += d2(pts[i - 1], pts[i]);
+      if (walked > cut && walked < total - cut) out.push(pts[i]);
+    }
+    return out;
+  }
+
+  // Where the line through a and b meets the line through c and d.
+  function meeting(a, b, c, d) {
+    const r = [b[0] - a[0], b[1] - a[1]], s = [d[0] - c[0], d[1] - c[1]], den = r[0] * s[1] - r[1] * s[0];
+    if (Math.abs(den) < 1e-6 * Math.max(Math.hypot(...r) * Math.hypot(...s), 1e-6)) return null;
+    const t = ((c[0] - a[0]) * s[1] - (c[1] - a[1]) * s[0]) / den;
+    return [a[0] + r[0] * t, a[1] + r[1] * t];
+  }
+
+  // The corners of a closed outline as {first, last, at}. A hand rounds corners off, which the
+  // outline keeps as two or three gentler bends close together, so neighbouring bends the same
+  // way are taken as one corner where the sides either side of them meet.
+  function cornersOf(open) {
+    const n = open.length, at = i => open[i % n], deg = Math.PI / 180;
+    const turn = i => signedTurn(at(i + n - 1), at(i), at(i + 1)), side = i => d2(at(i), at(i + 1));
+    const rounding = (i, j) => {
+      const a = turn(i), b = turn(j);
+      return a * b > 0 && Math.abs(a) < 120 * deg && Math.abs(b) < 120 * deg && side(i) < 0.4 * Math.min(side(i + n - 1), side(j));
+    };
+    let begin = -1;
+    for (let i = 0; i < n && begin < 0; i++) if (!rounding(i, i + 1)) begin = i;
+    if (begin < 0) return [];
+    const found = [];
+    for (let i = begin + 1; i <= begin + n;) {
+      const first = i;
+      let last = i, total = turn(i);
+      while (last < begin + n && rounding(last, last + 1) && Math.abs(total + turn(last + 1)) <= 150 * deg) total += turn(++last);
+      if (Math.abs(total) > 35 * deg) {
+        let point = at(first);
+        if (first !== last) {
+          const b = at(first), c = at(last), met = meeting(at(first + n - 1), b, c, at(last + 1));
+          const group = [];
+          for (let k = first; k <= last; k++) group.push(at(k));
+          point = met && d2(met, b) < 2 * d2(b, c) ? met : centroid(group);
+        }
+        found.push({ first: first % n, last: last % n, at: point });
+      }
+      i = last + 1;
+    }
+    return found;
+  }
+
   function polygon(loop, tol, scale) {
     const [, , major, minor] = principalAxis(loop), size = (Math.sqrt(major) + Math.sqrt(minor)) * 2;
     const open = simplify(loop, 0.06 * size).slice(0, -1), n = open.length;
     if (n < 3) return null;
-    const corners = open.filter((_, i) => turnAt(open[(i + n - 1) % n], open[i], open[(i + 1) % n]) > 35 * Math.PI / 180);
-    const indices = corners.map(c => Math.max(0, loop.indexOf(c)));
-    for (let k = 0; k < indices.length; k++) {
-      const from = indices[k], to = indices[(k + 1) % indices.length];
-      const side = from <= to ? loop.slice(from, to + 1) : loop.slice(from).concat(loop.slice(0, to + 1));
+    const found = cornersOf(open), corners = found.map(c => c.at);
+    // Each side must be straight between its corners, leaving out the rounding at each end.
+    for (let k = 0; k < found.length; k++) {
+      const from = Math.max(0, loop.indexOf(open[found[k].last])), to = Math.max(0, loop.indexOf(open[found[(k + 1) % found.length].first]));
+      const side = trim(from <= to ? loop.slice(from, to + 1) : loop.slice(from).concat(loop.slice(0, to + 1)), 0.15);
       if (side.length >= 3 && bend(side) >= tol.side) return null;
     }
     if (corners.length === 3) return { shape: 'triangle', parts: [beginNear(polyline([...corners, corners[0]], scale), loop[0])] };
@@ -388,6 +440,18 @@
     return null;
   }
 
+  // How far a stroke lies from a shape: the root mean square of each point's distance to it.
+  function misfit(pts, shape) {
+    const outline = shape.parts.flat();
+    let squares = 0;
+    for (const p of pts) {
+      let best = Infinity;
+      for (let i = 1; i < outline.length; i++) best = Math.min(best, d2(p, nearestOn(p, outline[i - 1], outline[i])));
+      squares += best * best;
+    }
+    return Math.sqrt(squares / pts.length);
+  }
+
   /** `points` as [[x, y]], `strength` 0..1. Returns `{shape, parts}` or null. */
   function correct(points, scale, strength) {
     const walked = pathLength(points);
@@ -396,8 +460,12 @@
     // Bends finer than the samples are lost to them; whatever goes that much further isn't a shape.
     if (pathLength(path) < 0.5 * walked) return null;
     const tol = tolerances(strength), loop = closedPart(path, tol);
-    const ideal = loop ? polygon(loop, tol, scale) || ellipse(loop, tol, scale) : arrow(path, tol, strength, scale) || line(path, tol, strength, scale);
-    return ideal;
+    if (!loop) return arrow(path, tol, strength, scale) || line(path, tol, strength, scale);
+    // A box with rounded corners may pass for an ellipse too, and a lumpy circle for a box:
+    // whichever lies closer to the stroke is the one meant.
+    const box = polygon(loop, tol, scale), round = ellipse(loop, tol, scale);
+    if (box && round) return misfit(loop, box) <= misfit(loop, round) ? box : round;
+    return box || round;
   }
 
   function correspondence(drawn, correction) {
@@ -480,12 +548,12 @@
     Highlighter: { color: '#ffd400', width: 18, opacity: 40, fade: 3000, smoothing: 2, style: 'solid', ink: false, snap: 60 },
     Pen: { color: '#1e90ff', width: 4, opacity: 100, fade: 1000, smoothing: 2, style: 'solid', ink: true, snap: 50 },
   };
-  const SNAP_MS = 250, CLEAR_MS = 220, RIPPLE_MS = 400, RIPPLE_REACH = 60, TOAST_MS = 1400, TOAST_IN = 250, TOAST_OUT = 167;
+  const SNAP_MS = 160, CLEAR_MS = 220, RIPPLE_MS = 400, RIPPLE_REACH = 60, TOAST_MS = 1400, TOAST_IN = 250, TOAST_OUT = 167;
   /** How far a snapping stroke has moved towards its shape, `ms` in: a spring that sets off at
    *  once, overshoots by a few percent and lands exactly at SNAP_MS, as in src/main.rs. */
   function spring(ms) {
     if (ms >= SNAP_MS) return 1;
-    const t = ms / 1000, decay = 20.2, frequency = 19.4, start = 12;
+    const t = ms / 1000, decay = 31.6, frequency = 30.3, start = 18.8;
     return 1 - Math.exp(-decay * t) * (Math.cos(frequency * t) + (decay - start) / frequency * Math.sin(frequency * t));
   }
 
