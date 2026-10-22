@@ -85,7 +85,9 @@ The default MSVC toolchain needs the Visual Studio Build Tools. With the GNU too
 `packaging\package.ps1` builds the MSIX the Microsoft Store takes (it needs the Windows SDK), with
 the identity Partner Center assigns; run `Get-Help packaging\package.ps1` for the details. Pushing
 a `v*` tag runs the same on GitHub Actions for x64 and Arm64, publishes the exes as a release and
-keeps the Store bundle as an artifact. Images under `packaging\Assets` and `docs\img` come from
+keeps the Store bundle as an artifact. The Store build checks its licence (`src/store.rs`): it
+sells with a week's free trial, after which the laser stays off until it's bought. The plain exe
+is never limited. Images under `packaging\Assets` and `docs\img` come from
 `assets\brand\logo.svg`: `cd tools; npm install; npm run icons`.
 
 ## Support

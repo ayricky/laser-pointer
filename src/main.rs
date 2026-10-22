@@ -17,10 +17,11 @@ mod settings;
 mod shapes;
 #[cfg(test)]
 mod snapshot;
+mod store;
 mod stroke;
 mod ui;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
@@ -616,6 +617,7 @@ fn main() -> Result<()> {
         with_app(App::refresh_cursor);
         // Shortcuts first: adding the tray icon can take Explorer a few seconds.
         sync_hotkeys();
+        store::check(hwnd);
         ui::init(instance.into())?;
         if first_run {
             let shortcut = ui::shortcut_name(settings::get().key(Command::Toggle));
@@ -724,11 +726,36 @@ pub fn laser_on() -> bool {
     LASER_ON.load(Ordering::Relaxed)
 }
 
+/// On, or asked for and waiting on the Store's answer about the licence: what a toggle undoes.
+pub fn laser_wanted() -> bool {
+    laser_on() || WANTS_LASER.with(Cell::get)
+}
+
 pub fn strokes_on_screen() -> bool {
     INK_VISIBLE.load(Ordering::Relaxed)
 }
 
+thread_local! {
+    /// The laser was asked for without a licence and waits on the Store's answer.
+    static WANTS_LASER: Cell<bool> = const { Cell::new(false) };
+}
+
 pub fn set_laser(on: bool) {
+    WANTS_LASER.with(|wants| wants.set(false));
+    if on {
+        match store::licence() {
+            store::Licence::Full => {}
+            // On at once, and looked at again each time, so a trial that ends while the app runs
+            // switches the laser off as soon as the Store says so.
+            store::Licence::Unknown | store::Licence::Trial(_) => store::check(overlay()),
+            // It may have been bought since: ask the Store before saying no.
+            store::Licence::Unlicensed { .. } => {
+                WANTS_LASER.with(|wants| wants.set(true));
+                store::check(overlay());
+                return;
+            }
+        }
+    }
     with_app(|app| app.set_on(on));
     sync_hotkeys();
     ui::laser_changed();
@@ -746,7 +773,7 @@ pub fn settings_changed() {
 
 pub fn run_command(command: Command) {
     match command {
-        Command::Toggle => set_laser(!laser_on()),
+        Command::Toggle => set_laser(!laser_wanted()),
         Command::Off => set_laser(false),
         Command::Undo => {
             with_app(App::undo);
@@ -938,6 +965,31 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 } else if id >= HOTKEY_PRESET {
                     apply_preset((id - HOTKEY_PRESET) as usize);
                 }
+                LRESULT(0)
+            }
+            // An answer from before a check still running is ignored; that check answers next.
+            store::WM_LICENCE if !store::settled() => LRESULT(0),
+            store::WM_LICENCE => {
+                let wanted = WANTS_LASER.with(|wants| wants.replace(false));
+                match store::licence() {
+                    store::Licence::Unlicensed { trial_over } if wanted || laser_on() => {
+                        if laser_on() {
+                            set_laser(false);
+                        }
+                        let notice = if trial_over {
+                            "Your free week is over. Buy Screen Laser Pointer to keep drawing"
+                        } else {
+                            "The Store has no licence for this app on your account"
+                        };
+                        with_app(|app| app.notify_for(notice, 5.0));
+                        store::open_product_page();
+                    }
+                    store::Licence::Unlicensed { .. } => {}
+                    _ if wanted => set_laser(true),
+                    _ => {}
+                }
+                // The panel's Buy link counts the days left.
+                ui::settings_changed();
                 LRESULT(0)
             }
             WM_SETCURSOR if laser_on() => {
