@@ -43,6 +43,7 @@ use crate::settings::{
 };
 use crate::cursors::{self, STYLES as CURSOR_STYLES};
 use crate::stroke::{self, rgba, Point, Scratch, Stroke};
+use crate::store::{self, Licence};
 use crate::ui::shortcut_name;
 
 pub const WIDTH: f32 = 420.0;
@@ -242,13 +243,19 @@ enum Drag {
     Shade,
 }
 
-/// The links under the Options tab: what each says, and where it goes.
-fn links() -> [(&'static str, String); 2] {
-    let first = match settings::package_family() {
-        Some(family) => ("Rate in the Store", format!("ms-windows-store://review/?PFN={family}")),
-        None => ("Release notes", "https://github.com/ayricky/laser-pointer/releases".into()),
+/// The links under the Options tab: what each says, and where it goes. Until the Store build is
+/// bought, the first one buys it.
+fn links() -> [(String, String); 2] {
+    let first = match (store::licence(), settings::package_family()) {
+        (Licence::Trial(days), _) => {
+            let plural = if days == 1 { "" } else { "s" };
+            (format!("Buy \u{b7} {days} day{plural} of trial left"), store::product_page())
+        }
+        (Licence::Unlicensed { .. }, _) => ("Buy in the Store".into(), store::product_page()),
+        (Licence::Full, Some(family)) => ("Rate in the Store".into(), format!("ms-windows-store://review/?PFN={family}")),
+        (Licence::Full, None) => ("Release notes".into(), "https://github.com/ayricky/laser-pointer/releases".into()),
     };
-    [first, ("Report a problem", "https://github.com/ayricky/laser-pointer/issues/new".into())]
+    [first, ("Report a problem".into(), "https://github.com/ayricky/laser-pointer/issues/new".into())]
 }
 
 pub enum Action {
@@ -639,6 +646,12 @@ impl Panel {
         let mut panel = Self::with_target(factory, target, dpi, Theme::current())?;
         panel.window = Some((hwnd, dpi, width, height));
         panel.ask_autostart(None);
+        // The trial's days left are counted afresh each time the panel opens.
+        let window = hwnd.0 as isize;
+        store::check(hwnd, move |_| {
+            // Safe from any thread; a window closed in the meantime just ignores it.
+            let _ = InvalidateRect(Some(HWND(window as _)), None, false);
+        });
         Ok(panel)
     }
 
@@ -1803,7 +1816,7 @@ impl Panel {
         for (index, (area, (label, _))) in self.link_rects().into_iter().zip(links()).enumerate() {
             let hovered = self.hover == Some(Widget::Link(index));
             let color = if hovered { theme.text } else { theme.accent };
-            self.text(label, &self.fonts.small_line, area, color);
+            self.text(&label, &self.fonts.small_line, area, color);
             if hovered {
                 self.fill(rect(area.left, area.bottom - 3.0, area.right - area.left, 1.0), color);
             }

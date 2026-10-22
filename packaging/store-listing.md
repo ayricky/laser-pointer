@@ -60,7 +60,9 @@ Text for Partner Center (Store listings → English (United States)). Limits are
 
 **Category:** Productivity
 
-**Pricing:** US$2.99, all markets; no free trial (the free build is on GitHub).
+**Pricing:** US$2.99, all markets, with a 7-day free trial. The Store doesn't enforce trials for
+desktop apps, so `src/store.rs` does: once the trial is over, the laser won't turn on until the
+app is bought. The free build on GitHub is never limited.
 
 **System requirements:** Windows 10 version 1809 or later, or Windows 11; x64 or Arm64.
 
