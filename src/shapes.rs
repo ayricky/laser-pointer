@@ -310,6 +310,20 @@ pub fn correct(points: &[P], scale: f32, strength: f32) -> Option<Correction> {
     }
 }
 
+/// How well a shape follows a stroke, as (root mean square of each stroke point's distance to the
+/// shape, relative to the stroke's spread across its main axis; furthest any point of the shape
+/// lies from the stroke, relative to its size).
+fn fit(points: &[P], shape: &Correction) -> (f32, f32) {
+    let (_, _, major, minor) = principal_axis(points);
+    let size = (major.sqrt() + minor.sqrt()) * 2.0;
+    let outline: Vec<P> = shape.parts.iter().flatten().copied().collect();
+    let away = outline
+        .iter()
+        .map(|&p| points.windows(2).map(|edge| distance(p, nearest_on(p, edge[0], edge[1]))).fold(f32::MAX, f32::min))
+        .fold(0.0, f32::max);
+    (misfit(points, shape) / minor.sqrt().max(1e-3), away / size)
+}
+
 /// How far a stroke lies from a shape: the root mean square of each point's distance to it.
 fn misfit(points: &[P], shape: &Correction) -> f32 {
     let outline: Vec<P> = shape.parts.iter().flatten().copied().collect();
@@ -642,7 +656,7 @@ fn polygon(loop_: &[P], tolerance: &Tolerances, scale: f32) -> Option<Correction
     if !sides_straight {
         return None;
     }
-    match corner_points.len() {
+    let shape = match corner_points.len() {
         3 => {
             let mut closed = corner_points.clone();
             closed.push(corner_points[0]);
@@ -656,8 +670,17 @@ fn polygon(loop_: &[P], tolerance: &Tolerances, scale: f32) -> Option<Correction
             ..rectangle
         }),
         _ => None,
-    }
+    }?;
+    // The shape must follow the stroke: not cut across a thin loop, nor put a corner out where
+    // the stroke never went, as when two corners either end of a short side are taken for one.
+    let (across, away) = fit(loop_, &shape);
+    (across <= FIT_ACROSS && away <= FIT_AWAY).then_some(shape)
 }
+
+/// How far a box or triangle may lie from its stroke: on average, relative to how thick the
+/// stroke's loop is, and at its furthest, relative to the loop's size.
+const FIT_ACROSS: f32 = 0.45;
+const FIT_AWAY: f32 = 0.12;
 
 /// The path without `fraction` of its length at each end.
 fn trim(points: &[P], fraction: f32) -> Vec<P> {
@@ -721,12 +744,6 @@ fn corners(open: &[P]) -> Vec<Corner> {
             }
             last += 1;
             total += next;
-        }
-        // All of it must be short beside the side leading out too: two real corners either end
-        // of a short side are each a corner.
-        let span: f32 = (first..last).map(side).sum();
-        if last > first && span >= 0.4 * side(last) {
-            (last, total) = (first, turn(first));
         }
         if total.abs() > 35f32.to_radians() {
             let point = if first == last {
@@ -1329,9 +1346,38 @@ mod tests {
                     assert_eq!(correct(&thin, 1.0, strength).map(|c| c.shape), Some(Shape::Triangle), "400x{height} triangle at {strength}");
                 }
             }
-            for trapezoid in both_ways(&[(0.0, 0.0), (300.0, 0.0), (100.0, 200.0), (0.0, 200.0)]) {
-                assert_ne!(correct(&trapezoid, 1.0, strength).map(|c| c.shape), Some(Shape::Triangle), "trapezoid at {strength}");
+            for top in [60.0, 100.0] {
+                for trapezoid in both_ways(&[(0.0, 0.0), (300.0, 0.0), (top, 200.0), (0.0, 200.0)]) {
+                    assert_ne!(correct(&trapezoid, 1.0, strength).map(|c| c.shape), Some(Shape::Triangle), "trapezoid with a {top} top at {strength}");
+                }
             }
+            for b in [10.0, 20.0] {
+                let ellipse: Vec<P> = (0..=400).map(|i| {
+                    let t = 0.213 + TAU * i as f32 / 400.0;
+                    (200.0 * t.cos(), b * t.sin())
+                }).collect();
+                let shape = correct(&ellipse, 1.0, strength).map(|c| c.shape);
+                assert!(shape.is_none() || shape == Some(Shape::Ellipse), "200x{b} ellipse at {strength}: {shape:?}");
+            }
+        }
+    }
+
+    /// A smooth rounded box, its corners a fifth of its height, started partway along the top.
+    #[test]
+    fn a_smooth_rounded_box_is_a_box() {
+        let (w, h, r) = (400.0, 200.0, 60.0);
+        let mut outline = Vec::new();
+        for (cx, cy, from) in [(w - r, r, -PI / 2.0), (w - r, h - r, 0.0), (r, h - r, PI / 2.0), (r, r, PI)] {
+            outline.extend((0..=20).map(|k| {
+                let a = from + PI / 2.0 * k as f32 / 20.0;
+                (cx + r * a.cos(), cy + r * a.sin())
+            }));
+        }
+        let start = outline.iter().position(|p| p.0 > 330.0).unwrap_or(0);
+        outline.rotate_left(start);
+        outline.push(outline[0]);
+        for strength in [LASER_DEFAULT, 0.6, 1.0] {
+            assert_eq!(correct(&outline, 1.0, strength).map(|c| c.shape), Some(Shape::Rectangle), "at {strength}");
         }
     }
 

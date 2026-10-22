@@ -414,11 +414,6 @@
         last++;
         total += next;
       }
-      // All of it must be short beside the side leading out too: two real corners either end of a
-      // short side are each a corner.
-      let span = 0;
-      for (let k = first; k < last; k++) span += side(k);
-      if (last > first && span >= 0.4 * side(last)) { last = first; total = turn(first); }
       if (Math.abs(total) > 35 * deg) {
         let point = at(first);
         if (first !== last) {
@@ -446,12 +441,35 @@
       const side = from <= to ? loop.slice(from, to + 1) : loop.slice(from).concat(loop.slice(0, to + 1));
       if (side.length >= 3 && bend(trim(side, 0.15)) >= tol.side) return null;
     }
-    if (corners.length === 3) return { shape: 'triangle', parts: [beginNear(polyline([...corners, corners[0]], scale), loop[0])] };
+    let shape = null;
+    if (corners.length === 3) shape = { shape: 'triangle', parts: [beginNear(polyline([...corners, corners[0]], scale), loop[0])] };
     if (corners.length === 4) {
       const r = rectangle(corners, tol, scale);
-      return r && { shape: 'rectangle', parts: [beginNear(r.parts[0], loop[0])] };
+      shape = r && { shape: 'rectangle', parts: [beginNear(r.parts[0], loop[0])] };
     }
-    return null;
+    if (!shape) return null;
+    // The shape must follow the stroke: not cut across a thin loop, nor put a corner out where the
+    // stroke never went, as when two corners either end of a short side are taken for one.
+    const [across, away] = fit(loop, shape);
+    return across <= FIT_ACROSS && away <= FIT_AWAY ? shape : null;
+  }
+
+  // How far a box or triangle may lie from its stroke: on average, relative to how thick the
+  // stroke's loop is, and at its furthest, relative to the loop's size.
+  const FIT_ACROSS = 0.45, FIT_AWAY = 0.12;
+
+  // How well a shape follows a stroke: [root mean square of each stroke point's distance to the
+  // shape, relative to the spread across the main axis; furthest any point of the shape lies from
+  // the stroke, relative to its size].
+  function fit(pts, shape) {
+    const [, , major, minor] = principalAxis(pts), size = (Math.sqrt(major) + Math.sqrt(minor)) * 2;
+    let away = 0;
+    for (const p of shape.parts.flat()) {
+      let best = Infinity;
+      for (let i = 1; i < pts.length; i++) best = Math.min(best, d2(p, nearestOn(p, pts[i - 1], pts[i])));
+      away = Math.max(away, best);
+    }
+    return [misfit(pts, shape) / Math.max(Math.sqrt(minor), 1e-3), away / size];
   }
 
   // How far a stroke lies from a shape: the root mean square of each point's distance to it.
