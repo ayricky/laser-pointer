@@ -92,7 +92,8 @@ and `docs\img` come from `assets\brand\logo.svg`: `cd tools; npm install; npm ru
 
 Bump `version` in `Cargo.toml` and rewrite `packaging\whats-new.txt` in the same pull request (CI
 fails when the notes weren't changed). Merging it releases that version: GitHub Actions builds x64
-and Arm64, tags the commit, and publishes the exes as a release with those notes. Once the Store
+and Arm64, tags the commit, and publishes the exes as a release with those notes. If another
+version bump lands before that release starts, only the newer version is released. Once the Store
 credentials are set (see the `store` job in `.github/workflows/release.yml`), it also uploads the
 bundle to a draft Store submission with the same text as What's new, ready to submit in Partner
 Center. Until then the bundle is kept as a workflow artifact to upload by hand.
