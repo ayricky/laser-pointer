@@ -26,15 +26,25 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - run: |
-          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
-          if [ -z "$version" ]; then echo 'No version in Cargo.toml'; exit 1; fi
-          if git rev-parse --quiet --verify "refs/tags/v$version" > /dev/null; then
-            echo "v$version is already released"
+      - shell: bash
+        env:
+          # A pull request is checked out as its merge into the base branch.
+          BASE: ${{ github.event_name == 'pull_request' && 'HEAD^1' || github.event.before }}
+        run: |
+          version() { git show "$1:Cargo.toml" | sed -n '/^version = "/{s/^version = "\(.*\)"/\1/p;q}'; }
+          if [ -z "$BASE" ] || ! git cat-file -e "$BASE^{commit}" 2> /dev/null; then
+            echo "Nothing to compare with"
             exit 0
           fi
-          previous=$(git describe --tags --abbrev=0 --match 'v*')
-          if git diff --quiet "$previous" HEAD -- packaging/whats-new.txt; then
-            echo "::error file=packaging/whats-new.txt::v$version will be released: describe it in packaging/whats-new.txt (unchanged since $previous)"
+          old=$(version "$BASE")
+          new=$(version HEAD)
+          if [ -z "$new" ]; then echo 'No version in Cargo.toml'; exit 1; fi
+          if [ "$old" = "$new" ]; then
+            echo "The version stays $new"
+            exit 0
+          fi
+          if git diff --quiet "$BASE" HEAD -- packaging/whats-new.txt; then
+            echo "::error file=packaging/whats-new.txt::The version goes from $old to $new: describe v$new in packaging/whats-new.txt"
             exit 1
           fi
+          echo "v$new has new notes"

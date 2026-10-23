@@ -1,8 +1,11 @@
-# Merging a version bump in Cargo.toml releases it: when main's version has no v<version> tag yet,
-# this builds both architectures, tags the commit and publishes a GitHub release with the exes and
+# Merging a version bump in Cargo.toml releases it: when main's version has no GitHub release yet,
+# this tags the commit, builds both architectures and publishes the release with the exes and
 # packaging/whats-new.txt as its notes. When the Store credentials are set up (see the store job),
 # it also uploads the bundle to a draft Store submission, which goes to certification once it's
-# submitted in Partner Center. Run it by hand from the Actions tab to retry a release that failed.
+# submitted in Partner Center.
+#
+# To retry, re-run the failed jobs of the run, or run the workflow from the Actions tab: it
+# releases main's version if that has no GitHub release yet.
 name: Release
 
 on:
@@ -13,43 +16,57 @@ on:
 permissions:
   contents: write
 
-# One release at a time, so two quick merges can't both see the same version as new.
+# One release at a time, in merge order, so two quick merges can't both see the same version as
+# new and a pending release isn't dropped for a later one.
 concurrency:
   group: release
   cancel-in-progress: false
+  queue: max
 
 jobs:
   version:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
       new: ${{ steps.version.outputs.new }}
+      sha: ${{ steps.version.outputs.sha }}
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
       - id: version
+        shell: bash
         run: |
-          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          version=$(sed -n '/^version = "/{s/^version = "\(.*\)"/\1/p;q}' Cargo.toml)
           if [ -z "$version" ]; then echo 'No version in Cargo.toml'; exit 1; fi
-          # --exit-code makes git exit with 2 when the tag isn't there.
-          if git ls-remote --exit-code --tags origin "refs/tags/v$version" > /dev/null; then
-            new=false
-          else
-            status=$?
-            if [ "$status" -ne 2 ]; then exit "$status"; fi
-            new=true
-          fi
-          echo "v$version is new: $new"
+          tag="v$version"
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "new=$new" >> "$GITHUB_OUTPUT"
+          if gh release view "$tag" --json tagName > /dev/null 2> view.err; then
+            echo "$tag is already released"
+            echo "new=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! grep -q 'release not found' view.err; then cat view.err; exit 1; fi
+          # Tag the commit now, while it's still main's head: once main moves on, GITHUB_TOKEN
+          # may not be allowed to tag a commit whose workflows differ from main's. A tag left by
+          # a release that failed moves here, so a fix merged since is what gets released.
+          git tag --force "$tag" "$GITHUB_SHA"
+          git push --force origin "refs/tags/$tag"
+          echo "Tagged $GITHUB_SHA as $tag"
+          echo "new=true" >> "$GITHUB_OUTPUT"
+          echo "sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
 
   release:
     needs: version
-    if: needs.version.outputs.new == 'true' && github.ref == 'refs/heads/main'
+    if: needs.version.outputs.new == 'true'
     runs-on: windows-latest
     env:
       TAG: v${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.sha }}
 
       # The same text becomes the Store's What's new, which takes up to 1500 characters.
       - name: Check What's new
@@ -79,13 +96,12 @@ jobs:
           name: store-bundle
           path: dist/*.msixbundle
 
-      # Creates the tag on the commit this run built.
       - name: Publish the release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create $env:TAG (Get-ChildItem dist/*.zip) --target $env:GITHUB_SHA `
+          gh release create $env:TAG (Get-ChildItem dist/*.zip) --verify-tag `
             --title "Laser Pointer $env:TAG" --notes-file packaging/whats-new.txt --generate-notes
 
   # Runs once the repository has the Store credentials: the variables MSSTORE_TENANT_ID,
@@ -100,11 +116,13 @@ jobs:
       BUNDLE: dist/LaserPointer_${{ needs.version.outputs.version }}.0.msixbundle
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.sha }}
       - uses: actions/download-artifact@v4
         with:
           name: store-bundle
           path: dist
-      - uses: microsoft/setup-msstore-cli@v1.4
+      - uses: microsoft/microsoft-store-apppublisher@v1.4
         with:
           version: v0.4.3
 
@@ -116,9 +134,30 @@ jobs:
           --sellerId '${{ vars.MSSTORE_SELLER_ID }}' --clientId '${{ vars.MSSTORE_CLIENT_ID }}'
           --clientSecret "$CLIENT_SECRET"
 
+      # msstore publish deletes any open draft before making its own, so stop rather than lose
+      # edits made in Partner Center. A draft that already has this bundle is from an earlier
+      # attempt at this release, and is kept.
+      - name: Check for an open draft
+        id: draft
+        shell: pwsh
+        run: |
+          $app = msstore apps get $env:APP_ID | ConvertFrom-Json
+          if ($LASTEXITCODE) { throw 'Could not read the app from Partner Center' }
+          $pending = $app.PendingApplicationSubmission.Id
+          if (-not $pending) { 'upload=true' >> $env:GITHUB_OUTPUT; return }
+          $draft = msstore submission get $env:APP_ID | ConvertFrom-Json
+          if ($LASTEXITCODE) { throw 'Could not read the draft submission' }
+          $bundle = Split-Path $env:BUNDLE -Leaf
+          if ($draft.Id -ne $pending -or -not ($draft.ApplicationPackages | Where-Object FileName -EQ $bundle)) {
+            throw "Submission $pending is already open in Partner Center. Submit or delete it, then re-run this job."
+          }
+          "Draft $pending already has $bundle"
+          'upload=false' >> $env:GITHUB_OUTPUT
+
       # Starts from the published submission, swaps its package for this bundle and keeps the
       # price; it stops rather than send a price the Store would read as free.
       - name: Upload the bundle to a draft submission
+        if: steps.draft.outputs.upload == 'true'
         run: msstore publish "$BUNDLE" --appId "$APP_ID" --noCommit
 
       - name: Set What's new
@@ -126,7 +165,7 @@ jobs:
         run: |
           $submission = msstore submission get $env:APP_ID | ConvertFrom-Json
           if ($LASTEXITCODE) { throw 'Could not read the draft submission' }
-          $listing = $submission.listings.'en-us'.baseListing
+          $listing = $submission.Listings.'en-us'.BaseListing
           if (-not $listing) { throw 'The draft has no en-us listing' }
           $notes = (Get-Content packaging/whats-new.txt -Raw).Trim()
           $listing | Add-Member -NotePropertyName ReleaseNotes -NotePropertyValue $notes -Force
