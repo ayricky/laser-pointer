@@ -47,16 +47,6 @@ jobs:
           if [ -z "$version" ]; then echo 'No version in Cargo.toml'; exit 1; fi
           tag="v$version"
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          if draft=$(gh release view "$tag" --json isDraft --jq .isDraft 2> view.err); then
-            if [ "$draft" = true ]; then
-              echo "::error::$tag has a draft release, probably from a publish that was cut short. Delete the draft on GitHub, then run this workflow again."
-              exit 1
-            fi
-            echo "$tag is already released"
-            echo "new=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if ! grep -q 'release not found' view.err; then cat view.err; exit 1; fi
           # Only main's head is tagged: GITHUB_TOKEN may not be allowed to tag an older commit
           # whose workflows differ from main's. When main has moved on, a run for its head takes
           # over; one is started here, since a push with [skip ci] wouldn't have queued one.
@@ -67,6 +57,16 @@ jobs:
             echo "new=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          if draft=$(gh release view "$tag" --json isDraft --jq .isDraft 2> view.err); then
+            if [ "$draft" = true ]; then
+              echo "::error::$tag has a draft release, probably from a publish that was cut short. Delete the draft on GitHub, then run this workflow again."
+              exit 1
+            fi
+            echo "$tag is already released"
+            echo "new=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! grep -q 'release not found' view.err; then cat view.err; exit 1; fi
           # A tag left by a release that failed moves here, so a fix merged since is what gets
           # released.
           git tag --force "$tag" "$GITHUB_SHA"
