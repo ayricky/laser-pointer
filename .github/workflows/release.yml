@@ -1,31 +1,102 @@
-# Pushing a tag like v1.0.0 (matching Cargo.toml) builds both architectures and publishes a GitHub
-# release with the exes. The Store bundle is kept as a workflow artifact, to upload in Partner
-# Center.
+# Merging a version bump in Cargo.toml releases it: when main's version has no GitHub release yet,
+# this tags the commit, builds both architectures and publishes the release with the exes and
+# packaging/whats-new.txt as its notes. When the Store credentials are set up (see the store job),
+# it also uploads the bundle to a draft Store submission, which goes to certification once it's
+# submitted in Partner Center.
+#
+# Only main's latest version is released: a version bumped again before its release starts is
+# skipped. To retry a failed release, re-run the run's failed jobs, or run the workflow from the
+# Actions tab, which releases main's version if it has no GitHub release yet. A failed Store upload
+# is retried only by re-running the original run's failed jobs, after deleting any draft it left
+# in Partner Center.
 name: Release
 
 on:
   push:
-    tags: ['v*']
+    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: write
+  # To start a run for main's head when this one is for an older commit.
+  actions: write
+
+# One release at a time, so two quick merges can't both see the same version as new, and pending
+# runs wait instead of being dropped.
+concurrency:
+  group: release
+  cancel-in-progress: false
+  queue: max
 
 jobs:
-  release:
-    runs-on: windows-latest
+  version:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      new: ${{ steps.version.outputs.new }}
+      sha: ${{ steps.version.outputs.sha }}
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
-      - run: rustup target add aarch64-pc-windows-msvc
-      - uses: Swatinem/rust-cache@v2
+      - id: version
+        shell: bash
+        run: |
+          version=$(sed -n '/^version = "/{s/^version = "\(.*\)"/\1/p;q}' Cargo.toml)
+          if [ -z "$version" ]; then echo 'No version in Cargo.toml'; exit 1; fi
+          tag="v$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          # Only main's head is tagged: GITHUB_TOKEN may not be allowed to tag an older commit
+          # whose workflows differ from main's. When main has moved on, a run for its head takes
+          # over; one is started here, since a push with [skip ci] wouldn't have queued one.
+          head=$(git ls-remote --exit-code origin refs/heads/main | cut -f 1)
+          if [ "$head" != "$GITHUB_SHA" ]; then
+            gh workflow run release.yml --ref main
+            echo "main has moved on to $head; started a run for it"
+            echo "new=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if draft=$(gh release view "$tag" --json isDraft --jq .isDraft 2> view.err); then
+            if [ "$draft" = true ]; then
+              echo "::error::$tag has a draft release, probably from a publish that was cut short. Delete the draft on GitHub, then run this workflow again."
+              exit 1
+            fi
+            echo "$tag is already released"
+            echo "new=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! grep -q 'release not found' view.err; then cat view.err; exit 1; fi
+          # A tag left by a release that failed moves here, so a fix merged since is what gets
+          # released.
+          git tag --force "$tag" "$GITHUB_SHA"
+          git push --force origin "refs/tags/$tag"
+          echo "Tagged $GITHUB_SHA as $tag"
+          echo "new=true" >> "$GITHUB_OUTPUT"
+          echo "sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
 
-      - name: Check the tag matches Cargo.toml
+  release:
+    needs: version
+    if: needs.version.outputs.new == 'true'
+    runs-on: windows-latest
+    env:
+      TAG: v${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.sha }}
+
+      # The same text becomes the Store's What's new, which takes up to 1500 characters.
+      - name: Check What's new
         shell: pwsh
         run: |
-          if ((Get-Content Cargo.toml -Raw) -notmatch '(?m)^version = "(.+)"') { throw 'No version in Cargo.toml' }
-          if ("v$($Matches[1])" -ne $env:GITHUB_REF_NAME) { throw "Tag $env:GITHUB_REF_NAME doesn't match version $($Matches[1])" }
+          $notes = (Get-Content packaging/whats-new.txt -Raw).Trim()
+          if (-not $notes) { throw 'packaging/whats-new.txt is empty' }
+          if ($notes.Length -gt 1500) { throw "packaging/whats-new.txt has $($notes.Length) characters; the Store takes 1500" }
 
-      # A tag can point anywhere, so what it releases is checked here too, not only by CI.
+      - run: rustup target add aarch64-pc-windows-msvc
       - run: rustup component add clippy
+      - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
 
@@ -35,7 +106,7 @@ jobs:
           ./packaging/package.ps1 -Architectures x64,arm64
           foreach ($architecture in 'x64', 'arm64') {
             Compress-Archive -Path "dist/$architecture/laser-pointer.exe", LICENSE, README.md `
-              -DestinationPath "dist/laser-pointer-$env:GITHUB_REF_NAME-windows-$architecture.zip"
+              -DestinationPath "dist/laser-pointer-$env:TAG-windows-$architecture.zip"
           }
 
       - uses: actions/upload-artifact@v4
@@ -43,8 +114,77 @@ jobs:
           name: store-bundle
           path: dist/*.msixbundle
 
+      # A later run may have moved the tag to a newer commit since this one built.
       - name: Publish the release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create $env:GITHUB_REF_NAME (Get-ChildItem dist/*.zip) --title "Laser Pointer $env:GITHUB_REF_NAME" --generate-notes
+          SHA: ${{ needs.version.outputs.sha }}
+        run: |
+          git fetch --quiet --force origin "refs/tags/$($env:TAG):refs/tags/$($env:TAG)"
+          if ($LASTEXITCODE) { throw "Could not fetch $env:TAG" }
+          $tagged = git rev-parse "$($env:TAG)^{commit}"
+          if ($tagged -ne $env:SHA) { throw "$env:TAG now points to $tagged, not $env:SHA, which this run built; the run that moved it releases it" }
+          gh release create $env:TAG (Get-ChildItem dist/*.zip) --verify-tag `
+            --title "Laser Pointer $env:TAG" --notes-file packaging/whats-new.txt --generate-notes
+
+  # Runs once the repository has the Store credentials: the variables MSSTORE_TENANT_ID,
+  # MSSTORE_SELLER_ID and MSSTORE_CLIENT_ID and the secret MSSTORE_CLIENT_SECRET, for a Microsoft
+  # Entra app added to Partner Center with the Manager role. The submission is left as a draft.
+  store:
+    needs: [version, release]
+    if: vars.MSSTORE_CLIENT_ID != ''
+    runs-on: ubuntu-latest
+    env:
+      APP_ID: 9MT6DPQK4631
+      BUNDLE: dist/LaserPointer_${{ needs.version.outputs.version }}.0.msixbundle
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.sha }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: store-bundle
+          path: dist
+      - uses: microsoft/microsoft-store-apppublisher@v1.4
+        with:
+          version: v0.4.3
+
+      - name: Sign in to Partner Center
+        env:
+          CLIENT_SECRET: ${{ secrets.MSSTORE_CLIENT_SECRET }}
+        run: >
+          msstore reconfigure --tenantId '${{ vars.MSSTORE_TENANT_ID }}'
+          --sellerId '${{ vars.MSSTORE_SELLER_ID }}' --clientId '${{ vars.MSSTORE_CLIENT_ID }}'
+          --clientSecret "$CLIENT_SECRET"
+
+      # msstore publish deletes any open draft before making its own, so stop rather than lose
+      # edits made in Partner Center. That includes a draft left by an earlier attempt of this
+      # job, since nothing shows whether its upload finished.
+      - name: Check for an open draft
+        shell: pwsh
+        run: |
+          $app = msstore apps get $env:APP_ID | ConvertFrom-Json
+          if ($LASTEXITCODE) { throw 'Could not read the app from Partner Center' }
+          $pending = $app.PendingApplicationSubmission.Id
+          if ($pending) {
+            throw "Submission $pending is already open in Partner Center. Submit or delete it there, then re-run this job."
+          }
+
+      # Starts from the published submission, swaps its package for this bundle and keeps the
+      # price; it stops rather than send a price the Store would read as free.
+      - name: Upload the bundle to a draft submission
+        run: msstore publish "$BUNDLE" --appId "$APP_ID" --noCommit
+
+      - name: Set What's new
+        shell: pwsh
+        run: |
+          $submission = msstore submission get $env:APP_ID | ConvertFrom-Json
+          if ($LASTEXITCODE) { throw 'Could not read the draft submission' }
+          $listing = $submission.Listings.'en-us'.BaseListing
+          if (-not $listing) { throw 'The draft has no en-us listing' }
+          $notes = (Get-Content packaging/whats-new.txt -Raw).Trim()
+          $listing | Add-Member -NotePropertyName ReleaseNotes -NotePropertyValue $notes -Force
+          $submission | ConvertTo-Json -Depth 100 | Set-Content submission.json
+          msstore submission update $env:APP_ID submission.json
+          if ($LASTEXITCODE) { throw 'Could not update the draft submission' }
