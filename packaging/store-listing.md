@@ -42,6 +42,7 @@ Text for Partner Center (Store listings → English (United States)). Limits are
 > supports its development.
 
 **What's new in this version:** leave blank for the first submission, as Partner Center advises.
+Later releases take it from `whats-new.txt`.
 
 **Product features** (≤ 20, ≤ 200 characters each)
 

@@ -1,31 +1,67 @@
-# Pushing a tag like v1.0.0 (matching Cargo.toml) builds both architectures and publishes a GitHub
-# release with the exes. The Store bundle is kept as a workflow artifact, to upload in Partner
-# Center.
+# Merging a version bump in Cargo.toml releases it: when main's version has no v<version> tag yet,
+# this builds both architectures, tags the commit and publishes a GitHub release with the exes and
+# packaging/whats-new.txt as its notes. When the Store credentials are set up (see the store job),
+# it also uploads the bundle to a draft Store submission, which goes to certification once it's
+# submitted in Partner Center. Run it by hand from the Actions tab to retry a release that failed.
 name: Release
 
 on:
   push:
-    tags: ['v*']
+    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: write
 
+# One release at a time, so two quick merges can't both see the same version as new.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
-  release:
-    runs-on: windows-latest
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      new: ${{ steps.version.outputs.new }}
     steps:
       - uses: actions/checkout@v4
-      - run: rustup target add aarch64-pc-windows-msvc
-      - uses: Swatinem/rust-cache@v2
+      - id: version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          if [ -z "$version" ]; then echo 'No version in Cargo.toml'; exit 1; fi
+          # --exit-code makes git exit with 2 when the tag isn't there.
+          if git ls-remote --exit-code --tags origin "refs/tags/v$version" > /dev/null; then
+            new=false
+          else
+            status=$?
+            if [ "$status" -ne 2 ]; then exit "$status"; fi
+            new=true
+          fi
+          echo "v$version is new: $new"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "new=$new" >> "$GITHUB_OUTPUT"
 
-      - name: Check the tag matches Cargo.toml
+  release:
+    needs: version
+    if: needs.version.outputs.new == 'true' && github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    env:
+      TAG: v${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # The same text becomes the Store's What's new, which takes up to 1500 characters.
+      - name: Check What's new
         shell: pwsh
         run: |
-          if ((Get-Content Cargo.toml -Raw) -notmatch '(?m)^version = "(.+)"') { throw 'No version in Cargo.toml' }
-          if ("v$($Matches[1])" -ne $env:GITHUB_REF_NAME) { throw "Tag $env:GITHUB_REF_NAME doesn't match version $($Matches[1])" }
+          $notes = (Get-Content packaging/whats-new.txt -Raw).Trim()
+          if (-not $notes) { throw 'packaging/whats-new.txt is empty' }
+          if ($notes.Length -gt 1500) { throw "packaging/whats-new.txt has $($notes.Length) characters; the Store takes 1500" }
 
-      # A tag can point anywhere, so what it releases is checked here too, not only by CI.
+      - run: rustup target add aarch64-pc-windows-msvc
       - run: rustup component add clippy
+      - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
 
@@ -35,7 +71,7 @@ jobs:
           ./packaging/package.ps1 -Architectures x64,arm64
           foreach ($architecture in 'x64', 'arm64') {
             Compress-Archive -Path "dist/$architecture/laser-pointer.exe", LICENSE, README.md `
-              -DestinationPath "dist/laser-pointer-$env:GITHUB_REF_NAME-windows-$architecture.zip"
+              -DestinationPath "dist/laser-pointer-$env:TAG-windows-$architecture.zip"
           }
 
       - uses: actions/upload-artifact@v4
@@ -43,8 +79,57 @@ jobs:
           name: store-bundle
           path: dist/*.msixbundle
 
+      # Creates the tag on the commit this run built.
       - name: Publish the release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create $env:GITHUB_REF_NAME (Get-ChildItem dist/*.zip) --title "Laser Pointer $env:GITHUB_REF_NAME" --generate-notes
+        run: |
+          gh release create $env:TAG (Get-ChildItem dist/*.zip) --target $env:GITHUB_SHA `
+            --title "Laser Pointer $env:TAG" --notes-file packaging/whats-new.txt --generate-notes
+
+  # Runs once the repository has the Store credentials: the variables MSSTORE_TENANT_ID,
+  # MSSTORE_SELLER_ID and MSSTORE_CLIENT_ID and the secret MSSTORE_CLIENT_SECRET, for a Microsoft
+  # Entra app added to Partner Center with the Manager role. The submission is left as a draft.
+  store:
+    needs: [version, release]
+    if: vars.MSSTORE_CLIENT_ID != ''
+    runs-on: ubuntu-latest
+    env:
+      APP_ID: 9MT6DPQK4631
+      BUNDLE: dist/LaserPointer_${{ needs.version.outputs.version }}.0.msixbundle
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: store-bundle
+          path: dist
+      - uses: microsoft/setup-msstore-cli@v1.4
+        with:
+          version: v0.4.3
+
+      - name: Sign in to Partner Center
+        env:
+          CLIENT_SECRET: ${{ secrets.MSSTORE_CLIENT_SECRET }}
+        run: >
+          msstore reconfigure --tenantId '${{ vars.MSSTORE_TENANT_ID }}'
+          --sellerId '${{ vars.MSSTORE_SELLER_ID }}' --clientId '${{ vars.MSSTORE_CLIENT_ID }}'
+          --clientSecret "$CLIENT_SECRET"
+
+      # Starts from the published submission, swaps its package for this bundle and keeps the
+      # price; it stops rather than send a price the Store would read as free.
+      - name: Upload the bundle to a draft submission
+        run: msstore publish "$BUNDLE" --appId "$APP_ID" --noCommit
+
+      - name: Set What's new
+        shell: pwsh
+        run: |
+          $submission = msstore submission get $env:APP_ID | ConvertFrom-Json
+          if ($LASTEXITCODE) { throw 'Could not read the draft submission' }
+          $listing = $submission.listings.'en-us'.baseListing
+          if (-not $listing) { throw 'The draft has no en-us listing' }
+          $notes = (Get-Content packaging/whats-new.txt -Raw).Trim()
+          $listing | Add-Member -NotePropertyName ReleaseNotes -NotePropertyValue $notes -Force
+          $submission | ConvertTo-Json -Depth 100 | Set-Content submission.json
+          msstore submission update $env:APP_ID submission.json
+          if ($LASTEXITCODE) { throw 'Could not update the draft submission' }

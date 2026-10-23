@@ -17,3 +17,24 @@ jobs:
       - name: Package
         shell: pwsh
         run: ./packaging/package.ps1
+
+  # A change that bumps the version releases it once merged, and packaging/whats-new.txt becomes
+  # the release notes, so it has to be rewritten for each version.
+  release-notes:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          if [ -z "$version" ]; then echo 'No version in Cargo.toml'; exit 1; fi
+          if git rev-parse --quiet --verify "refs/tags/v$version" > /dev/null; then
+            echo "v$version is already released"
+            exit 0
+          fi
+          previous=$(git describe --tags --abbrev=0 --match 'v*')
+          if git diff --quiet "$previous" HEAD -- packaging/whats-new.txt; then
+            echo "::error file=packaging/whats-new.txt::v$version will be released: describe it in packaging/whats-new.txt (unchanged since $previous)"
+            exit 1
+          fi
