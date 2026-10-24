@@ -1,14 +1,15 @@
 # Merging a version bump in Cargo.toml releases it: when main's version has no GitHub release yet,
 # this tags the commit, builds both architectures and publishes the release with the exes and
 # packaging/whats-new.txt as its notes. When the Store credentials are set up (see the store job),
-# it also uploads the bundle to a draft Store submission, which goes to certification once it's
-# submitted in Partner Center.
+# it also uploads the bundle to the Store with the same notes as What's new and submits it for
+# certification; the Store publishes it once it passes.
 #
 # Only main's latest version is released: a version bumped again before its release starts is
 # skipped. To retry a failed release, re-run the run's failed jobs, or run the workflow from the
 # Actions tab, which releases main's version if it has no GitHub release yet. A failed Store upload
 # is retried only by re-running the original run's failed jobs, after deleting any draft it left
-# in Partner Center.
+# in Partner Center. A submission that got as far as certification is past retrying: fix what
+# certification reports and release a new version.
 name: Release
 
 on:
@@ -130,7 +131,13 @@ jobs:
 
   # Runs once the repository has the Store credentials: the variables MSSTORE_TENANT_ID,
   # MSSTORE_SELLER_ID and MSSTORE_CLIENT_ID and the secret MSSTORE_CLIENT_SECRET, for a Microsoft
-  # Entra app added to Partner Center with the Manager role. The submission is left as a draft.
+  # Entra app added to Partner Center with the Manager role.
+  #
+  # The variable MSSTORE_PRICE_ID is the app's price tier, which every submission has to restate.
+  # The Store API can't read back a price set on Partner Center's pricing page (it reports
+  # "Base"), and a submission sent without one makes the app free. Tier IDs run from Tier1012 for
+  # US$0.99 upwards in the order of the pricing page's US price list, so US$2.99 is Tier1032.
+  # Change it whenever the price changes in Partner Center, or the next release sets it back.
   # It runs on Windows because msstore keeps the credentials in the system's credential store,
   # which on Linux needs a keyring service the Ubuntu runners don't have.
   store:
@@ -140,6 +147,7 @@ jobs:
     env:
       APP_ID: 9MT6DPQK4631
       BUNDLE: dist/LaserPointer_${{ needs.version.outputs.version }}.0.msixbundle
+      PRICE_ID: ${{ vars.MSSTORE_PRICE_ID }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -163,7 +171,8 @@ jobs:
 
       # msstore publish deletes any open draft before making its own, so stop rather than lose
       # edits made in Partner Center. That includes a draft left by an earlier attempt of this
-      # job, since nothing shows whether its upload finished.
+      # job, since nothing shows whether its upload finished. The new draft copies the published
+      # submission's pricing, so stop too if there is none to copy: the trial would be lost.
       - name: Check for an open draft
         shell: pwsh
         run: |
@@ -173,15 +182,19 @@ jobs:
           if ($pending) {
             throw "Submission $pending is already open in Partner Center. Submit or delete it there, then re-run this job."
           }
+          $published = msstore submission get $env:APP_ID | ConvertFrom-Json
+          if ($LASTEXITCODE) { throw 'Could not read the published submission' }
+          if (-not $published.Pricing) { throw 'The published submission has no pricing to keep' }
 
-      # Starts from the published submission, swaps its package for this bundle and keeps the
-      # price; it stops rather than send a price the Store would read as free. That includes a
-      # price set in Partner Center's pricing page, which the API reports as "Base" and won't take
-      # back. When it stops there, upload the run's store-bundle artifact in Partner Center, to
-      # the draft it may have opened or to a new update, then set What's new and submit it there.
+      # Starts from the published submission and swaps its package for this bundle.
       - name: Upload the bundle to a draft submission
         shell: bash
-        run: msstore publish "$BUNDLE" --appId "$APP_ID" --noCommit
+        run: |
+          if [ -z "$PRICE_ID" ]; then
+            echo "::error::Set the repository variable MSSTORE_PRICE_ID to the app's price tier (see the store job's comment)."
+            exit 1
+          fi
+          msstore publish "$BUNDLE" --appId "$APP_ID" --noCommit --priceId "$PRICE_ID"
 
       - name: Set What's new
         shell: pwsh
@@ -192,6 +205,34 @@ jobs:
           if (-not $listing) { throw 'The draft has no en-us listing' }
           $notes = (Get-Content packaging/whats-new.txt -Raw).Trim()
           $listing | Add-Member -NotePropertyName ReleaseNotes -NotePropertyValue $notes -Force
+          # The update replaces the whole submission, price included.
+          $submission.Pricing.PriceId = $env:PRICE_ID
+          # Publish as soon as certification passes, whatever the last submission used.
+          $submission.TargetPublishMode = 'Immediate'
           $submission | ConvertTo-Json -Depth 100 | Set-Content submission.json
           msstore submission update $env:APP_ID submission.json
           if ($LASTEXITCODE) { throw 'Could not update the draft submission' }
+
+      - name: Submit for certification
+        shell: pwsh
+        run: |
+          msstore submission publish $env:APP_ID
+          if ($LASTEXITCODE) { throw 'Could not submit the draft' }
+          # The Store checks the submission before certification starts; wait to see it pass.
+          $checking = 'PendingCommit', 'CommitStarted', 'PreProcessing'
+          $passed = 'Certification', 'Release', 'PendingPublication', 'Publishing', 'Published'
+          for ($i = 0; $i -lt 120; $i++) {
+            $submission = msstore submission get $env:APP_ID | ConvertFrom-Json
+            if ($LASTEXITCODE) { throw 'Could not read the submission' }
+            $status = $submission.Status
+            if ($status -in $passed) {
+              "Submission $($submission.Id) is in $status"
+              exit 0
+            }
+            if ($status -notin $checking) {
+              $submission.StatusDetails | ConvertTo-Json -Depth 10
+              throw "The submission is in $status; see the details above and Partner Center"
+            }
+            Start-Sleep -Seconds 15
+          }
+          throw 'The Store was still checking the submission after 30 minutes; see Partner Center'
