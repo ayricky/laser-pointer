@@ -94,9 +94,10 @@ Bump `version` in `Cargo.toml` and rewrite `packaging\whats-new.txt` in the same
 fails when the notes weren't changed). Merging it releases that version: GitHub Actions builds x64
 and Arm64, tags the commit, and publishes the exes as a release with those notes. If another
 version bump lands before that release starts, only the newer version is released. Once the Store
-credentials are set (see the `store` job in `.github/workflows/release.yml`), it also uploads the
-bundle to a draft Store submission with the same text as What's new, ready to submit in Partner
-Center. Until then the bundle is kept as a workflow artifact to upload by hand.
+credentials and price tier are set (see the `store` job in `.github/workflows/release.yml`), it
+also uploads the bundle to the Store with the same text as What's new and submits it for
+certification, and the Store publishes it once it passes. Without them the bundle is kept as a
+workflow artifact to upload by hand.
 
 ## Support
 
