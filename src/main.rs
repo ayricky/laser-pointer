@@ -1672,6 +1672,7 @@ impl App {
     /// The GPU was reset or removed: rebuild everything from scratch. The strokes are only
     /// geometry, so nothing the user drew is lost.
     fn lose_device(&mut self) {
+        self.scratch.forget_device();
         self.gfx = None;
         unsafe {
             SetTimer(Some(self.hwnd), TIMER_RECOVER, RECOVER_MS / 4, None);

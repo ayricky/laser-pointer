@@ -161,6 +161,12 @@ impl Scratch {
         }
         self.halos.used = 0;
     }
+
+    /// Lets go of the halo effects when the context that made them is going away, which they
+    /// would otherwise keep alive, along with its device, until the next halo is drawn.
+    pub fn forget_device(&mut self) {
+        self.halos = Halos::default();
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]

@@ -687,6 +687,7 @@ impl Panel {
         let Some((hwnd, dpi, width, height)) = self.window else {
             return Ok(());
         };
+        self.preview.scratch.forget_device();
         self.target = Self::window_target(&self.factory, hwnd, dpi, width, height)?;
         self.brush = self.target.CreateSolidColorBrush(&D2D1_COLOR_F::default(), None)?;
         self.svg = self.target.cast().ok();
