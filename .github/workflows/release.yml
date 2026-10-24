@@ -175,7 +175,10 @@ jobs:
           }
 
       # Starts from the published submission, swaps its package for this bundle and keeps the
-      # price; it stops rather than send a price the Store would read as free.
+      # price; it stops rather than send a price the Store would read as free. That includes a
+      # price set in Partner Center's pricing page, which the API reports as "Base" and won't take
+      # back. When it stops there, upload the run's store-bundle artifact in Partner Center, to
+      # the draft it may have opened or to a new update, then set What's new and submit it there.
       - name: Upload the bundle to a draft submission
         shell: bash
         run: msstore publish "$BUNDLE" --appId "$APP_ID" --noCommit
