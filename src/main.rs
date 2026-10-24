@@ -2485,6 +2485,8 @@ impl App {
 
     fn render(&mut self) {
         let started = Instant::now();
+        // Whatever drew since the last frame, such as baking after an undo, is over by now.
+        self.scratch.finish_frame();
         if self.pointer.extinguished.is_some() {
             self.extinguish(started);
         } else if self.pointer.moving && laser_on() {
@@ -2611,9 +2613,33 @@ impl App {
             count = 1;
         }
         let clear_fade = 1.0 - (now.duration_since(self.cleared_at).as_secs_f32() / CLEAR_SECS).min(1.0);
-
         let drawn = unsafe {
             gfx.dc.BeginDraw();
+            // Strokes that change as they fade are tessellated once here, then drawn into each
+            // rectangle below: filling one afresh in every rectangle it crosses would tessellate it
+            // each time. Inside BeginDraw, since a halo is recorded from what is drawn.
+            let repainted = |bounds: Bounds| {
+                rects[..count].iter().any(|rect| {
+                    intersects(bounds, Bounds { left: rect.left as f32, top: rect.top as f32, right: rect.right as f32, bottom: rect.bottom as f32 })
+                })
+            };
+            let mut frames: Vec<Option<stroke::Frame>> = Vec::with_capacity(self.strokes.len());
+            for (drawn, bounds) in self.strokes.iter_mut().zip(&live) {
+                let settled = drawn.morph.is_none() && drawn.stroke.flash.is_none();
+                let tessellated_once = stroke::grows(&drawn.stroke) || (drawn.stroke.whole && settled);
+                let shown = !tessellated_once && bounds.is_some_and(repainted);
+                frames.push(shown.then(|| stroke::prepare(&gfx.factory, &gfx.dc1, &gfx.brush, &mut drawn.stroke, now, 1.0, &mut self.scratch).ok()).flatten());
+            }
+            let ease = clear_fade * clear_fade;
+            let mut clearing: Vec<(Bounds, stroke::Frame)> = Vec::new();
+            for stroke in &mut self.clearing {
+                if let Some(bounds) = stroke.bounds().filter(|bounds| repainted(*bounds)) {
+                    if let Ok(frame) = stroke::prepare(&gfx.factory, &gfx.dc1, &gfx.brush, stroke, self.cleared_at, ease, &mut self.scratch) {
+                        clearing.push((bounds, frame));
+                    }
+                }
+            }
+
             for rect in &rects[..count] {
                 let clip = D2D_RECT_F {
                     left: rect.left as f32,
@@ -2632,24 +2658,23 @@ impl App {
                 if self.fading_ink.is_some() {
                     gfx.draw_fading(clip, clear_fade * clear_fade);
                 }
-                for (drawn, bounds) in self.strokes.iter_mut().zip(&live) {
+                for ((drawn, bounds), frame) in self.strokes.iter_mut().zip(&live).zip(&frames) {
                     if !bounds.is_some_and(|bounds| intersects(bounds, area)) {
                         continue;
                     }
                     let settled = drawn.morph.is_none() && drawn.stroke.flash.is_none();
                     let (stroke, pieces) = (&mut drawn.stroke, &mut drawn.pieces);
-                    if stroke::grows(stroke) {
+                    if let Some(frame) = frame {
+                        frame.paint(&gfx.dc1, &gfx.brush);
+                    } else if stroke::grows(stroke) {
                         let _ = stroke::draw_kept(&gfx.factory, &gfx.dc1, &gfx.brush, stroke, pieces, area, true, &mut self.scratch);
                     } else if stroke.whole && settled {
                         let _ = stroke::draw_shape(&gfx.factory, &gfx.dc1, &gfx.brush, stroke, pieces, now, &mut self.scratch);
-                    } else {
-                        let _ = stroke::draw(&gfx.factory, &gfx.dc, &gfx.brush, stroke, now, 1.0, &mut self.scratch);
                     }
                 }
-                for stroke in &mut self.clearing {
-                    if stroke.bounds().is_some_and(|bounds| intersects(bounds, area)) {
-                        let ease = clear_fade * clear_fade;
-                        let _ = stroke::draw(&gfx.factory, &gfx.dc, &gfx.brush, stroke, self.cleared_at, ease, &mut self.scratch);
+                for (bounds, frame) in &clearing {
+                    if intersects(*bounds, area) {
+                        frame.paint(&gfx.dc1, &gfx.brush);
                     }
                 }
                 for ripple in &self.ripples {
@@ -2699,6 +2724,7 @@ impl App {
         self.back ^= 1;
         self.presented = true;
         self.dirty = false;
+        self.scratch.finish_frame();
         if let Err(error) = presented {
             if device_lost(&error) {
                 self.lose_device();

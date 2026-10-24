@@ -1368,7 +1368,9 @@ impl Panel {
             _ => {}
         }
         self.tip_shown = self.draw_tip();
-        self.target.EndDraw(None, None)
+        let drawn = self.target.EndDraw(None, None);
+        self.preview.scratch.finish_frame();
+        drawn
     }
 
     /// What the hovered icon does, for one that has no label of its own.

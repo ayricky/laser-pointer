@@ -1,1 +1,3 @@
-The Microsoft Store version comes with a week's free trial. Draw with every tool before you buy.
+Glow and Neon have a soft halo now, where they used to show hard rings at the edge.
+
+Long Laser trails and snapped shapes draw two to three times faster, so the pointer stays closer to your hand on high refresh rate screens.
