@@ -3,14 +3,16 @@
 use std::f32::consts::PI;
 use std::time::Instant;
 
-use windows::core::Result;
+use windows::core::{Interface, Result};
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED, D2D1_FILL_MODE_WINDING,
+    D2D1_COLOR_F, D2D1_COMPOSITE_MODE_SOURCE_OVER, D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED,
+    D2D1_FILL_MODE_WINDING,
 };
 use windows::Win32::Graphics::Direct2D::{
-    ID2D1DeviceContext1, ID2D1Factory, ID2D1GeometryRealization, ID2D1PathGeometry, ID2D1RenderTarget,
-    ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_DEFAULT_FLATTENING_TOLERANCE,
-    D2D1_LAYER_OPTIONS1_NONE, D2D1_LAYER_PARAMETERS1,
+    CLSID_D2D1GaussianBlur, CLSID_D2D1Opacity, ID2D1DeviceContext1, ID2D1Factory, ID2D1GeometryRealization,
+    ID2D1Image, ID2D1PathGeometry, ID2D1RenderTarget, ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+    D2D1_DEFAULT_FLATTENING_TOLERANCE, D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION, D2D1_INTERPOLATION_MODE_LINEAR,
+    D2D1_LAYER_OPTIONS1_NONE, D2D1_LAYER_PARAMETERS1, D2D1_OPACITY_PROP_OPACITY, D2D1_PROPERTY_TYPE_FLOAT, ID2D1Effect,
 };
 use windows_numerics::Matrix3x2;
 use windows_numerics::Vector2;
@@ -24,6 +26,11 @@ pub const MIN_STEP: f32 = 2.0;
 const CURVE_TOLERANCE: f32 = 0.1;
 const CURVE_TURN: f32 = 5.0 * PI / 180.0;
 const MAX_CURVE_TURN: f32 = 20.0 * PI / 180.0;
+/// How far thinning may move the outline, in DIPs. Any further and Direct2D's antialiasing of a
+/// long, nearly level edge starts to show where it crosses a row of pixels.
+const THIN_TOLERANCE: f32 = 0.02;
+/// The most centre points one thinned run may stand for.
+const MAX_THIN_RUN: usize = 32;
 const CAP_STEPS: usize = 8;
 /// A snapped shape glows brighter once as it settles, for this long.
 pub const FLASH_SECS: f32 = 0.4;
@@ -75,7 +82,7 @@ impl Stroke {
     pub fn bounds_from(&self, start: usize) -> Option<Bounds> {
         let points = self.points.get(start..)?;
         let first = points.first()?;
-        let mut widest = layers(self.look.style)[0].0;
+        let mut widest = reach(self.look.style);
         if self.flash.is_some() {
             widest = widest.max(FLASH.0);
         }
@@ -138,7 +145,28 @@ pub struct Scratch {
     centre: Vec<Vector2>,
     widths: Vec<f32>,
     layer: Vec<f32>,
+    /// The direction of the centre line at each of its points, found before thinning.
+    tangents: Vec<Vector2>,
     outline: Vec<Vector2>,
+    halos: Halos,
+}
+
+impl Scratch {
+    /// Called once each batch of drawing has ended in EndDraw: the halos drawn in the next reuse
+    /// the effects this one made, and those let go of what they blurred, so a stroke that is
+    /// gone isn't kept in memory by the last halo drawn from it.
+    pub fn finish_frame(&mut self) {
+        for (blur, _) in &self.halos.pairs[..self.halos.used] {
+            unsafe { blur.SetInput(0, None::<&ID2D1Image>, false) };
+        }
+        self.halos.used = 0;
+    }
+
+    /// Lets go of the halo effects when the context that made them is going away, which they
+    /// would otherwise keep alive, along with its device, until the next halo is drawn.
+    pub fn forget_device(&mut self) {
+        self.halos = Halos::default();
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -186,19 +214,96 @@ pub fn rgba(rgb: u32, alpha: f32) -> D2D1_COLOR_F {
     }
 }
 
-/// (width multiplier, opacity, mix towards white) for each pass, widest first.
+/// (width multiplier, opacity, mix towards white) for each pass, the stroke itself first.
 fn layers(style: u32) -> &'static [(f32, f32, f32)] {
     match style {
         // A thin near-white core, so the trail reads as light rather than paint.
-        STYLE_GLOW => &[(3.4, 0.10, 0.0), (2.1, 0.20, 0.0), (1.0, 1.0, 0.0), (0.38, 0.85, 0.6)],
-        STYLE_NEON => &[
-            (3.8, 0.12, 0.0),
-            (2.3, 0.26, 0.0),
-            (1.0, 1.0, 0.0),
-            (0.45, 1.0, 0.85),
-        ],
+        STYLE_GLOW => &[(1.0, 1.0, 0.0), (0.38, 0.85, 0.6)],
+        STYLE_NEON => &[(1.0, 1.0, 0.0), (0.45, 1.0, 0.85)],
         _ => &[(1.0, 1.0, 0.0)],
     }
+}
+
+/// The light around a Glow or Neon stroke: the stroke itself blurred by `spread` times its
+/// radius and drawn `strength` times as opaque beneath it, so it falls off smoothly where
+/// wider copies of the stroke would end in hard steps.
+#[derive(Clone, Copy)]
+struct Halo {
+    strength: f32,
+    spread: f32,
+}
+
+fn halo(style: u32) -> Option<Halo> {
+    match style {
+        STYLE_GLOW => Some(Halo { strength: 0.85, spread: 2.0 }),
+        STYLE_NEON => Some(Halo { strength: 1.0, spread: 2.2 }),
+        _ => None,
+    }
+}
+
+/// How far from its centre line a stroke paints, in multiples of its radius: a halo fades to
+/// nothing three of its standard deviations past the stroke's edge.
+fn reach(style: u32) -> f32 {
+    halo(style).map_or(layers(style)[0].0, |halo| 1.0 + 3.0 * halo.spread)
+}
+
+/// The shapes `record` draws, blurred into a halo `opacity` times as opaque as they are. Called
+/// between BeginDraw and EndDraw: they are recorded by pointing the context at a command list
+/// for a moment.
+unsafe fn halo_image(
+    dc: &ID2D1DeviceContext1,
+    halos: &mut Halos,
+    halo: Halo,
+    radius: f32,
+    opacity: f32,
+    record: impl FnOnce(),
+) -> Result<ID2D1Image> {
+    let list = dc.CreateCommandList()?;
+    let target = dc.GetTarget()?;
+    dc.SetTarget(&list);
+    record();
+    dc.SetTarget(&target);
+    list.Close()?;
+    let (blur, fade) = halos.take(dc)?;
+    blur.SetInput(0, &list, true);
+    blur.SetValue(D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION.0 as u32, D2D1_PROPERTY_TYPE_FLOAT, &(halo.spread * radius).to_le_bytes())?;
+    fade.SetValue(D2D1_OPACITY_PROP_OPACITY.0 as u32, D2D1_PROPERTY_TYPE_FLOAT, &(halo.strength * opacity).to_le_bytes())?;
+    fade.GetOutput()
+}
+
+/// Blur and opacity effects for halos, kept from frame to frame: Direct2D readies an effect the
+/// first time it is drawn, which costs a good deal more than drawing it again. Each halo in a
+/// batch of drawing takes a pair of its own, and `Scratch::finish_frame` hands them out again
+/// from the first. Kept with the context that made them, and made afresh for any other.
+#[derive(Default)]
+pub struct Halos {
+    dc: Option<ID2D1DeviceContext1>,
+    pairs: Vec<(ID2D1Effect, ID2D1Effect)>,
+    used: usize,
+}
+
+impl Halos {
+    unsafe fn take(&mut self, dc: &ID2D1DeviceContext1) -> Result<(ID2D1Effect, ID2D1Effect)> {
+        if self.dc.as_ref() != Some(dc) {
+            *self = Self { dc: Some(dc.clone()), ..Self::default() };
+        }
+        if self.used == self.pairs.len() {
+            let blur = dc.CreateEffect(&CLSID_D2D1GaussianBlur)?;
+            let fade = dc.CreateEffect(&CLSID_D2D1Opacity)?;
+            fade.SetInput(0, &blur.GetOutput()?, true);
+            self.pairs.push((blur, fade));
+        }
+        self.used += 1;
+        Ok(self.pairs[self.used - 1].clone())
+    }
+}
+
+unsafe fn draw_image(dc: &ID2D1DeviceContext1, image: &ID2D1Image) {
+    dc.DrawImage(image, None, None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
+}
+
+fn opaque(color: D2D1_COLOR_F) -> D2D1_COLOR_F {
+    D2D1_COLOR_F { a: 1.0, ..color }
 }
 
 /// Drops points that have faded out, then fills what is left, `fade` times as opaque as usual.
@@ -211,6 +316,109 @@ pub fn draw(
     now: Instant,
     fade: f32,
     scratch: &mut Scratch,
+) -> Result<()> {
+    let dc = target.cast::<ID2D1DeviceContext1>()?;
+    let frame = prepare(factory, &dc, brush, stroke, now, fade, scratch)?;
+    frame.paint(&dc, brush);
+    Ok(())
+}
+
+/// A stroke tessellated as it stands at one moment, each pass with its colour. A frame makes
+/// it once and draws it into every rectangle it repaints, where filling the stroke afresh in
+/// each would tessellate it again every time.
+#[derive(Default)]
+pub struct Frame {
+    passes: Vec<Pass>,
+}
+
+enum Pass {
+    Fill(ID2D1GeometryRealization, D2D1_COLOR_F),
+    Halo(ID2D1Image),
+}
+
+impl Frame {
+    pub fn paint(&self, dc: &ID2D1DeviceContext1, brush: &ID2D1SolidColorBrush) {
+        for pass in &self.passes {
+            unsafe {
+                match pass {
+                    Pass::Fill(realization, color) => {
+                        brush.SetColor(color);
+                        dc.DrawGeometryRealization(realization, brush);
+                    }
+                    Pass::Halo(image) => draw_image(dc, image),
+                }
+            }
+        }
+    }
+}
+
+/// Drops points that have faded out, as `draw` does, and tessellates what is left, the halo
+/// from the same tessellation as the stroke. Called between BeginDraw and EndDraw.
+pub fn prepare(
+    factory: &ID2D1Factory,
+    dc: &ID2D1DeviceContext1,
+    brush: &ID2D1SolidColorBrush,
+    stroke: &mut Stroke,
+    now: Instant,
+    fade: f32,
+    scratch: &mut Scratch,
+) -> Result<Frame> {
+    let tolerance = flattening_tolerance(dc);
+    let (glow, radius) = (halo(stroke.look.style), stroke.look.width as f32 / 2.0 * stroke.scale);
+    // Flashes beneath everything, then one halo beneath every part, as a settled shape draws.
+    let (mut flashes, mut bodies, mut cores) = (Vec::new(), Vec::new(), Vec::new());
+    passes(stroke, now, fade, scratch, |kind, outline, color| {
+        if outline.len() < 3 {
+            return Ok(());
+        }
+        let realization = unsafe { dc.CreateFilledGeometryRealization(&geometry(factory, outline)?, tolerance)? };
+        if kind == PassKind::Stroke {
+            cores.push((realization.clone(), color));
+        }
+        if kind == PassKind::Flash { &mut flashes } else { &mut bodies }.push(Pass::Fill(realization, color));
+        Ok(())
+    })?;
+    let mut frame = Frame { passes: flashes };
+    if let (Some(glow), Some(&(_, color))) = (glow, cores.first()) {
+        let image = unsafe {
+            halo_image(dc, &mut scratch.halos, glow, radius, color.a, || {
+                brush.SetColor(&opaque(color));
+                for (core, _) in &cores {
+                    dc.DrawGeometryRealization(core, brush);
+                }
+            })?
+        };
+        frame.passes.push(Pass::Halo(image));
+    }
+    frame.passes.extend(bodies);
+    Ok(frame)
+}
+
+/// What a pass handed out by `passes` is: the flash beneath a shape as it snaps, the stroke
+/// itself, which a halo is blurred from, or a brighter centre over it.
+#[derive(Clone, Copy, PartialEq)]
+enum PassKind {
+    Flash,
+    Stroke,
+    Centre,
+}
+
+/// Direct2D's default tolerance, in DIPs at the target's DPI, so a realization is as fine on a
+/// scaled panel as filling the geometry would be.
+fn flattening_tolerance(dc: &ID2D1DeviceContext1) -> f32 {
+    let (mut dpi_x, mut dpi_y) = (96.0, 96.0);
+    unsafe { dc.GetDpi(&mut dpi_x, &mut dpi_y) };
+    D2D1_DEFAULT_FLATTENING_TOLERANCE * 96.0 / dpi_x.max(dpi_y).max(1.0)
+}
+
+/// Drops points that have faded out, then hands each pass of what is left to `emit`, widest
+/// first, as an outline and the colour to fill it with.
+fn passes(
+    stroke: &mut Stroke,
+    now: Instant,
+    fade: f32,
+    scratch: &mut Scratch,
+    mut emit: impl FnMut(PassKind, &[Vector2], D2D1_COLOR_F) -> Result<()>,
 ) -> Result<()> {
     let Stroke {
         points,
@@ -255,6 +463,7 @@ pub fn draw(
             scratch.centre.clone_from(&scratch.path);
             scratch.widths.clear();
             scratch.widths.extend_from_slice(&scratch.radii[part]);
+            tangents(&scratch.centre, &mut scratch.tangents);
         } else {
             curve_through(
                 &scratch.path,
@@ -264,18 +473,20 @@ pub fn draw(
                 &mut scratch.centre,
                 &mut scratch.widths,
             );
+            tangents(&scratch.centre, &mut scratch.tangents);
+            thin(&mut scratch.centre, &mut scratch.widths, &mut scratch.tangents, THIN_TOLERANCE * scale, layers(look.style)[0].0, max_turn(&look, scale));
         }
         let opacity = look.opacity as f32 / 100.0 * fade * life;
-        for &(width, alpha, white) in flash.iter().chain(layers(look.style)) {
+        let kinds = flash.iter().map(|_| PassKind::Flash).chain([PassKind::Stroke]).chain(std::iter::repeat(PassKind::Centre));
+        for (kind, &(width, alpha, white)) in kinds.zip(flash.iter().chain(layers(look.style))) {
             scratch.layer.clear();
             scratch.layer.extend(scratch.widths.iter().map(|radius| radius * width));
-            outline(&scratch.centre, &scratch.layer, &mut scratch.outline);
+            outline(&scratch.centre, &scratch.tangents, &scratch.layer, &mut scratch.outline);
             let mut color = rgba(look.color, alpha * opacity);
             color.r += (1.0 - color.r) * white;
             color.g += (1.0 - color.g) * white;
             color.b += (1.0 - color.b) * white;
-            unsafe { brush.SetColor(&color) };
-            fill(factory, target, brush, &scratch.outline)?;
+            emit(kind, &scratch.outline, color)?;
         }
     }
     Ok(())
@@ -400,25 +611,95 @@ fn curve_through(
     widths.push(radii[count - 1]);
 }
 
-/// Up one side of the stroke, round the head, back down the other side and round the tail.
-fn outline(centre: &[Vector2], radii: &[f32], out: &mut Vec<Vector2>) {
+/// Drops the centre points that a straight run between their neighbours would reproduce to
+/// within `tolerance`, at the centre and at both edges of the widest pass, so each frame
+/// tessellates only the points that shape the stroke. A fast mouse samples a gentle curve every
+/// few pixels, where a run of a dozen samples strays less than a tenth of a pixel from its chord.
+/// The points kept keep the directions `tangents` found for them on the whole line, so the
+/// outline's edges lie where the whole line's would. A run turns through at most `max_turn`.
+fn thin(
+    points: &mut Vec<Vector2>,
+    widths: &mut Vec<f32>,
+    tangents: &mut Vec<Vector2>,
+    tolerance: f32,
+    reach: f32,
+    max_turn: f32,
+) {
+    let count = points.len();
+    if count < 3 {
+        return;
+    }
+    let direction = |a: Vector2, b: Vector2| (b.Y - a.Y).atan2(b.X - a.X);
+    let mut kept = 1;
+    let mut from = 0;
+    while from < count - 1 {
+        let mut to = from + 1;
+        let mut turned = 0.0f32;
+        // A run is checked point by point, so it is kept short enough that a long straight
+        // line costs a little per point rather than per pair of points.
+        while to + 1 < count && to - from < MAX_THIN_RUN {
+            let next = to + 1;
+            let step = direction(points[to], points[next]) - direction(points[to - 1], points[to]);
+            turned += (step + PI).rem_euclid(2.0 * PI) - PI;
+            if turned.abs() > max_turn {
+                break;
+            }
+            let (a, b) = (points[from], points[next]);
+            let length = distance(a, b);
+            let edge = |i: usize, side: f32| {
+                let (c, t, r) = (points[i], tangents[i], widths[i] * reach * side);
+                Vector2 { X: c.X - t.Y * r, Y: c.Y + t.X * r }
+            };
+            let strays = (from + 1..next).any(|i| {
+                let p = points[i];
+                let t = if length > 1e-6 { ((p.X - a.X) * (b.X - a.X) + (p.Y - a.Y) * (b.Y - a.Y)) / (length * length) } else { 0.0 };
+                !(0.0..=1.0).contains(&t)
+                    || [0.0, 1.0, -1.0].into_iter().any(|side| off_segment(edge(i, side), edge(from, side), edge(next, side)) > tolerance)
+            });
+            if strays {
+                break;
+            }
+            to = next;
+        }
+        points[kept] = points[to];
+        widths[kept] = widths[to];
+        tangents[kept] = tangents[to];
+        kept += 1;
+        from = to;
+    }
+    points.truncate(kept);
+    widths.truncate(kept);
+    tangents.truncate(kept);
+}
+
+/// How far `p` is from the segment `a`-`b`.
+fn off_segment(p: Vector2, a: Vector2, b: Vector2) -> f32 {
+    let (dx, dy) = (b.X - a.X, b.Y - a.Y);
+    let length = dx * dx + dy * dy;
+    let t = if length > 1e-12 { (((p.X - a.X) * dx + (p.Y - a.Y) * dy) / length).clamp(0.0, 1.0) } else { 0.0 };
+    distance(p, Vector2 { X: a.X + dx * t, Y: a.Y + dy * t })
+}
+
+/// The direction of the centre line at each point, from the neighbour before it to the one
+/// after; where those meet, the last direction found.
+fn tangents(centre: &[Vector2], out: &mut Vec<Vector2>) {
     out.clear();
     let count = centre.len();
     let mut direction = Vector2 { X: 1.0, Y: 0.0 };
-    let tangent = |index: usize, direction: &mut Vector2| {
-        let (a, b) = (
-            centre[index.saturating_sub(1)],
-            centre[(index + 1).min(count - 1)],
-        );
+    out.extend((0..count).map(|index| {
+        let (a, b) = (centre[index.saturating_sub(1)], centre[(index + 1).min(count - 1)]);
         let length = distance(a, b);
         if length > 1e-3 {
-            *direction = Vector2 {
-                X: (b.X - a.X) / length,
-                Y: (b.Y - a.Y) / length,
-            };
+            direction = Vector2 { X: (b.X - a.X) / length, Y: (b.Y - a.Y) / length };
         }
-        *direction
-    };
+        direction
+    }));
+}
+
+/// Up one side of the stroke, round the head, back down the other side and round the tail.
+fn outline(centre: &[Vector2], tangents: &[Vector2], radii: &[f32], out: &mut Vec<Vector2>) {
+    out.clear();
+    let count = centre.len();
     let offset = |index: usize, t: Vector2, along: f32, across: f32| {
         let (c, r) = (centre[index], radii[index]);
         Vector2 {
@@ -428,26 +709,11 @@ fn outline(centre: &[Vector2], radii: &[f32], out: &mut Vec<Vector2>) {
     };
     let angle = |step: usize| PI * step as f32 / CAP_STEPS as f32;
 
-    let first = tangent(0, &mut direction);
-    let mut tangents_end = first;
-    for index in 0..count {
-        let t = tangent(index, &mut direction);
-        out.push(offset(index, t, 0.0, 1.0));
-        tangents_end = t;
-    }
+    out.extend((0..count).map(|index| offset(index, tangents[index], 0.0, 1.0)));
     let head = count - 1;
-    out.extend((1..CAP_STEPS).map(|step| {
-        offset(head, tangents_end, angle(step).sin(), angle(step).cos())
-    }));
-    // Walk back down the other side; tangents again, since they weren't kept.
-    let start = out.len();
-    let mut direction = first;
-    for index in 0..count {
-        let t = tangent(index, &mut direction);
-        out.push(offset(index, t, 0.0, -1.0));
-    }
-    out[start..].reverse();
-    out.extend((1..CAP_STEPS).map(|step| offset(0, first, -angle(step).sin(), -angle(step).cos())));
+    out.extend((1..CAP_STEPS).map(|step| offset(head, tangents[head], angle(step).sin(), angle(step).cos())));
+    out.extend((0..count).rev().map(|index| offset(index, tangents[index], 0.0, -1.0)));
+    out.extend((1..CAP_STEPS).map(|step| offset(0, tangents[0], -angle(step).sin(), -angle(step).cos())));
 }
 
 fn extent(points: &[Vector2]) -> Option<Bounds> {
@@ -460,19 +726,6 @@ fn extent(points: &[Vector2]) -> Option<Bounds> {
         bounds.bottom = bounds.bottom.max(point.Y);
     }
     Some(bounds)
-}
-
-fn fill(
-    factory: &ID2D1Factory,
-    target: &ID2D1RenderTarget,
-    brush: &ID2D1SolidColorBrush,
-    outline: &[Vector2],
-) -> Result<()> {
-    if outline.len() < 3 {
-        return Ok(());
-    }
-    unsafe { target.FillGeometry(&geometry(factory, outline)?, brush, None) };
-    Ok(())
 }
 
 fn geometry(factory: &ID2D1Factory, outline: &[Vector2]) -> Result<ID2D1PathGeometry> {
@@ -569,9 +822,14 @@ fn centre_of(points: &[Point], range: std::ops::Range<usize>, look: &Look, scale
         scratch.centre.pop();
         scratch.widths.pop();
     }
+    // Only once the context is gone, since thinning keeps the ends it is given and the piece's
+    // own ends are the ones that must meet its neighbours.
+    tangents(&scratch.centre, &mut scratch.tangents);
+    thin(&mut scratch.centre, &mut scratch.widths, &mut scratch.tangents, THIN_TOLERANCE * scale, layers(look.style)[0].0, turn);
 }
 
-/// Tessellates the centre line in `scratch` for each pass. Nothing to draw is `None`.
+/// Tessellates the centre line in `scratch`, with its tangents, for each pass. Nothing to draw
+/// is `None`.
 fn tessellate(factory: &ID2D1Factory, dc: &ID2D1DeviceContext1, look: &Look, scratch: &mut Scratch) -> Result<Option<Tessellated>> {
     if scratch.centre.is_empty() {
         return Ok(None);
@@ -581,13 +839,16 @@ fn tessellate(factory: &ID2D1Factory, dc: &ID2D1DeviceContext1, look: &Look, scr
     for &(width, _, _) in layers(look.style) {
         scratch.layer.clear();
         scratch.layer.extend(scratch.widths.iter().map(|radius| radius * width));
-        outline(&scratch.centre, &scratch.layer, &mut scratch.outline);
+        outline(&scratch.centre, &scratch.tangents, &scratch.layer, &mut scratch.outline);
         bounds = union(bounds, extent(&scratch.outline));
         let realization = geometry(factory, &scratch.outline)
             .and_then(|geometry| unsafe { dc.CreateFilledGeometryRealization(&geometry, D2D1_DEFAULT_FLATTENING_TOLERANCE) })?;
         passes.push(realization);
     }
-    Ok(bounds.map(|bounds| Tessellated { bounds, passes }))
+    // Where it paints includes its halo.
+    let widest = scratch.widths.iter().copied().fold(0.0, f32::max);
+    let margin = halo(look.style).map_or(0.0, |halo| 3.0 * halo.spread * widest);
+    Ok(bounds.map(|bounds| Tessellated { bounds: inflate(bounds, margin), passes }))
 }
 
 /// Draws a shape that has settled, as `draw` would, from its parts tessellated the first time:
@@ -617,11 +878,24 @@ pub fn draw_shape(
             smooth(&points[part], look.smoothing as usize, &mut scratch.centre);
             scratch.widths.clear();
             scratch.widths.resize(scratch.centre.len(), base);
+            tangents(&scratch.centre, &mut scratch.tangents);
             parts.extend(tessellate(factory, dc, &look, scratch)?);
         }
         pieces.shape = parts;
     }
     let opacity = look.opacity as f32 / 100.0 * shape_life(points, now, &look);
+    if let Some(glow) = halo(look.style) {
+        let radius = look.width as f32 / 2.0 * stroke.scale;
+        unsafe {
+            let image = halo_image(dc, &mut scratch.halos, glow, radius, opacity, || {
+                brush.SetColor(&rgba(look.color, 1.0));
+                for part in &pieces.shape {
+                    dc.DrawGeometryRealization(&part.passes[0], brush);
+                }
+            })?;
+            draw_image(dc, &image);
+        }
+    }
     for part in &pieces.shape {
         for (pass, &(_, alpha, white)) in layers(look.style).iter().enumerate() {
             let mut color = rgba(look.color, alpha * opacity);
@@ -635,6 +909,15 @@ pub fn draw_shape(
         }
     }
     Ok(())
+}
+
+fn inflate(bounds: Bounds, by: f32) -> Bounds {
+    Bounds {
+        left: bounds.left - by,
+        top: bounds.top - by,
+        right: bounds.right + by,
+        bottom: bounds.bottom + by,
+    }
 }
 
 fn overlap(a: Bounds, b: Bounds) -> Option<Bounds> {
@@ -690,6 +973,17 @@ pub fn draw_kept(
     let Some(bounds) = shown.iter().map(|stretch| stretch.bounds).reduce(Bounds::union) else { return Ok(()) };
     let Some(bounds) = overlap(bounds, area) else { return Ok(()) };
     let opacity = look.opacity as f32 / 100.0;
+    if let Some(glow) = halo(look.style) {
+        unsafe {
+            let image = halo_image(dc, &mut scratch.halos, glow, look.width as f32 / 2.0 * scale, opacity, || {
+                brush.SetColor(&rgba(look.color, 1.0));
+                for stretch in &shown {
+                    dc.DrawGeometryRealization(&stretch.passes[0], brush);
+                }
+            })?;
+            draw_image(dc, &image);
+        }
+    }
     for (pass, &(_, alpha, white)) in layers(look.style).iter().enumerate() {
         let mut color = rgba(look.color, 1.0);
         color.r += (1.0 - color.r) * white;
@@ -715,4 +1009,184 @@ pub fn draw_kept(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+pub(crate) mod gallery {
+    //! Every kind of stroke the overlay draws, through `draw`, saved as a PNG to look at.
+    use super::*;
+    use crate::settings::{presets, STYLE_SOLID};
+    use std::time::Duration;
+    use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
+
+    /// Builds the scenes, each a stroke and the moment it is drawn at.
+    pub fn scenes(scale: f32) -> Vec<(Stroke, Instant)> {
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let s = scale;
+        let mut out = Vec::new();
+        let laser = presets()[0].look;
+        // A Glow trail a second long from a 1000 Hz mouse, mid-flight.
+        let mut stroke = Stroke::new(Point { x: 0.0, y: 0.0, at: t0 }, laser, s);
+        stroke.points = (0..1000).map(|i| { let t = i as f32 * 0.0034; Point { x: s * (260.0 + 200.0 * (t * 1.7).sin()), y: s * (220.0 + 160.0 * (t * 2.3).cos()), at: at(i) } }).collect();
+        out.push((stroke, at(1000)));
+        // Neon, a fast flick: samples 40 px apart.
+        let mut neon = laser;
+        neon.style = STYLE_NEON;
+        neon.color = 0x00e5ff;
+        let mut stroke = Stroke::new(Point { x: 0.0, y: 0.0, at: t0 }, neon, s);
+        stroke.points = (0..24).map(|i| { let t = i as f32 / 23.0; Point { x: s * (560.0 + 320.0 * t), y: s * (300.0 - 230.0 * (t * PI).sin()), at: at(300 + i as u64 * 8) } }).collect();
+        out.push((stroke, at(500)));
+        // Solid laser, sharp zigzag.
+        let mut solid = laser;
+        solid.style = STYLE_SOLID;
+        solid.width = 8;
+        let mut stroke = Stroke::new(Point { x: 0.0, y: 0.0, at: t0 }, solid, s);
+        stroke.points = (0..=120).map(|i| { let k = i as f32 / 20.0; let tooth = (k.fract() - 0.5).abs() * 2.0; Point { x: s * (960.0 + k * 90.0), y: s * (90.0 + tooth * 140.0 + (k / 6.0) * 0.0), at: at(400 + i * 5) } }).collect();
+        out.push((stroke, at(1000)));
+        // Highlighter over the same zigzag, at 40%.
+        let high = presets()[1].look;
+        let mut stroke = Stroke::new(Point { x: 0.0, y: 0.0, at: t0 }, high, s);
+        stroke.points = (0..=120).map(|i| { let k = i as f32 / 20.0; let tooth = (k.fract() - 0.5).abs() * 2.0; Point { x: s * (960.0 + k * 90.0), y: s * (300.0 + tooth * 140.0), at: at(2000 + i * 5) } }).collect();
+        out.push((stroke, at(2700)));
+        // Snapped shapes, settled: a box in Solid, a triangle and a circle in Glow.
+        let shape = |look: Look, outline: Vec<(f32, f32)>| {
+            let correction = crate::shapes::correct(&outline, s, 0.35).expect("snaps");
+            let parts = crate::shapes::lean(&correction.parts);
+            let mut stroke = Stroke::new(Point { x: 0.0, y: 0.0, at: t0 }, look, s);
+            crate::set_parts(&mut stroke, &parts, at(900));
+            stroke.whole = true;
+            stroke.look.smoothing = 0;
+            stroke
+        };
+        let lerp = |a: (f32, f32), b: (f32, f32), n: usize| (0..n).map(move |i| { let t = i as f32 / n as f32; (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t) });
+        let boxed: Vec<(f32, f32)> = [(80.0, 520.0), (420.0, 520.0), (420.0, 760.0), (80.0, 760.0), (80.0, 520.0)].windows(2).flat_map(|w| lerp((w[0].0 * s, w[0].1 * s), (w[1].0 * s, w[1].1 * s), 60)).collect();
+        out.push((shape(solid, boxed), at(1000)));
+        let triangle: Vec<(f32, f32)> = [(640.0, 520.0), (820.0, 800.0), (460.0, 800.0), (640.0, 520.0)].windows(2).flat_map(|w| lerp((w[0].0 * s, w[0].1 * s), (w[1].0 * s, w[1].1 * s), 60)).collect();
+        out.push((shape(laser, triangle), at(1000)));
+        let ring: Vec<(f32, f32)> = (0..=240).map(|i| { let t = i as f32 / 240.0 * std::f32::consts::TAU; (s * (1050.0 + 150.0 * t.cos()), s * (660.0 + 130.0 * t.sin())) }).collect();
+        out.push((shape(laser, ring), at(1000)));
+        // A slow, shaky Pen line: samples just over MIN_STEP apart with a little hand tremor.
+        let pen = presets()[2].look;
+        let mut stroke = Stroke::new(Point { x: 0.0, y: 0.0, at: t0 }, pen, s);
+        stroke.points = (0..300).map(|i| { let t = i as f32; Point { x: s * (1300.0 + t * 2.1), y: s * (620.0 + 60.0 * (t * 0.02).sin() + 1.2 * (t * 1.9).sin()), at: at(i) } }).collect();
+        out.push((stroke, at(300)));
+        out
+    }
+
+    pub fn render(name: &str, dpi: u32, background: u32, frame: impl Fn(&ID2D1Factory, &ID2D1RenderTarget, &ID2D1SolidColorBrush, &mut Stroke, Instant, &mut Scratch)) {
+        crate::snapshot::init();
+        let scale = dpi as f32 / 96.0;
+        let canvas = crate::snapshot::Canvas::new((1980.0 * scale) as u32, (880.0 * scale) as u32, dpi);
+        unsafe {
+            let brush = canvas.target.CreateSolidColorBrush(&D2D1_COLOR_F::default(), None).unwrap();
+            canvas.target.BeginDraw();
+            canvas.target.Clear(Some(&rgba(background, 1.0)));
+            let mut scratch = Scratch::default();
+            // Device-independent pixels from here; the scenes are laid out in them.
+            for (mut stroke, now) in scenes(1.0) {
+                frame(&canvas.factory, &canvas.target, &brush, &mut stroke, now, &mut scratch);
+            }
+            canvas.target.EndDraw(None, None).unwrap();
+        }
+        canvas.save(name);
+    }
+
+    #[test]
+    #[ignore = "writes target/snapshots/strokes-*.png"]
+    fn stroke_gallery() {
+        for (dpi, background, name) in [(96, 0x16181d, "strokes-dark-96.png"), (192, 0x16181d, "strokes-dark-192.png"), (96, 0xf4f4f2, "strokes-light-96.png")] {
+            render(name, dpi, background, |factory, target, brush, stroke, now, scratch| {
+                draw(factory, target, brush, stroke, now, 1.0, scratch).unwrap();
+            });
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod glow_gallery {
+    use super::*;
+    use crate::settings::presets;
+    use std::time::Duration;
+    use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
+
+    /// Glow and Neon at three widths, on dark and light, to judge the halo.
+    pub fn scenes() -> Vec<(Stroke, Instant)> {
+        let t0 = Instant::now();
+        let mut out = Vec::new();
+        for (row, style) in [STYLE_GLOW, STYLE_NEON].into_iter().enumerate() {
+            for (col, width) in [4u32, 12, 24].into_iter().enumerate() {
+                let mut look = presets()[0].look;
+                look.style = style;
+                look.width = width;
+                look.ink = true;
+                if style == STYLE_NEON { look.color = 0x00e5ff; }
+                let (x0, y0) = (60.0 + col as f32 * 330.0, 80.0 + row as f32 * 200.0);
+                let mut stroke = Stroke::new(Point { x: 0.0, y: 0.0, at: t0 }, look, 1.0);
+                stroke.points = (0..120).map(|i| { let t = i as f32 / 119.0; Point { x: x0 + 260.0 * t, y: y0 + 50.0 * (t * PI * 1.5).sin(), at: t0 + Duration::from_millis(i) } }).collect();
+                out.push((stroke, t0 + Duration::from_millis(200)));
+            }
+        }
+        out
+    }
+
+    pub fn render(name: &str, background: u32, frame: impl Fn(&ID2D1Factory, &ID2D1RenderTarget, &ID2D1SolidColorBrush, &mut Stroke, Instant, &mut Scratch)) {
+        crate::snapshot::init();
+        let canvas = crate::snapshot::Canvas::new(1040, 440, 96);
+        unsafe {
+            let brush = canvas.target.CreateSolidColorBrush(&D2D1_COLOR_F::default(), None).unwrap();
+            canvas.target.BeginDraw();
+            canvas.target.Clear(Some(&rgba(background, 1.0)));
+            let mut scratch = Scratch::default();
+            for (mut stroke, now) in scenes() {
+                frame(&canvas.factory, &canvas.target, &brush, &mut stroke, now, &mut scratch);
+            }
+            canvas.target.EndDraw(None, None).unwrap();
+        }
+        canvas.save(name);
+    }
+
+    #[test]
+    #[ignore = "writes target/snapshots/glow-*.png"]
+    fn glow_widths() {
+        for (background, name) in [(0x16181d, "glow-dark.png"), (0xf4f4f2, "glow-light.png")] {
+            render(name, background, |factory, target, brush, stroke, now, scratch| draw(factory, target, brush, stroke, now, 1.0, scratch).unwrap());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Thinning moves neither the centre nor either edge further than its tolerance, even
+    /// where a long straight run meets a bend, and keeps the ends.
+    #[test]
+    fn thinned_outlines_stay_within_tolerance() {
+        let (tolerance, radius) = (0.02, 12.0);
+        let mut centre: Vec<Vector2> = (0..40).map(|i| Vector2 { X: i as f32 * 5.0, Y: 0.0 }).collect();
+        let turn = 30.0f32.to_radians();
+        let corner = centre[39];
+        centre.extend((1..40).map(|i| Vector2 { X: corner.X + i as f32 * 5.0 * turn.cos(), Y: corner.Y + i as f32 * 5.0 * turn.sin() }));
+        // And a gentle curve sampled densely, as a fast mouse leaves.
+        let end = centre[centre.len() - 1];
+        centre.extend((1..200).map(|i| { let t = i as f32 * 0.01; Vector2 { X: end.X + 300.0 * t.sin(), Y: end.Y + 300.0 * (1.0 - t.cos()) } }));
+        let widths = vec![radius; centre.len()];
+        let mut full = Vec::new();
+        tangents(&centre, &mut full);
+        let (mut points, mut kept_widths, mut kept_tangents) = (centre.clone(), widths.clone(), full.clone());
+        thin(&mut points, &mut kept_widths, &mut kept_tangents, tolerance, 1.0, MAX_CURVE_TURN);
+        assert!(points.len() < centre.len() / 2, "{} of {}", points.len(), centre.len());
+        assert_eq!((points[0].X, points[0].Y), (centre[0].X, centre[0].Y));
+        assert_eq!(points.last().map(|p| (p.X, p.Y)), centre.last().map(|p| (p.X, p.Y)));
+        let edge = |c: Vector2, t: Vector2, side: f32| Vector2 { X: c.X - t.Y * radius * side, Y: c.Y + t.X * radius * side };
+        for side in [0.0, 1.0, -1.0] {
+            let thinned: Vec<Vector2> = points.iter().zip(&kept_tangents).map(|(&c, &t)| edge(c, t, side)).collect();
+            for (&c, &t) in centre.iter().zip(&full) {
+                let p = edge(c, t, side);
+                let off = thinned.windows(2).map(|w| off_segment(p, w[0], w[1])).fold(f32::MAX, f32::min);
+                assert!(off <= tolerance * 1.01 + 1e-4, "side {side}: ({:.1}, {:.1}) is {off:.3} off", p.X, p.Y);
+            }
+        }
+    }
 }

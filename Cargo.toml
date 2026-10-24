@@ -1,6 +1,6 @@
 [package]
 name = "laser-pointer"
-version = "1.2.0"
+version = "1.2.1"
 edition = "2021"
 description = "A screen-wide laser pointer and annotation tool for presenting on Windows"
 license = "MIT"

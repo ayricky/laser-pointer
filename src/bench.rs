@@ -112,18 +112,21 @@ fn kept_pieces_look_like_the_whole_stroke() {
         };
         let now = Instant::now();
         let everywhere = crate::stroke::Bounds { left: 0.0, top: 0.0, right: size as f32, bottom: size as f32 };
-        for (style, smoothing) in [(STYLE_GLOW, 2), (STYLE_NEON, 0), (0, 4)] {
+        // A spiral with a wobble, sampled as a hand moves: near and far apart. And a ruler-straight
+        // line, which thinning cuts down to its ends, so a piece that lost one would show.
+        let spiral = |i: usize| {
+            let t = i as f32 * 0.021 + 0.004 * (i as f32 * 0.37).sin() * i as f32 / 100.0;
+            let r = 40.0 + t * 13.0 + 3.0 * (t * 7.0).sin();
+            (450.0 + r * t.cos(), 450.0 + r * t.sin())
+        };
+        let straight = |i: usize| (60.0 + i as f32 * 0.55, 100.0 + i as f32 * 0.5);
+        type Path = fn(usize) -> (f32, f32);
+        let paths: [(u32, u32, Path); 4] = [(STYLE_GLOW, 2, spiral), (STYLE_NEON, 0, spiral), (0, 4, spiral), (STYLE_GLOW, 2, straight)];
+        for (style, smoothing, path) in paths {
             let mut look = settings::get().look;
             (look.ink, look.style, look.smoothing, look.width) = (true, style, smoothing, 6);
             let mut stroke = Stroke::new(Point { x: 0.0, y: 0.0, at: now }, look, 1.0);
-            // A spiral with a wobble, sampled as a hand moves: near and far apart.
-            stroke.points = (0..1400)
-                .map(|i| {
-                    let t = i as f32 * 0.021 + 0.004 * (i as f32 * 0.37).sin() * i as f32 / 100.0;
-                    let r = 40.0 + t * 13.0 + 3.0 * (t * 7.0).sin();
-                    Point { x: 450.0 + r * t.cos(), y: 450.0 + r * t.sin(), at: now }
-                })
-                .collect();
+            stroke.points = (0..1400).map(|i| { let (x, y) = path(i); Point { x, y, at: now } }).collect();
             let whole = pixels(&|| {
                 stroke::draw_kept(&gfx.factory, &gfx.dc1, &gfx.brush, &stroke, &mut Pieces::default(), everywhere, false, &mut Scratch::default()).unwrap();
             });
@@ -233,14 +236,16 @@ fn settled_shapes_drawn_once_look_like_plain_draw() {
                 // Compared as seen, over 3 x 3 pixels: a tessellated edge may sit a fraction of a
                 // pixel from where a live fill puts it, and steps along a nearly flat edge, as
                 // kept strokes' pieces do. A missing part or a doubled pass shows far more.
+                // Every channel, so a halo drawn over a part's white centre, which tints it
+                // without changing its coverage, shows too.
                 let n = size as usize;
-                let seen = |pixels: &[u8], x: usize, y: usize| -> f32 {
-                    (0..9).map(|k| f32::from(pixels[((y + k / 3 - 1) * n + x + k % 3 - 1) * 4 + 3])).sum::<f32>() / 9.0
+                let seen = |pixels: &[u8], x: usize, y: usize, channel: usize| -> f32 {
+                    (0..9).map(|k| f32::from(pixels[((y + k / 3 - 1) * n + x + k % 3 - 1) * 4 + channel])).sum::<f32>() / 9.0
                 };
                 let (mut differ, mut worst) = (0, 0.0f32);
                 for y in 1..n - 1 {
                     for x in 1..n - 1 {
-                        let difference = (seen(&plain, x, y) - seen(&shape, x, y)).abs();
+                        let difference = (0..4).map(|channel| (seen(&plain, x, y, channel) - seen(&shape, x, y, channel)).abs()).fold(0.0, f32::max);
                         worst = worst.max(difference);
                         differ += usize::from(difference > 24.0);
                     }
@@ -812,3 +817,4 @@ fn perf_report() {
         }
     }
 }
+

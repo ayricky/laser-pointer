@@ -7,11 +7,17 @@
 
   // ---- Strokes, ported from src/stroke.rs ----------------------------------------------------
   const MIN_STEP = 2, CURVE_STEP = 3, CAP = 8;
+  // Each pass: width multiplier, opacity, mix towards white; the stroke itself first.
   const LAYERS = {
     solid: [[1, 1, 0]],
-    glow: [[3.4, 0.10, 0], [2.1, 0.20, 0], [1, 1, 0], [0.38, 0.85, 0.6]],
-    neon: [[3.8, 0.12, 0], [2.3, 0.26, 0], [1, 1, 0], [0.45, 1, 0.85]],
+    glow: [[1, 1, 0], [0.38, 0.85, 0.6]],
+    neon: [[1, 1, 0], [0.45, 1, 0.85]],
   };
+  // The light around Glow and Neon: the stroke blurred by `spread` times its radius, `strength`
+  // times as opaque, beneath it. A browser whose canvas can't blur gets wider copies instead.
+  const HALO = { glow: { strength: 0.85, spread: 2.0 }, neon: { strength: 1.0, spread: 2.2 } };
+  const BANDS = { glow: [[3.4, 0.10, 0], [2.1, 0.20, 0]], neon: [[3.8, 0.12, 0], [2.3, 0.26, 0]] };
+  const canBlur = typeof CanvasRenderingContext2D !== 'undefined' && 'filter' in CanvasRenderingContext2D.prototype;
   const easeOut4 = k => 1 - Math.pow(1 - k, 4);
   // A snapped shape glows brighter once as it settles, then holds for its fade time and fades
   // out over SHAPE_FADE_MS.
@@ -85,22 +91,40 @@
     }
     const [r, g, b] = rgb(s.color);
     const left = stroke.flash ? 1 - (now - stroke.flash) / FLASH_MS : 0;
-    const layers = left > 0 ? [[FLASH[0], FLASH[1] * left * left, FLASH[2]], ...LAYERS[s.style]] : LAYERS[s.style];
+    const halo = canBlur ? HALO[s.style] : undefined;
+    const opacity = s.opacity / 100 * fade * life;
+    const trace = poly => {
+      ctx.moveTo(poly[0].x, poly[0].y);
+      for (let i = 1; i < poly.length; i++) ctx.lineTo(poly[i].x, poly[i].y);
+      ctx.closePath();
+    };
+    const pass = ([centre, w], [k, a, white]) => {
+      const m = v => Math.round(v + (255 - v) * white);
+      ctx.fillStyle = `rgba(${m(r)},${m(g)},${m(b)},${a * opacity})`;
+      ctx.beginPath(); trace(outline(centre, w.map(x => x * k))); ctx.fill('nonzero');
+    };
+    const parts = [];
     const ends = [...(stroke.breaks || []), pts.length];
     let start = 0;
     for (const end of ends) {
       const part = pts.slice(start, end), widths = radii.slice(start, end);
       start = end;
-      if (!part.length) continue;
-      const [centre, w] = curveThrough(smooth(part, s.smoothing), widths, CURVE_STEP);
-      for (const [k, a, white] of layers) {
-        const poly = outline(centre, w.map(x => x * k)), m = v => Math.round(v + (255 - v) * white);
-        ctx.fillStyle = `rgba(${m(r)},${m(g)},${m(b)},${a * s.opacity / 100 * fade * life})`;
-        ctx.beginPath(); ctx.moveTo(poly[0].x, poly[0].y);
-        for (let i = 1; i < poly.length; i++) ctx.lineTo(poly[i].x, poly[i].y);
-        ctx.closePath(); ctx.fill('nonzero');
-      }
+      if (part.length) parts.push(curveThrough(smooth(part, s.smoothing), widths, CURVE_STEP));
     }
+    // As the app draws: flashes beneath everything, then one halo beneath every part.
+    if (left > 0) for (const part of parts) pass(part, [FLASH[0], FLASH[1] * left * left, FLASH[2]]);
+    if (halo) {
+      // Canvas filters work in the bitmap's pixels, not the transformed ones.
+      const zoom = ctx.getTransform ? Math.hypot(ctx.getTransform().a, ctx.getTransform().b) : 1;
+      ctx.save();
+      ctx.filter = `blur(${halo.spread * base * zoom}px)`;
+      ctx.fillStyle = `rgba(${r},${g},${b},${opacity * halo.strength})`;
+      ctx.beginPath();
+      for (const [centre, w] of parts) trace(outline(centre, w));
+      ctx.fill('nonzero');
+      ctx.restore();
+    }
+    for (const part of parts) for (const layer of [...(halo ? [] : BANDS[s.style] || []), ...LAYERS[s.style]]) pass(part, layer);
   }
 
   // ---- Shape snapping, ported from src/shapes.rs ------------------------------------------------

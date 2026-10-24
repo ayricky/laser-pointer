@@ -687,6 +687,7 @@ impl Panel {
         let Some((hwnd, dpi, width, height)) = self.window else {
             return Ok(());
         };
+        self.preview.scratch.forget_device();
         self.target = Self::window_target(&self.factory, hwnd, dpi, width, height)?;
         self.brush = self.target.CreateSolidColorBrush(&D2D1_COLOR_F::default(), None)?;
         self.svg = self.target.cast().ok();
@@ -1368,7 +1369,9 @@ impl Panel {
             _ => {}
         }
         self.tip_shown = self.draw_tip();
-        self.target.EndDraw(None, None)
+        let drawn = self.target.EndDraw(None, None);
+        self.preview.scratch.finish_frame();
+        drawn
     }
 
     /// What the hovered icon does, for one that has no label of its own.
