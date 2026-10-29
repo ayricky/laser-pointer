@@ -39,6 +39,19 @@ const FLASH: (f32, f32, f32) = (3.0, 0.45, 0.35);
 /// A snapped shape that fades holds still for its fade time, then fades out over this long.
 pub const SHAPE_FADE_MS: u32 = 500;
 
+/// How many samples each rectangle of a stroke's `coverage` spans.
+const COVER: usize = 16;
+
+/// The rectangle around `points`, `reach` out from each.
+fn extent_of(points: &[Point], reach: f32) -> Option<Bounds> {
+    let first = points.first()?;
+    let mut bounds = Bounds::around(first.x, first.y, reach);
+    for point in points {
+        bounds = bounds.union(Bounds::around(point.x, point.y, reach));
+    }
+    Some(bounds)
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Point {
     pub x: f32,
@@ -81,17 +94,27 @@ impl Stroke {
     /// The same for its points from `start` on.
     pub fn bounds_from(&self, start: usize) -> Option<Bounds> {
         let points = self.points.get(start..)?;
-        let first = points.first()?;
+        extent_of(points, self.reach())
+    }
+
+    /// Where it could paint, as rectangles along it, so a long diagonal stroke covers little
+    /// more than itself. Each takes in the points that smooth its ends and the next sample, since
+    /// the curve between samples stays within the samples around it.
+    pub fn coverage(&self) -> impl Iterator<Item = Bounds> + '_ {
+        let (reach, span, count) = (self.reach(), self.look.smoothing as usize, self.points.len());
+        (0..count).step_by(COVER).filter_map(move |start| {
+            let points = &self.points[start.saturating_sub(span)..(start + COVER + 1 + span).min(count)];
+            extent_of(points, reach)
+        })
+    }
+
+    /// How far from its centre line it can paint, glow included.
+    fn reach(&self) -> f32 {
         let mut widest = reach(self.look.style);
         if self.flash.is_some() {
             widest = widest.max(FLASH.0);
         }
-        let reach = self.look.width as f32 / 2.0 * self.scale * widest + 2.0;
-        let mut bounds = Bounds::around(first.x, first.y, reach);
-        for point in points {
-            bounds = bounds.union(Bounds::around(point.x, point.y, reach));
-        }
-        Some(bounds)
+        self.look.width as f32 / 2.0 * self.scale * widest + 2.0
     }
 
     /// Fading strokes are done once every point has aged out, and a shape once it has held and
@@ -249,7 +272,7 @@ fn reach(style: u32) -> f32 {
 
 /// The shapes `record` draws, blurred into a halo `opacity` times as opaque as they are. Called
 /// between BeginDraw and EndDraw: they are recorded by pointing the context at a command list
-/// for a moment.
+/// for a moment. Recorded without the context's transform, which applies once the halo is drawn.
 unsafe fn halo_image(
     dc: &ID2D1DeviceContext1,
     halos: &mut Halos,
@@ -260,9 +283,13 @@ unsafe fn halo_image(
 ) -> Result<ID2D1Image> {
     let list = dc.CreateCommandList()?;
     let target = dc.GetTarget()?;
+    let mut transform = Matrix3x2::default();
+    dc.GetTransform(&mut transform);
+    dc.SetTransform(&Matrix3x2::identity());
     dc.SetTarget(&list);
     record();
     dc.SetTarget(&target);
+    dc.SetTransform(&transform);
     list.Close()?;
     let (blur, fade) = halos.take(dc)?;
     blur.SetInput(0, &list, true);
