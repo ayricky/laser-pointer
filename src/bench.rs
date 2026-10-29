@@ -1068,12 +1068,14 @@ fn on_screen_report() {
             let period = app.gfx.as_ref().unwrap().next_frame().map_or(1.0 / 60.0, |(_, period)| period);
             gaps.remove(0);
             let late = gaps.iter().filter(|gap| gap.as_secs_f32() > period * 1.5).count();
+            // Each present is seen once for every frame drawn until a newer one shows.
+            shown.sort_by_key(|&(count, _)| count);
+            shown.dedup_by_key(|&mut (count, _)| count);
             let mut latency: Vec<f64> = shown
                 .iter()
                 .filter_map(|&(count, at)| starts.iter().find(|start| start.0 == count).map(|start| (at - start.1) as f64 * 1000.0 / second as f64))
                 .collect();
             latency.sort_by(f64::total_cmp);
-            latency.dedup();
             costs.sort();
             let at = |times: &[Duration], percent: usize| ms(times[(times.len() * percent / 100).min(times.len() - 1)]);
             eprintln!(

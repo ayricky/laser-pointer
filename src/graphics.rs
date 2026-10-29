@@ -501,9 +501,9 @@ impl Graphics {
             let mut stats = windows::Win32::Graphics::Dxgi::DXGI_FRAME_STATISTICS::default();
             let (period, ticks) = (self.next_frame().map_or(0.0, |(_, period)| period), self.clock().1);
             let shown = self.swap_chain.GetFrameStatistics(&mut stats).ok().map(|()| {
-                // The clock is read at the sync refresh, which can come after the one that showed
-                // the present.
-                let behind = stats.SyncRefreshCount.wrapping_sub(stats.PresentRefreshCount) as f64;
+                // The clock is read at the sync refresh, which can come before or after the one
+                // that showed the present; the counters may have wrapped between them.
+                let behind = f64::from(stats.SyncRefreshCount.wrapping_sub(stats.PresentRefreshCount) as i32);
                 (stats.PresentCount, stats.SyncQPCTime - (behind * f64::from(period) * ticks as f64) as i64)
             });
             (self.swap_chain.GetLastPresentCount().unwrap_or(0), shown)
