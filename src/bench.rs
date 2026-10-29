@@ -505,6 +505,143 @@ fn a_clear_fades_away_and_undoes() {
     }
 }
 
+/// Kept strokes baked into the ink layer's tiles look as they do drawn into one bitmap: nothing
+/// shifted, doubled or cut off where tiles meet, halos included, before and after undoing one
+/// that crosses the rest.
+#[test]
+#[ignore = "needs a GPU"]
+fn baked_tiles_look_like_one_layer() {
+    use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D_SIZE_U};
+    use windows::Win32::Graphics::Direct2D::{
+        D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_CPU_READ, D2D1_BITMAP_OPTIONS_TARGET, D2D1_MAP_OPTIONS_READ,
+    };
+    use crate::graphics::bitmap_properties;
+    use crate::settings::{STYLE_GLOW, STYLE_NEON};
+    use crate::stroke::{self, Pieces, Scratch};
+    unsafe {
+        // Tiles meet at 512 and 1024 both ways.
+        let size = 1100u32;
+        let hwnd = hidden_window(0, 0, size as i32, size as i32);
+        let gfx = Graphics::new(hwnd, size, size).unwrap();
+        let mut app = App::new(hwnd, gfx, (0, 0), (size, size));
+        app.live_cursor = || None;
+        let waitable = app.waitable().unwrap();
+        let shown = |app: &mut App| {
+            for _ in 0..3 {
+                WaitForSingleObject(waitable, 100);
+                app.dirty = true;
+                app.render();
+            }
+            app.gfx.as_ref().unwrap().read_back()
+        };
+        let now = Instant::now();
+        // A thin unsmoothed stroke turning a corner at its 17th sample, where one rectangle of
+        // its coverage ends: the curve cuts the corner across 512, 512 into a tile neither
+        // straight stretch is over. Baked first, while no other ink has made that tile.
+        let mut look = settings::get().look;
+        (look.ink, look.style, look.width, look.smoothing) = (true, 0, 2, 0);
+        let mut corner = Stroke::new(Point { x: 0.0, y: 0.0, at: now }, look, 1.0);
+        corner.points = (0..16)
+            .map(|i| (622.0 - 5.0 * i as f32, 507.0))
+            .chain([(507.0, 507.0), (507.0, 547.0), (507.0, 587.0)])
+            .map(|(x, y)| Point { x, y, at: now })
+            .collect();
+        let mut strokes = vec![corner];
+        for (k, style) in [STYLE_GLOW, STYLE_NEON, 0].into_iter().enumerate() {
+            let mut look = settings::get().look;
+            (look.ink, look.style, look.width) = (true, style, 8 + 4 * k as u32);
+            let mut stroke = Stroke::new(Point { x: 0.0, y: 0.0, at: now }, look, 1.0);
+            stroke.points = (0..900)
+                .map(|i| {
+                    let t = i as f32 * 0.02 + k as f32;
+                    let r = 30.0 + t * 24.0;
+                    Point { x: 512.0 + r * t.cos() + k as f32 * 150.0, y: 512.0 + r * t.sin() + k as f32 * 120.0, at: now }
+                })
+                .collect();
+            strokes.push(stroke);
+        }
+        // A snapped circle, drawn whole rather than grown, across the corner where four tiles meet.
+        let mut look = settings::get().look;
+        (look.ink, look.style) = (true, STYLE_GLOW);
+        let outline: Vec<(f32, f32)> = (0..=240).map(|i| { let t = i as f32 / 240.0 * std::f32::consts::TAU; (1024.0 + 60.0 * t.cos(), 1024.0 + 50.0 * t.sin()) }).collect();
+        let correction = shapes::correct(&outline, 1.0, 0.35).expect("a clean circle snaps");
+        let mut circle = Stroke::new(Point { x: 0.0, y: 0.0, at: now }, look, 1.0);
+        crate::set_parts(&mut circle, &shapes::lean(&correction.parts), now);
+        circle.whole = true;
+        circle.look.smoothing = 0;
+        strokes.push(circle);
+
+        let extent = D2D_SIZE_U { width: size, height: size };
+        let reference = |app: &App, strokes: &[Stroke]| -> Vec<u8> {
+            let gfx = app.gfx.as_ref().unwrap();
+            let canvas = gfx.dc.CreateBitmap(extent, None, 0, &bitmap_properties(D2D1_BITMAP_OPTIONS_TARGET)).unwrap();
+            let readback = gfx.dc.CreateBitmap(extent, None, 0, &bitmap_properties(D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW)).unwrap();
+            gfx.dc.SetTarget(&canvas);
+            gfx.dc.BeginDraw();
+            gfx.dc.Clear(Some(&D2D1_COLOR_F::default()));
+            let everywhere = stroke::Bounds { left: 0.0, top: 0.0, right: size as f32, bottom: size as f32 };
+            let mut scratch = Scratch::default();
+            for stroke in strokes {
+                let mut copy = stroke.clone();
+                if stroke::grows(stroke) {
+                    stroke::draw_kept(&gfx.factory, &gfx.dc1, &gfx.brush, stroke, &mut Pieces::default(), everywhere, false, &mut scratch).unwrap();
+                } else {
+                    stroke::draw(&gfx.factory, &gfx.dc, &gfx.brush, &mut copy, now, 1.0, &mut scratch).unwrap();
+                }
+            }
+            gfx.dc.EndDraw(None, None).unwrap();
+            scratch.finish_frame();
+            readback.CopyFromBitmap(None, &canvas, None).unwrap();
+            let mapped = readback.Map(D2D1_MAP_OPTIONS_READ).unwrap();
+            let mut out = Vec::new();
+            for row in 0..size as usize {
+                out.extend_from_slice(std::slice::from_raw_parts(mapped.bits.add(row * mapped.pitch as usize), size as usize * 4));
+            }
+            readback.Unmap().unwrap();
+            out
+        };
+        // Compared as seen, over 3 x 3 pixels, as the kept pieces are.
+        let compare = |a: &[u8], b: &[u8]| {
+            let n = size as usize;
+            let seen = |pixels: &[u8], x: usize, y: usize| (0..9).map(|k| f32::from(pixels[((y + k / 3 - 1) * n + x + k % 3 - 1) * 4 + 3])).sum::<f32>() / 9.0;
+            let (mut visible, mut worst) = (0, 0.0f32);
+            for y in 1..n - 1 {
+                for x in 1..n - 1 {
+                    let difference = (seen(a, x, y) - seen(b, x, y)).abs();
+                    worst = worst.max(difference);
+                    if difference > 24.0 {
+                        visible += 1;
+                    }
+                }
+            }
+            (visible, worst)
+        };
+        let mut painted = 0;
+        for upto in [1, strokes.len()] {
+            for (k, stroke) in strokes[..upto].iter().enumerate().skip(app.strokes.len()) {
+                app.strokes.push(Drawn::new(k as u64 + 1, stroke.clone()));
+                app.undo.push(crate::Edit::Added(k as u64 + 1));
+            }
+            let baked = shown(&mut app);
+            assert!(app.strokes.iter().all(|drawn| drawn.baked));
+            let one = reference(&app, &strokes[..upto]);
+            painted = one.chunks(4).filter(|p| p[3] > 0).count();
+            let (visible, worst) = compare(&one, &baked);
+            eprintln!("{upto} baked in tiles: {visible} of {painted} painted pixels look different, worst by {worst:.0}");
+            // The same drawing laid over each tile: only rounding may differ.
+            assert!(worst <= 2.0, "{visible} of {painted}, worst {worst}");
+        }
+
+        // Undoing the circle repairs the tiles it was in, which the spirals cross too.
+        app.undo();
+        let repaired = shown(&mut app);
+        let one = reference(&app, &strokes[..strokes.len() - 1]);
+        let (visible, worst) = compare(&one, &repaired);
+        eprintln!("after an undo: {visible} look different, worst by {worst:.0}");
+        assert!(worst <= 2.0, "{visible} of {painted}, worst {worst}");
+    }
+}
+
 #[test]
 #[ignore = "prints timings"]
 fn perf_report() {
@@ -660,6 +797,18 @@ fn perf_report() {
                     app.dirty = true;
                     frame(&mut app)
                 });
+                // Letting go: the next frame bakes it into the ink layer.
+                report(&format!("frame baking a finished kept stroke, {n} points"), 10, || {
+                    app.drawing = true;
+                    app.rebake();
+                    app.strokes[0].baked = false;
+                    app.dirty = true;
+                    frame(&mut app);
+                    app.drawing = false;
+                    app.dirty = true;
+                    frame(&mut app)
+                });
+                app.drawing = true;
             }
             // The worst case for the GPU: a kept stroke across the whole desktop, each pass a
             // layer that size. More than a refresh of GPU work would show here as two.
@@ -719,7 +868,7 @@ fn perf_report() {
             }
             frame(&mut app);
             frame(&mut app);
-            let mut times = Vec::new();
+            let (mut times, mut rebaked) = (Vec::new(), Vec::new());
             for _ in 0..5 {
                 app.clear(|_| true);
                 let started = Instant::now();
@@ -728,11 +877,14 @@ fn perf_report() {
                 }
                 frame(&mut app);
                 app.undo();
-                frame(&mut app);
+                rebaked.push(frame(&mut app));
                 frame(&mut app);
             }
+            let ms = |d: Duration| d.as_secs_f64() * 1000.0;
             times.sort();
-            eprintln!("{:<44} median {:>7.3} ms   worst {:>7.3} ms", "frame while 30 kept strokes clear", times[times.len() / 2].as_secs_f64() * 1000.0, times[times.len() - 1].as_secs_f64() * 1000.0);
+            rebaked.sort();
+            eprintln!("{:<44} median {:>7.3} ms   worst {:>7.3} ms", "frame while 30 kept strokes clear", ms(times[times.len() / 2]), ms(times[times.len() - 1]));
+            eprintln!("{:<44} median {:>7.3} ms   worst {:>7.3} ms", "undoing it: 30 kept strokes baked again", ms(rebaked[rebaked.len() / 2]), ms(rebaked[rebaked.len() - 1]));
             app.strokes.clear();
         }
 
@@ -818,3 +970,174 @@ fn perf_report() {
     }
 }
 
+/// Where the mouse is in `on_screen_report`, packed as x and y, for `live_cursor`.
+static HAND: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A hand moving about 3,000 px a second round a loose loop, `t` seconds in.
+fn hand_at(t: f32) -> (f32, f32) {
+    (1900.0 + 900.0 * (t * 2.1).sin(), 1080.0 + 600.0 * (t * 3.3).cos())
+}
+
+fn hand_cursor() -> Option<windows::Win32::Foundation::POINT> {
+    let bits = HAND.load(std::sync::atomic::Ordering::Relaxed);
+    Some(windows::Win32::Foundation::POINT { x: (bits >> 32) as i32, y: bits as u32 as i32 })
+}
+
+/// What drawing looks like on screen: frames a second, frames that missed a refresh, and how long
+/// from a frame starting, with the newest input, to the refresh that shows it. A 1000 Hz mouse
+/// draws for three seconds in each style, paced as the message loop paces frames, over the
+/// overlay shown but left transparent, once it has readied what it can while idle.
+/// `cargo test --release on_screen_report -- --ignored --nocapture`
+#[test]
+#[ignore = "shows a transparent overlay"]
+fn on_screen_report() {
+    use windows::Win32::System::Threading::{CreateWaitableTimerExW, SetWaitableTimer, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS};
+    use windows::Win32::UI::WindowsAndMessaging::{DestroyWindow, DispatchMessageW, PeekMessageW, ShowWindow, MSG, PM_REMOVE, SW_SHOWNOACTIVATE};
+    use crate::settings::{Look, STYLE_SOLID};
+    unsafe {
+        let (x, y, width, height) = virtual_screen();
+        let pacer = CreateWaitableTimerExW(None, windows::core::PCWSTR::null(), CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS.0).unwrap();
+        let mut long = settings::presets()[0].look;
+        (long.style, long.fade_ms, long.smoothing) = (STYLE_SOLID, 2100, 8);
+        let mut pen = settings::presets()[2].look;
+        pen.ink = true;
+        let scenarios: [(&str, Look); 4] = [
+            ("Laser (Glow), the first stroke", settings::presets()[0].look),
+            ("Solid, 2.1 s fade, smoothing 8", long),
+            ("Highlighter", settings::presets()[1].look),
+            ("Pen, kept", pen),
+        ];
+        let hwnd = hidden_window(x, y, width, height);
+        let gfx = Graphics::new(hwnd, width as u32, height as u32).unwrap();
+        let mut app = App::new(hwnd, gfx, (x, y), (width as u32, height as u32));
+        app.live_cursor = hand_cursor;
+        while app.warm() {}
+        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        crate::boost_compositor(true);
+        let waitable = app.waitable().unwrap();
+        app.presented = false;
+        app.render_now();
+        let mut msg = MSG::default();
+        let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+        for (label, look) in scenarios {
+            app.strokes.clear();
+            let started = Instant::now();
+            let (hx, hy) = hand_at(0.0);
+            app.strokes.push(Drawn::new(1, Stroke::new(Point { x: hx - x as f32, y: hy - y as f32, at: started }, look, 1.5)));
+            app.drawing = true;
+            app.frame_cost = 0.0;
+            // Each frame's present number and the clock as it started; each present shown and
+            // the clock at the refresh that showed it.
+            let (mut gaps, mut costs, mut starts, mut shown) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+            let (mut fed, mut last, mut second) = (0u64, Instant::now(), 1);
+            while started.elapsed().as_secs_f32() < 3.0 {
+                while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                    DispatchMessageW(&msg);
+                }
+                WaitForSingleObject(waitable, 100);
+                gaps.push(last.elapsed());
+                last = Instant::now();
+                if let Some(delay) = app.frame_delay() {
+                    let _ = SetWaitableTimer(pacer, &-((delay * 1e7) as i64), 0, None, None, false);
+                    WaitForSingleObject(pacer, (delay * 1000.0) as u32 + 5);
+                }
+                // Every sample since the last frame, as the mouse history brings them.
+                let upto = started.elapsed().as_millis() as u64;
+                let stroke = &mut app.strokes[0].stroke;
+                while fed < upto {
+                    fed += 1;
+                    let (hx, hy) = hand_at(fed as f32 / 1000.0);
+                    let (px, py) = (hx - x as f32, hy - y as f32);
+                    if stroke.points.last().is_none_or(|p| (px - p.x).hypot(py - p.y) >= crate::stroke::MIN_STEP * stroke.scale) {
+                        stroke.points.push(Point { x: px, y: py, at: started + Duration::from_millis(fed) });
+                    }
+                }
+                let (hx, hy) = hand_at(upto as f32 / 1000.0);
+                HAND.store(((hx as i32 as u32 as u64) << 32) | hy as i32 as u32 as u64, std::sync::atomic::Ordering::Relaxed);
+                let gfx = app.gfx.as_ref().unwrap();
+                let (now, ticks) = gfx.clock();
+                second = ticks;
+                shown.extend(gfx.presents().1);
+                let begun = Instant::now();
+                app.dirty = true;
+                app.render();
+                costs.push(begun.elapsed());
+                starts.push((app.gfx.as_ref().unwrap().presents().0, now));
+            }
+            app.drawing = false;
+            let period = app.gfx.as_ref().unwrap().next_frame().map_or(1.0 / 60.0, |(_, period)| period);
+            gaps.remove(0);
+            let late = gaps.iter().filter(|gap| gap.as_secs_f32() > period * 1.5).count();
+            // Each present is seen once for every frame drawn until a newer one shows.
+            shown.sort_by_key(|&(count, _)| count);
+            shown.dedup_by_key(|&mut (count, _)| count);
+            let mut latency: Vec<f64> = shown
+                .iter()
+                .filter_map(|&(count, at)| starts.iter().find(|start| start.0 == count).map(|start| (at - start.1) as f64 * 1000.0 / second as f64))
+                .collect();
+            latency.sort_by(f64::total_cmp);
+            costs.sort();
+            let at = |times: &[Duration], percent: usize| ms(times[(times.len() * percent / 100).min(times.len() - 1)]);
+            eprintln!(
+                "{label:<32} {:>4.0} fps, {late} late; cpu median {:.3} ms, p99 {:.3}, worst {:.3}; start to shown median {:.2} ms, p90 {:.2}",
+                (gaps.len() + 1) as f64 / 3.0,
+                at(&costs, 50),
+                at(&costs, 99),
+                ms(costs[costs.len() - 1]),
+                latency.get(latency.len() / 2).copied().unwrap_or(f64::NAN),
+                latency.get(latency.len() * 9 / 10).copied().unwrap_or(f64::NAN),
+            );
+        }
+        crate::boost_compositor(false);
+        app.strokes.clear();
+        app.gfx = None;
+        let _ = DestroyWindow(hwnd);
+    }
+}
+
+/// Process memory and video memory at each stage of the overlay's life, to see what the GPU
+/// objects and the ink layer cost. `cargo test --release memory_report -- --ignored --nocapture`
+#[test]
+#[ignore = "prints memory use"]
+fn memory_report() {
+    use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX};
+    use windows::Win32::System::Threading::GetCurrentProcess;
+    let show = |label: &str, app: Option<&App>| {
+        let mut counters = PROCESS_MEMORY_COUNTERS_EX::default();
+        let size = std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32;
+        let _ = unsafe { GetProcessMemoryInfo(GetCurrentProcess(), &mut counters as *mut _ as *mut PROCESS_MEMORY_COUNTERS, size) };
+        let mb = |bytes: u64| bytes as f64 / 1048576.0;
+        let video = app.and_then(|app| app.gfx.as_ref()).map(Graphics::video_memory);
+        let video = video.map_or(String::new(), |(local, shared)| format!("   video {:6.1} MB   shared {:5.1} MB", mb(local), mb(shared)));
+        eprintln!("{label:<36} private {:6.1} MB{video}", mb(counters.PrivateUsage as u64));
+    };
+    show("before any GPU objects", None);
+    unsafe {
+        let (x, y, width, height) = virtual_screen();
+        eprintln!("virtual screen {width} x {height}");
+        let hwnd = hidden_window(x, y, width, height);
+        let gfx = Graphics::new(hwnd, width as u32, height as u32).unwrap();
+        let mut app = App::new(hwnd, gfx, (x, y), (width as u32, height as u32));
+        app.live_cursor = || None;
+        app.presented = false;
+        app.render_now();
+        app.render_now();
+        show("shown, nothing drawn", Some(&app));
+        let mut ink = settings::get().look;
+        ink.ink = true;
+        let now = Instant::now();
+        let mut stroke = Stroke::new(Point { x: 0.0, y: 0.0, at: now }, ink, 1.0);
+        stroke.points = (0..800).map(|i| { let t = i as f32 * 0.01; Point { x: 900.0 + 300.0 * t.sin(), y: 900.0 + 300.0 * t.cos(), at: now } }).collect();
+        app.strokes.push(Drawn::new(1, stroke));
+        app.dirty = true;
+        app.render_now();
+        app.render_now();
+        show("a kept stroke 700 px across, baked", Some(&app));
+        app.strokes.clear();
+        app.rebake();
+        app.render_now();
+        app.gfx.as_mut().unwrap().trim().unwrap();
+        app.scratch.finish_frame();
+        show("hidden and trimmed", Some(&app));
+    }
+}

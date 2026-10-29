@@ -30,7 +30,7 @@ use windows::Win32::Foundation::{
     CloseHandle, GetLastError, COLORREF, ERROR_ALREADY_EXISTS, HANDLE, HWND, LPARAM, LRESULT, POINT,
     RECT, WAIT_OBJECT_0, WPARAM,
 };
-use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D_RECT_F};
+use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
 use windows::Win32::Graphics::Direct2D::{D2D1_ANTIALIAS_MODE_ALIASED, D2D1_ELLIPSE};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
@@ -551,6 +551,8 @@ struct App {
     live_cursor: fn() -> Option<POINT>,
     /// The compositor runs at its fastest while this stroke is drawn.
     boosted: bool,
+    /// The device has drawn a halo, so the next one needn't wait while it readies the blur.
+    halo_ready: bool,
     /// The last frame drew the head ahead of the cursor, so another must follow to bring it
     /// back once the hand stops.
     led: bool,
@@ -666,9 +668,9 @@ unsafe fn paced(msg: &mut MSG, pacer: Option<HANDLE>) {
             Some(handle) => std::slice::from_ref(handle),
             None => &[],
         };
-        // With nothing to draw, the time goes to making cursor frames ahead of need; while
-        // there are more to make, the loop only looks for messages before the next.
-        let warming = waitable.is_none() && with_app(App::warm_cursor).unwrap_or(false);
+        // With nothing to draw, the time goes to making cursor frames and halos ready ahead of
+        // need; while there is more to do, the loop only looks for messages before the next.
+        let warming = waitable.is_none() && with_app(App::warm).unwrap_or(false);
         let timeout = if warming {
             0
         } else {
@@ -1312,6 +1314,7 @@ impl App {
             predictor: Predictor::default(),
             live_cursor: cursor_position,
             boosted: false,
+            halo_ready: false,
             led: false,
             frame_cost: 0.0,
             game: None,
@@ -1438,9 +1441,7 @@ impl App {
     /// Throws the ink layer away and bakes every kept stroke again on the next frame.
     fn rebake(&mut self) {
         if let Some(gfx) = &mut self.gfx {
-            if unsafe { gfx.clear_ink() }.is_err() {
-                self.lose_device();
-            }
+            gfx.clear_ink();
         }
         for drawn in &mut self.strokes {
             drawn.baked = false;
@@ -1685,6 +1686,7 @@ impl App {
         match unsafe { Graphics::new(self.hwnd, width, height) } {
             Ok(gfx) => {
                 self.gfx = Some(gfx);
+                self.halo_ready = false;
                 // Tessellations belonged to the device that went, as did any ink fading out.
                 for drawn in &mut self.strokes {
                     drawn.pieces.clear();
@@ -2035,10 +2037,10 @@ impl App {
         let Some(gfx) = &mut self.gfx else { return };
         let (strokes, scratch) = (&mut self.strokes, &mut self.scratch);
         let mut drawn_all = Ok(());
+        // Only tiles already holding ink: any other has nothing to take away or put back.
         let repaired = unsafe {
-            gfx.bake(|gfx| {
+            gfx.bake([area].into_iter(), false, Some(area), |gfx| {
                 gfx.dc.PushAxisAlignedClip(&graphics::rect_f(area), D2D1_ANTIALIAS_MODE_ALIASED);
-                gfx.dc.Clear(Some(&D2D1_COLOR_F::default()));
                 for drawn in strokes.iter_mut().filter(|drawn| drawn.baked) {
                     if !drawn.stroke.bounds().is_some_and(|bounds| intersects(bounds, area)) {
                         continue;
@@ -2325,6 +2327,37 @@ impl App {
         // Only once the replacement is showing can the old ones go.
         self.pointer.evict(key);
     }
+
+    /// Does one thing to have ready before it's needed; returns whether there is more to do.
+    fn warm(&mut self) -> bool {
+        self.warm_cursor() || self.warm_halo()
+    }
+
+    /// Readies the blur a Glow or Neon stroke's halo is drawn with, once for each device: making
+    /// its effects and shaders takes a few milliseconds the first time, more than a frame at a
+    /// high refresh rate, which the first such stroke would otherwise wait for.
+    fn warm_halo(&mut self) -> bool {
+        let Some(gfx) = self.gfx.as_ref().filter(|_| !self.halo_ready) else { return false };
+        self.halo_ready = true;
+        let now = Instant::now();
+        let mut look = settings::get().look;
+        (look.style, look.ink) = (settings::STYLE_GLOW, true);
+        let mut stroke = Stroke::new(Point { x: 8.0, y: 8.0, at: now }, look, 1.0);
+        stroke.points.push(Point { x: 40.0, y: 40.0, at: now });
+        let (scratch, mut drawn) = (&mut self.scratch, Ok(()));
+        let readied = unsafe {
+            gfx.draw_aside(|gfx| {
+                drawn = stroke::draw(&gfx.factory, &gfx.dc, &gfx.brush, &mut stroke, now, 1.0, scratch);
+            })
+        };
+        self.scratch.finish_frame();
+        // Any other failure only leaves the first halo to ready the blur itself.
+        if readied.and(drawn).is_err_and(|error| device_lost(&error)) {
+            self.lose_device();
+        }
+        true
+    }
+
     /// Makes one cursor frame the laser will need when it next ignites or is pressed, so none
     /// has to be made mid-animation, where each costs a wait for the GPU. Returns whether it
     /// made one, and so whether more may remain.
@@ -2400,9 +2433,10 @@ impl App {
         // All in one pass: each pass has a cost of its own, which an undo baking every kept
         // stroke again would pay once per stroke.
         let (strokes, scratch) = (&mut self.strokes, &mut self.scratch);
+        let covered: Vec<Bounds> = ready.iter().flat_map(|&index| strokes[index].stroke.coverage()).collect();
         let mut drawn_all = Ok(());
         let baked = unsafe {
-            gfx.bake(|gfx| {
+            gfx.bake(covered.into_iter(), true, None, |gfx| {
                 for &index in &ready {
                     let Drawn { stroke, pieces, .. } = &mut strokes[index];
                     let drawn = if stroke::grows(stroke) {

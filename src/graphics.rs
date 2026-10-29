@@ -4,7 +4,7 @@
 use windows::core::{w, Interface, Result, HRESULT};
 use windows::Win32::Foundation::{CloseHandle, E_FAIL, HANDLE, HWND, RECT};
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_COMPOSITE_MODE_SOURCE_COPY, D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_F,
+    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_COMPOSITE_MODE_SOURCE_OVER, D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_F,
     D2D_SIZE_U,
 };
 use windows::Win32::Graphics::Direct2D::{
@@ -12,7 +12,7 @@ use windows::Win32::Graphics::Direct2D::{
     ID2D1SolidColorBrush, D2D1_BITMAP_OPTIONS, D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
     D2D1_BITMAP_OPTIONS_CPU_READ, D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1,
     D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_FACTORY_TYPE_SINGLE_THREADED,
-    D2D1_MAP_OPTIONS_READ, D2D1_ROUNDED_RECT, D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
+    D2D1_MAP_OPTIONS_READ, D2D1_ROUNDED_RECT, D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR, D2D1_ANTIALIAS_MODE_ALIASED,
 };
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE, D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP,
@@ -54,6 +54,10 @@ const RECREATE_TARGET: HRESULT = HRESULT(0x8899_000C_u32 as i32);
 
 /// Buffers shrink to this while nothing is on screen, to hand the memory back.
 const TRIMMED: u32 = 8;
+
+/// Kept strokes are baked into tiles this many pixels square, made only where there is ink: a
+/// layer the size of the desktop would hold over a hundred megabytes for a few strokes.
+const TILE: u32 = 512;
 
 /// Whether an error means the GPU was reset or removed, so everything must be rebuilt.
 pub fn device_lost(error: &windows::core::Error) -> bool {
@@ -99,10 +103,10 @@ pub struct Graphics {
     /// The same context, for kept strokes' tessellated pieces.
     pub dc1: ID2D1DeviceContext1,
     target: Option<ID2D1Bitmap1>,
-    /// Kept strokes, drawn once and copied into each frame; created on first use.
-    ink: Option<ID2D1Bitmap1>,
+    /// Kept strokes, drawn once and copied into each frame, as tiles made where they are needed.
+    ink: Tiles,
     /// The ink layer as it was when everything in it was cleared, fading out.
-    fading: Option<ID2D1Bitmap1>,
+    fading: Tiles,
     pub brush: ID2D1SolidColorBrush,
     dwrite: IDWriteFactory,
     dxgi: IDXGIDevice,
@@ -114,6 +118,69 @@ pub struct Graphics {
         IDCompositionTarget,
         IDCompositionVisual,
     ),
+}
+
+/// A layer the size of the screen, row by row in tiles, each made the first time something is
+/// drawn into it.
+#[derive(Default)]
+struct Tiles(Vec<Option<ID2D1Bitmap1>>);
+
+/// The tiles of a `width` by `height` layer that `area` touches: each one's index and where it
+/// lies.
+fn tiles_under((width, height): (u32, u32), area: Bounds) -> impl Iterator<Item = (usize, D2D_RECT_F)> {
+    let columns = width.div_ceil(TILE);
+    let span = |from: f32, to: f32, extent: u32| {
+        let first = (from.max(0.0) as u32 / TILE).min(extent.div_ceil(TILE));
+        let last = (to.min(extent as f32).ceil().max(0.0) as u32).div_ceil(TILE);
+        first..last.max(first)
+    };
+    let (rows, across) = (span(area.top, area.bottom, height), span(area.left, area.right, width));
+    rows.flat_map(move |row| across.clone().map(move |column| (row, column))).map(move |(row, column)| {
+        let (left, top) = (column * TILE, row * TILE);
+        let rect = D2D_RECT_F {
+            left: left as f32,
+            top: top as f32,
+            right: (left + TILE).min(width) as f32,
+            bottom: (top + TILE).min(height) as f32,
+        };
+        ((row * columns + column) as usize, rect)
+    })
+}
+
+/// Where `a` and `b` overlap, if they do.
+fn overlap(a: D2D_RECT_F, b: D2D_RECT_F) -> Option<D2D_RECT_F> {
+    let both = D2D_RECT_F {
+        left: a.left.max(b.left),
+        top: a.top.max(b.top),
+        right: a.right.min(b.right),
+        bottom: a.bottom.min(b.bottom),
+    };
+    (both.left < both.right && both.top < both.bottom).then_some(both)
+}
+
+/// `rect` moved so `origin` is at 0, 0.
+fn local(rect: D2D_RECT_F, origin: D2D_RECT_F) -> D2D_RECT_F {
+    D2D_RECT_F {
+        left: rect.left - origin.left,
+        top: rect.top - origin.top,
+        right: rect.right - origin.left,
+        bottom: rect.bottom - origin.top,
+    }
+}
+
+impl Tiles {
+    /// The tiles there are under `area`, each with where it lies and the part of `area` on it.
+    fn under(&self, size: (u32, u32), area: D2D_RECT_F) -> impl Iterator<Item = (&ID2D1Bitmap1, D2D_RECT_F, D2D_RECT_F)> {
+        let bounds = Bounds { left: area.left, top: area.top, right: area.right, bottom: area.bottom };
+        tiles_under(size, bounds).filter_map(move |(index, rect)| {
+            let tile = self.0.get(index)?.as_ref()?;
+            Some((tile, rect, overlap(rect, area)?))
+        })
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.iter().all(Option::is_none)
+    }
 }
 
 unsafe fn create_device(driver: D3D_DRIVER_TYPE) -> Result<IDXGIDevice> {
@@ -206,8 +273,8 @@ impl Graphics {
             dc,
             dc1,
             target: None,
-            ink: None,
-            fading: None,
+            ink: Tiles::default(),
+            fading: Tiles::default(),
             brush,
             dwrite,
             dxgi,
@@ -268,8 +335,8 @@ impl Graphics {
 
     /// The kept-stroke layer is dropped too; the caller re-bakes it.
     pub unsafe fn resize(&mut self, width: u32, height: u32) -> Result<()> {
-        self.ink = None;
-        self.fading = None;
+        self.ink = Tiles::default();
+        self.fading = Tiles::default();
         self.size = (width, height);
         if self.trimmed {
             return Ok(());
@@ -283,7 +350,7 @@ impl Graphics {
         if self.trimmed {
             return Ok(());
         }
-        self.ink = None;
+        self.ink = Tiles::default();
         self.resize_buffers(TRIMMED, TRIMMED)?;
         self.trimmed = true;
         // Direct2D keeps textures from large layers and fills cached; let them go too.
@@ -305,67 +372,101 @@ impl Graphics {
         self.resize_buffers(width, height)
     }
 
-    /// Draws into the kept-stroke layer, creating it the first time.
-    pub unsafe fn bake(&mut self, draw: impl FnOnce(&Self)) -> Result<()> {
-        if self.ink.is_none() {
-            let (width, height) = self.size;
-            self.ink = Some(self.dc.CreateBitmap(
-                D2D_SIZE_U { width, height },
-                None,
-                0,
-                &bitmap_properties(D2D1_BITMAP_OPTIONS_TARGET),
-            )?);
-            self.retarget(|gfx| unsafe { gfx.dc.Clear(Some(&D2D1_COLOR_F::default())) })?;
+    /// Draws into the tiles of the kept-stroke layer under `areas`, making those there aren't yet
+    /// if `make`, and otherwise leaving out the ones with nothing in them; `erase` is cleared in
+    /// each first. `draw` runs once, in screen coordinates, into a bitmap just big enough, which
+    /// is then laid over each tile: drawing into every tile would tessellate and blur a stroke
+    /// once for each.
+    pub unsafe fn bake(&mut self, areas: impl Iterator<Item = Bounds>, make: bool, erase: Option<Bounds>, draw: impl FnOnce(&Self)) -> Result<()> {
+        let count = (self.size.0.div_ceil(TILE) * self.size.1.div_ceil(TILE)) as usize;
+        self.ink.0.resize(count, None);
+        let mut chosen: Vec<Option<(D2D_RECT_F, bool)>> = vec![None; count];
+        let mut extent: Option<Bounds> = None;
+        for area in areas {
+            for (index, rect) in tiles_under(self.size, area) {
+                chosen[index] = Some((rect, false));
+            }
+            extent = crate::stroke::union(extent, Some(area));
         }
-        self.retarget(draw)
-    }
-
-    unsafe fn retarget(&self, draw: impl FnOnce(&Self)) -> Result<()> {
-        let Some(ink) = &self.ink else { return Ok(()) };
-        self.dc.SetTarget(ink);
+        for (tile, choice) in self.ink.0.iter_mut().zip(&mut chosen) {
+            let Some((rect, fresh)) = choice else { continue };
+            if tile.is_none() && make {
+                let size = D2D_SIZE_U { width: (rect.right - rect.left) as u32, height: (rect.bottom - rect.top) as u32 };
+                *tile = Some(self.dc.CreateBitmap(size, None, 0, &bitmap_properties(D2D1_BITMAP_OPTIONS_TARGET))?);
+                *fresh = true;
+            }
+        }
+        let screen = D2D_RECT_F { left: 0.0, top: 0.0, right: self.size.0 as f32, bottom: self.size.1 as f32 };
+        let Some(extent) = extent.and_then(|extent| overlap(rect_f(extent), screen)) else { return Ok(()) };
+        let size = D2D_SIZE_U { width: (extent.right - extent.left) as u32, height: (extent.bottom - extent.top) as u32 };
+        let drawing = self.dc.CreateBitmap(size, None, 0, &bitmap_properties(D2D1_BITMAP_OPTIONS_TARGET))?;
+        self.dc.SetTarget(&drawing);
         self.dc.BeginDraw();
+        self.dc.Clear(Some(&D2D1_COLOR_F::default()));
+        self.dc.SetTransform(&Matrix3x2::translation(-extent.left, -extent.top));
         draw(self);
-        let drawn = self.dc.EndDraw(None, None);
+        self.dc.SetTransform(&Matrix3x2::identity());
+        let mut drawn = self.dc.EndDraw(None, None);
+        for (tile, choice) in self.ink.0.iter().zip(&chosen) {
+            let (Some(tile), Some((rect, fresh)), Ok(())) = (tile, choice, &drawn) else { continue };
+            self.dc.SetTarget(tile);
+            self.dc.BeginDraw();
+            if *fresh {
+                self.dc.Clear(Some(&D2D1_COLOR_F::default()));
+            } else if let Some(erase) = erase.and_then(|erase| overlap(rect_f(erase), *rect)) {
+                self.dc.PushAxisAlignedClip(&local(erase, *rect), D2D1_ANTIALIAS_MODE_ALIASED);
+                self.dc.Clear(Some(&D2D1_COLOR_F::default()));
+                self.dc.PopAxisAlignedClip();
+            }
+            if let Some(part) = overlap(*rect, extent) {
+                self.dc.DrawBitmap(&drawing, Some(&local(part, *rect)), 1.0, D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR, Some(&local(part, extent)), None);
+            }
+            drawn = self.dc.EndDraw(None, None);
+        }
         if let Some(target) = &self.target {
             self.dc.SetTarget(target);
         }
         drawn
     }
 
-    /// Empties the kept-stroke layer, keeping it rather than allocating a screenful again.
-    pub unsafe fn clear_ink(&mut self) -> Result<()> {
-        self.retarget(|gfx| unsafe { gfx.dc.Clear(Some(&D2D1_COLOR_F::default())) })
+    /// Empties the kept-stroke layer, handing its tiles back.
+    pub fn clear_ink(&mut self) {
+        self.ink = Tiles::default();
     }
 
     /// Sets the whole ink layer aside to fade out, leaving none: the next kept stroke starts a
     /// new one.
     pub fn fade_ink(&mut self) {
-        self.fading = self.ink.take();
+        self.fading = std::mem::take(&mut self.ink);
     }
 
     pub fn end_fade(&mut self) {
-        self.fading = None;
+        self.fading = Tiles::default();
     }
 
     /// Draws what is fading out under `area`, `opacity` times as opaque as it was.
     pub unsafe fn draw_fading(&self, area: D2D_RECT_F, opacity: f32) {
-        if let Some(fading) = &self.fading {
-            self.dc.DrawBitmap(fading, Some(&area), opacity, D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR, Some(&area), None);
+        for (tile, rect, part) in self.fading.under(self.size, area) {
+            self.dc.DrawBitmap(tile, Some(&part), opacity, D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR, Some(&local(part, rect)), None);
         }
     }
 
     /// Starts `area` of the frame being drawn with the kept strokes under it, or with nothing.
-    /// Copying replaces what was there, so the area needn't be cleared first as well.
+    /// Each tile is drawn over the cleared area, which leaves exactly its pixels: copying would
+    /// clear the whole clip again, and with it the tiles drawn before.
     pub unsafe fn start_with_ink(&self, area: D2D_RECT_F) {
-        match &self.ink {
-            Some(ink) => self.dc.DrawImage(
-                ink,
-                Some(&Vector2 { X: area.left, Y: area.top }),
-                Some(&area),
+        self.dc.Clear(Some(&D2D1_COLOR_F::default()));
+        if self.ink.is_empty() {
+            return;
+        }
+        for (tile, rect, part) in self.ink.under(self.size, area) {
+            self.dc.DrawImage(
+                tile,
+                Some(&Vector2 { X: part.left, Y: part.top }),
+                Some(&local(part, rect)),
                 D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
-                D2D1_COMPOSITE_MODE_SOURCE_COPY,
-            ),
-            None => self.dc.Clear(Some(&D2D1_COLOR_F::default())),
+                D2D1_COMPOSITE_MODE_SOURCE_OVER,
+            );
         }
     }
 
@@ -383,6 +484,47 @@ impl Graphics {
         self.swap_chain
             .Present1(1, DXGI_PRESENT(0), &parameters)
             .ok()
+    }
+
+    /// For tests: the compositor's clock now, and its ticks a second.
+    #[cfg(test)]
+    pub fn clock(&self) -> (i64, i64) {
+        let stats = unsafe { self.composition.0.GetFrameStatistics() }.unwrap_or_default();
+        (stats.currentTime, stats.timeFrequency)
+    }
+
+    /// For tests: the number of the last present, and the newest one shown with the clock at
+    /// the refresh that showed it.
+    #[cfg(test)]
+    pub fn presents(&self) -> (u32, Option<(u32, i64)>) {
+        unsafe {
+            let mut stats = windows::Win32::Graphics::Dxgi::DXGI_FRAME_STATISTICS::default();
+            let (period, ticks) = (self.next_frame().map_or(0.0, |(_, period)| period), self.clock().1);
+            let shown = self.swap_chain.GetFrameStatistics(&mut stats).ok().map(|()| {
+                // The clock is read at the sync refresh, which can come before or after the one
+                // that showed the present; the counters may have wrapped between them.
+                let behind = f64::from(stats.SyncRefreshCount.wrapping_sub(stats.PresentRefreshCount) as i32);
+                (stats.PresentCount, stats.SyncQPCTime - (behind * f64::from(period) * ticks as f64) as i64)
+            });
+            (self.swap_chain.GetLastPresentCount().unwrap_or(0), shown)
+        }
+    }
+
+    /// For tests: the video memory this process has in use on the overlay's GPU, its own and
+    /// shared with the system, in bytes.
+    #[cfg(test)]
+    pub fn video_memory(&self) -> (u64, u64) {
+        use windows::Win32::Graphics::Dxgi::{
+            IDXGIAdapter3, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, DXGI_QUERY_VIDEO_MEMORY_INFO,
+        };
+        unsafe {
+            let Ok(adapter) = self.dxgi.GetAdapter().and_then(|adapter| adapter.cast::<IDXGIAdapter3>()) else { return (0, 0) };
+            let used = |group| {
+                let mut info = DXGI_QUERY_VIDEO_MEMORY_INFO::default();
+                adapter.QueryVideoMemoryInfo(0, group, &mut info).map_or(0, |()| info.CurrentUsage)
+            };
+            (used(DXGI_MEMORY_SEGMENT_GROUP_LOCAL), used(DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL))
+        }
     }
 
     /// For tests: the swap chain's back buffer, which holds the frame presented two before, as
@@ -525,6 +667,19 @@ impl Graphics {
             dc5.DrawSvgDocument(&document);
             dc.SetTransform(&Matrix3x2::identity());
         })
+    }
+
+    /// Draws into a small bitmap that is then thrown away, to ready what the drawing needs.
+    pub unsafe fn draw_aside(&self, draw: impl FnOnce(&Self)) -> Result<()> {
+        let canvas = self.dc.CreateBitmap(D2D_SIZE_U { width: 64, height: 64 }, None, 0, &bitmap_properties(D2D1_BITMAP_OPTIONS_TARGET))?;
+        self.dc.SetTarget(&canvas);
+        self.dc.BeginDraw();
+        draw(self);
+        let drawn = self.dc.EndDraw(None, None);
+        if let Some(target) = &self.target {
+            self.dc.SetTarget(target);
+        }
+        drawn
     }
 
     /// Draws into an offscreen bitmap and turns it into an icon, or a cursor if given a hotspot.
