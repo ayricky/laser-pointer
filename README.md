@@ -7,6 +7,8 @@ presentation.
 
 [See it in action](https://ayricky.github.io/laser-pointer/): the site's demo runs the app's own stroke and shape code in the browser.
 
+[Get it from the Microsoft Store](https://apps.microsoft.com/detail/9MT6DPQK4631) (US$2.99, with a week's free trial), or build it from source below.
+
 ## Features
 
 - **Smooth laser trail** that tapers and fades over time, drawn as one anti-aliased
@@ -103,7 +105,7 @@ workflow artifact to upload by hand.
 
 ## Support
 
-The Microsoft Store version (US$2.99) pays for the work. If you build it yourself and it helps,
+The [Microsoft Store version](https://apps.microsoft.com/detail/9MT6DPQK4631) (US$2.99) pays for the work. If you build it yourself and it helps,
 a tip on [Ko-fi](https://ko-fi.com/ayricky) is welcome.
 
 ## Licence
