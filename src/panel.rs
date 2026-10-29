@@ -68,7 +68,7 @@ const SHADES: (f32, f32) = (0.0, 1.0);
 /// How long the pointer rests on an icon before its tooltip shows.
 const TIP_DELAY: Duration = Duration::from_millis(400);
 
-pub const SWATCHES: [u32; 6] = [0xff2a2a, 0xff8a00, 0xffd400, 0x2ecc40, 0x1e90ff, 0xd62aff];
+pub const SWATCHES: [u32; 7] = [0xff2a2a, 0xff8a00, 0xffd400, 0x2ecc40, 0x1e90ff, 0xd62aff, 0xff4fa8];
 const STYLES: [u32; 3] = [STYLE_SOLID, STYLE_GLOW, STYLE_NEON];
 const TABS: [(&str, f32); 4] = [("Pen", 56.0), ("Presets", 82.0), ("Shortcuts", 96.0), ("Options", 82.0)];
 const PEN: usize = 0;
@@ -889,7 +889,8 @@ impl Panel {
         }
         match self.tab {
             PEN => {
-                let gap = (INNER - 7.0 * 28.0) / 6.0;
+                let slots = SWATCHES.len() as f32 + 1.0;
+                let gap = (INNER - slots * 28.0) / (slots - 1.0);
                 for index in 0..=SWATCHES.len() {
                     let x = MARGIN + index as f32 * (28.0 + gap);
                     widgets.push((Widget::Swatch(index), rect(x, SWATCH_TOP, 28.0, 28.0)));

@@ -83,7 +83,7 @@ impl Look {
             width,
             opacity,
             fade_ms,
-            smoothing: 2,
+            smoothing: 4,
             style,
             ink,
             snap,
@@ -116,7 +116,7 @@ impl Look {
     }
 }
 
-const LASER: Look = Look::new(0xff2a2a, 4, 100, 1000, STYLE_GLOW, false, 35);
+const LASER: Look = Look::new(0xff2a2a, 4, 100, 1200, STYLE_GLOW, false, 70);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Command {
@@ -256,11 +256,11 @@ fn default_presets() -> Vec<Preset> {
         preset("Laser", LASER),
         preset(
             "Highlighter",
-            Look::new(0xffd400, 18, 40, 3000, STYLE_SOLID, false, 60),
+            Look::new(0xffd400, 18, 40, 3000, STYLE_SOLID, false, 70),
         ),
         preset(
             "Pen",
-            Look::new(0x1e90ff, 4, 100, 1000, STYLE_SOLID, true, 50),
+            Look::new(0x1e90ff, 4, 100, 1200, STYLE_SOLID, true, 70),
         ),
     ]
 }
