@@ -98,12 +98,13 @@ impl Stroke {
     }
 
     /// Where it could paint, as rectangles along it, so a long diagonal stroke covers little
-    /// more than itself. Each takes in the points that smooth its ends and the next sample, since
-    /// the curve between samples stays within the samples around it.
+    /// more than itself. The curve round each smoothed sample stays within it and its neighbours
+    /// either side, so each rectangle takes in one more smoothed sample at each end, and the
+    /// points that smooth those.
     pub fn coverage(&self) -> impl Iterator<Item = Bounds> + '_ {
         let (reach, span, count) = (self.reach(), self.look.smoothing as usize, self.points.len());
         (0..count).step_by(COVER).filter_map(move |start| {
-            let points = &self.points[start.saturating_sub(span)..(start + COVER + 1 + span).min(count)];
+            let points = &self.points[start.saturating_sub(span + 1)..(start + COVER + 2 + span).min(count)];
             extent_of(points, reach)
         })
     }

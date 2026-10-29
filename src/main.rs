@@ -2344,13 +2344,17 @@ impl App {
         (look.style, look.ink) = (settings::STYLE_GLOW, true);
         let mut stroke = Stroke::new(Point { x: 8.0, y: 8.0, at: now }, look, 1.0);
         stroke.points.push(Point { x: 40.0, y: 40.0, at: now });
-        let scratch = &mut self.scratch;
-        let _ = unsafe {
+        let (scratch, mut drawn) = (&mut self.scratch, Ok(()));
+        let readied = unsafe {
             gfx.draw_aside(|gfx| {
-                let _ = stroke::draw(&gfx.factory, &gfx.dc, &gfx.brush, &mut stroke, now, 1.0, scratch);
+                drawn = stroke::draw(&gfx.factory, &gfx.dc, &gfx.brush, &mut stroke, now, 1.0, scratch);
             })
         };
         self.scratch.finish_frame();
+        // Any other failure only leaves the first halo to ready the blur itself.
+        if readied.and(drawn).is_err_and(|error| device_lost(&error)) {
+            self.lose_device();
+        }
         true
     }
 

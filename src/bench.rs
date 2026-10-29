@@ -535,7 +535,18 @@ fn baked_tiles_look_like_one_layer() {
             app.gfx.as_ref().unwrap().read_back()
         };
         let now = Instant::now();
-        let mut strokes = Vec::new();
+        // A thin unsmoothed stroke turning a corner at its 17th sample, where one rectangle of
+        // its coverage ends: the curve cuts the corner across 512, 512 into a tile neither
+        // straight stretch is over. Baked first, while no other ink has made that tile.
+        let mut look = settings::get().look;
+        (look.ink, look.style, look.width, look.smoothing) = (true, 0, 2, 0);
+        let mut corner = Stroke::new(Point { x: 0.0, y: 0.0, at: now }, look, 1.0);
+        corner.points = (0..16)
+            .map(|i| (622.0 - 5.0 * i as f32, 507.0))
+            .chain([(507.0, 507.0), (507.0, 547.0), (507.0, 587.0)])
+            .map(|(x, y)| Point { x, y, at: now })
+            .collect();
+        let mut strokes = vec![corner];
         for (k, style) in [STYLE_GLOW, STYLE_NEON, 0].into_iter().enumerate() {
             let mut look = settings::get().look;
             (look.ink, look.style, look.width) = (true, style, 8 + 4 * k as u32);
@@ -605,23 +616,26 @@ fn baked_tiles_look_like_one_layer() {
             }
             (visible, worst)
         };
-        for (k, stroke) in strokes.iter().enumerate() {
-            app.strokes.push(Drawn::new(k as u64 + 1, stroke.clone()));
-            app.undo.push(crate::Edit::Added(k as u64 + 1));
+        let mut painted = 0;
+        for upto in [1, strokes.len()] {
+            for (k, stroke) in strokes[..upto].iter().enumerate().skip(app.strokes.len()) {
+                app.strokes.push(Drawn::new(k as u64 + 1, stroke.clone()));
+                app.undo.push(crate::Edit::Added(k as u64 + 1));
+            }
+            let baked = shown(&mut app);
+            assert!(app.strokes.iter().all(|drawn| drawn.baked));
+            let one = reference(&app, &strokes[..upto]);
+            painted = one.chunks(4).filter(|p| p[3] > 0).count();
+            let (visible, worst) = compare(&one, &baked);
+            eprintln!("{upto} baked in tiles: {visible} of {painted} painted pixels look different, worst by {worst:.0}");
+            // The same drawing laid over each tile: only rounding may differ.
+            assert!(worst <= 2.0, "{visible} of {painted}, worst {worst}");
         }
-        let baked = shown(&mut app);
-        assert!(app.strokes.iter().all(|drawn| drawn.baked));
-        let one = reference(&app, &strokes);
-        let painted = one.chunks(4).filter(|p| p[3] > 0).count();
-        let (visible, worst) = compare(&one, &baked);
-        eprintln!("baked in tiles: {visible} of {painted} painted pixels look different, worst by {worst:.0}");
-        // The same drawing laid over each tile: only rounding may differ.
-        assert!(worst <= 2.0, "{visible} of {painted}, worst {worst}");
 
         // Undoing the circle repairs the tiles it was in, which the spirals cross too.
         app.undo();
         let repaired = shown(&mut app);
-        let one = reference(&app, &strokes[..3]);
+        let one = reference(&app, &strokes[..strokes.len() - 1]);
         let (visible, worst) = compare(&one, &repaired);
         eprintln!("after an undo: {visible} look different, worst by {worst:.0}");
         assert!(worst <= 2.0, "{visible} of {painted}, worst {worst}");
