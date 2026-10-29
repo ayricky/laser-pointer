@@ -1,3 +1,3 @@
-Glow and Neon have a soft halo now, where they used to show hard rings at the edge.
+Kept strokes take much less memory. They used to sit on one layer the size of every monitor together, which on a three-monitor desktop held over 100 MB for a single annotation. Now they take room only where you've drawn.
 
-Long Laser trails and snapped shapes draw two to three times faster, so the pointer stays closer to your hand on high refresh rate screens.
+The first Glow or Neon stroke after starting no longer stutters as it begins.
