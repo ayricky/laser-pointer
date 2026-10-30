@@ -277,6 +277,8 @@
     return best;
   }
 
+  // How much of a loop's width, the way the gap runs, a gap between its ends may take.
+  const MAX_BRIDGE = 0.7;
   function closedPart(path, tol) {
     const [, , major, minor] = principalAxis(path);
     const size = (Math.sqrt(major) + Math.sqrt(minor)) * 2, total = pathLength(path);
@@ -294,6 +296,14 @@
     // How near the end comes back is measured on the loop it closes: a C, U or V left open by a
     // whole side's worth stays as drawn.
     if (loop.length < 4 || s.gap > tol.close * pathLength(loop)) return null;
+    // Nor may the gap take up most of the loop's width the way it runs: then it is the whole side of
+    // an open U or V, short beside the rest of the loop though it may be.
+    if (s.gap > 0) {
+      const ux = (s.onFirst[0] - s.onLast[0]) / s.gap, uy = (s.onFirst[1] - s.onLast[1]) / s.gap;
+      let low = Infinity, high = -Infinity;
+      for (const p of loop) { const v = p[0] * ux + p[1] * uy; low = Math.min(low, v); high = Math.max(high, v); }
+      if (s.gap > MAX_BRIDGE * (high - low)) return null;
+    }
     // Left open just short of a corner, the last side and the first carried on meet where the corner
     // was meant; not where they are near parallel, as across a gap partway along a side.
     if (s.gap > 0) {

@@ -437,6 +437,9 @@ fn seam(path: &[P], lead: usize, from: usize) -> Option<Seam> {
     best
 }
 
+/// How much of a loop's width, the way the gap runs, a gap between its ends may take.
+const MAX_BRIDGE: f32 = 0.7;
+
 /// If the end comes back to the beginning (or past it), the loop between.
 fn closed_part(path: &[P], tolerance: &Tolerances) -> Option<Vec<P>> {
     let (_, _, major, minor) = principal_axis(path);
@@ -468,6 +471,15 @@ fn closed_part(path: &[P], tolerance: &Tolerances) -> Option<Vec<P>> {
     }
     if loop_.len() < 4 || seam.gap > tolerance.close * length(&loop_) {
         return None;
+    }
+    // Nor may the gap take up most of the loop's width the way it runs: then it is the whole side
+    // of an open U or V, short beside the rest of the loop though it may be.
+    if seam.gap > 0.0 {
+        let (ux, uy) = ((seam.on_first.0 - seam.on_last.0) / seam.gap, (seam.on_first.1 - seam.on_last.1) / seam.gap);
+        let (low, high) = loop_.iter().map(|p| p.0 * ux + p.1 * uy).fold((f32::MAX, f32::MIN), |(low, high), v| (low.min(v), high.max(v)));
+        if seam.gap > MAX_BRIDGE * (high - low) {
+            return None;
+        }
     }
     // Left open just short of a corner, the last side and the first carried on meet where the
     // corner was meant; a straight bridge would cut it off. Not where they are near parallel,
@@ -1892,6 +1904,32 @@ mod tests {
         }
         let outline = drift(random, outline, 3.0);
         mouse(random, &outline, 0.8)
+    }
+
+    /// A U or V left open by a whole side stays as drawn, however tall or wide and whichever way
+    /// round, though the side it leaves out is short beside the rest of it.
+    #[test]
+    fn open_us_and_vs_stay_open() {
+        let mut random = Random(0x0b5e_55ed);
+        for strength in [0.35, DEFAULT, 1.0] {
+            for (w, h) in [(60.0, 200.0), (80.0, 200.0), (120.0, 200.0), (200.0, 200.0), (200.0, 120.0), (300.0, 80.0)] {
+                let u = [(0.0, 0.0), (0.0, h), (w, h), (w, 0.0)];
+                let v = [(0.0, 0.0), (w / 2.0, h), (w, 0.0)];
+                for (name, corners) in [("U", &u[..]), ("V", &v[..])] {
+                    for quarter in 0..4 {
+                        let turned: Vec<P> = corners.iter().map(|&p| rotate(p, (0.0, 0.0), quarter as f32 * PI / 2.0)).collect();
+                        let back: Vec<P> = turned.iter().rev().copied().collect();
+                        for way in [turned, back] {
+                            for drawn in [polyline(&way, 1.0), hand_path(&mut random, &way, 0.1, 0.02)] {
+                                let shape = correct(&drawn, 1.0, strength).map(|c| c.shape);
+                                let closed = matches!(shape, Some(Shape::Rectangle | Shape::Triangle | Shape::Ellipse));
+                                assert!(!closed, "{w}x{h} {name} turned {quarter} at {strength} became {shape:?}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Closed shapes whose end stops short of the start by up to a tenth of the way round, or

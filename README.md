@@ -30,8 +30,9 @@ presentation.
   it. A snapped shape holds still for its fade time, then fades out. How sloppy a stroke may be and
   still snap is set per preset, from Strict to Lenient (the default); hold Ctrl as you let go to
   keep a stroke freehand.
-- **Shortcuts for everything** — rebind or remove any action, including single keys. Keys that
-  only make sense while drawing (Esc, Undo) are claimed only while the laser is on.
+- **Shortcuts** — rebind or remove any of them, including with single keys, and give any preset
+  its own. Keys that only make sense while drawing (Esc, Undo) are claimed only while the laser is
+  on.
 - **Cursor styles** — a soft glow, segment ring, classic cross, cross and dot, circle and dot,
   chevron, brackets or micro dot, in the laser colour. Each moves its own way: dots swell in and
   squeeze, crosshairs spin in and twist, rings pulse, the chevron tilts.

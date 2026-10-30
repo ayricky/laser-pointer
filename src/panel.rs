@@ -942,12 +942,13 @@ impl Panel {
             x += width + CHIP_GAP;
         };
         for (index, preset) in presets.iter().enumerate() {
-            let name = match &self.renaming {
-                Some(rename) if rename.index == index => rename.text.as_str(),
-                _ => preset.name.as_str(),
-            };
-            let width = self.measure(name, &self.fonts.body).max(24.0) + 46.0;
-            place(Widget::Chip(index), width.min(INNER));
+            // While a name is typed its chip grows to fit but never shrinks, so the chips don't
+            // reflow and carry the one being typed into out of sight.
+            let mut text = self.measure(&preset.name, &self.fonts.body);
+            if let Some(rename) = self.renaming.as_ref().filter(|rename| rename.index == index) {
+                text = text.max(self.measure(&rename.text, &self.fonts.body));
+            }
+            place(Widget::Chip(index), (text.max(24.0) + 46.0).min(INNER));
         }
         if presets.len() < MAX_PRESETS {
             place(Widget::NewPreset, CHIP_HEIGHT + 4.0);
@@ -1318,6 +1319,7 @@ impl Panel {
                     text: preset.name,
                     fresh: true,
                 });
+                self.reveal_renaming();
                 Action::Redraw
             }
             PresetChoice::Shortcut => {
@@ -1435,7 +1437,17 @@ impl Panel {
         if rename.text.chars().count() < MAX_NAME {
             rename.text.push(ch);
         }
+        self.reveal_renaming();
         Action::Redraw
+    }
+
+    /// Scrolls to the chip whose name is being typed, should typing have moved it out of view.
+    fn reveal_renaming(&mut self) {
+        let Some(index) = self.renaming.as_ref().map(|rename| rename.index) else { return };
+        let page = unsafe { self.page() };
+        if let Some(&(_, chip)) = page.chips.iter().find(|(widget, _)| *widget == Widget::Chip(index)) {
+            self.reveal(chip.top, chip.bottom);
+        }
     }
 
     pub fn key(&mut self, vk: u32) -> Action {
@@ -1455,6 +1467,7 @@ impl Panel {
                     rename.text.pop();
                 }
             }
+            self.reveal_renaming();
             return Action::Redraw;
         }
         if let Some(slot) = self.capturing {
@@ -2256,6 +2269,24 @@ mod tests {
         assert_eq!(panel.capturing, Some(Slot::Preset(1)));
         let area = panel.area_of(line).expect("the preset's line is in view");
         assert!(area.top >= VIEW_TOP && area.bottom <= HEIGHT - STRIP);
+    }
+
+    /// Typing a shorter name doesn't send its chip up a row and out of sight above the page.
+    #[test]
+    fn a_preset_being_renamed_stays_in_view() {
+        let canvas = canvas(96);
+        let mut panel = panel(&canvas, true, 96);
+        let mut list = settings::presets();
+        list[0].name = "W".repeat(18);
+        list[1].name = "W".repeat(24);
+        settings::set_presets(list);
+        panel.scroll(-120);
+        let before = panel.area_of(Widget::Chip(1)).expect("the chip shows");
+        panel.preset_choice(1, PresetChoice::Rename);
+        panel.char(u32::from('A'));
+        let area = panel.area_of(Widget::Chip(1)).expect("the chip being renamed shows");
+        assert_eq!(area.top, before.top);
+        assert!(area.top >= VIEW_TOP && area.bottom <= HEIGHT);
     }
 
     /// Dragging the thumb to the bottom shows the end of the page; a right-click on a preset asks
