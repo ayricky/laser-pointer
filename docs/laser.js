@@ -11,12 +11,11 @@
   const LAYERS = {
     solid: [[1, 1, 0]],
     glow: [[1, 1, 0], [0.38, 0.85, 0.6]],
-    neon: [[1, 1, 0], [0.45, 1, 0.85]],
   };
-  // The light around Glow and Neon: the stroke blurred by `spread` times its radius, `strength`
+  // The light around Glow: the stroke blurred by `spread` times its radius, `strength`
   // times as opaque, beneath it. A browser whose canvas can't blur gets wider copies instead.
-  const HALO = { glow: { strength: 0.85, spread: 2.0 }, neon: { strength: 1.0, spread: 2.2 } };
-  const BANDS = { glow: [[3.4, 0.10, 0], [2.1, 0.20, 0]], neon: [[3.8, 0.12, 0], [2.3, 0.26, 0]] };
+  const HALO = { glow: { strength: 0.85, spread: 2.0 } };
+  const BANDS = { glow: [[3.4, 0.10, 0], [2.1, 0.20, 0]] };
   const canBlur = typeof CanvasRenderingContext2D !== 'undefined' && 'filter' in CanvasRenderingContext2D.prototype;
   const easeOut4 = k => 1 - Math.pow(1 - k, 4);
   // A snapped shape glows brighter once as it settles, then holds for its fade time and fades
@@ -235,9 +234,9 @@
 
   // Every check loosens as the snap setting rises; see the app's Tolerances for what each one is.
   const tolerances = s => ({
-    line: lerp(0.03, 0.085, s), side: lerp(0.048, 0.19, s), ellipse: lerp(0.07, 0.22, s), angle: lerp(3, 12, s) * Math.PI / 180,
-    equal: lerp(0.07, 0.15, s), close: lerp(0.14, 0.3, s),
-    overrun: lerp(0.12, 0.3, s), beside: lerp(0.08, 0.14, s), outline: lerp(0.03, 0.05, s), doubling: lerp(3.4, 4.6, s) * Math.PI,
+    line: lerp(0.04, 0.085, s), side: lerp(0.055, 0.19, s), ellipse: lerp(0.07, 0.22, s), angle: lerp(3, 12, s) * Math.PI / 180,
+    equal: lerp(0.07, 0.15, s), close: lerp(0.09, 0.19, s),
+    overrun: lerp(0.18, 0.4, s), lead: lerp(0.12, 0.25, s), beside: lerp(0.08, 0.1, s), outline: lerp(0.03, 0.05, s), doubling: lerp(3.4, 4.6, s) * Math.PI,
     head: lerp(0.45, 0.6, s), hook: lerp(110, 100, s) * Math.PI / 180,
     wing: lerp(0.35, 0.25, s), barbs: lerp(0.18, 0.22, s),
   });
@@ -256,9 +255,13 @@
   }
 
   // Where the end of a stroke comes back to its beginning: the first place it crosses it, or else
-  // where the two come nearest. The beginning is the segments before `lead`, the end those from `from`.
+  // where the two come nearest, counting against each pair a quarter of the stroke it would leave
+  // out of the loop. The beginning is the segments before `lead`, the end those from `from`.
   function seam(path, lead, from) {
-    let best = null;
+    const walked = [0];
+    for (let i = 1; i < path.length; i++) walked.push(walked[i - 1] + d2(path[i - 1], path[i]));
+    const total = walked[path.length - 1];
+    let best = null, bestCost = Infinity;
     for (let last = from; last < path.length - 1; last++) {
       const c = path[last], d = path[last + 1];
       for (let first = 0; first < Math.min(lead, last - 2); first++) {
@@ -266,28 +269,65 @@
         if (x) return { first, last, onFirst: x, onLast: x, gap: 0 };
         for (const [onFirst, onLast] of [[nearestOn(c, a, b), c], [nearestOn(d, a, b), d], [a, nearestOn(a, c, d)], [b, nearestOn(b, c, d)]]) {
           const gap = d2(onFirst, onLast);
-          if (!best || gap < best.gap) best = { first, last, onFirst, onLast, gap };
+          const cost = gap + 0.25 * (walked[first] + d2(a, onFirst) + total - walked[last] - d2(c, onLast));
+          if (cost < bestCost) { best = { first, last, onFirst, onLast, gap }; bestCost = cost; }
         }
       }
     }
     return best;
   }
 
+  // How much of a loop's width, the way the gap runs, a gap between its ends may take.
+  const MAX_BRIDGE = 0.7;
+  // A gap longer than this share of its loop, met by both ends at more than this many degrees, is a
+  // side never drawn. Closer, an end landing beside the start meets it at any angle.
+  const SQUARE_GAP = 0.04, SQUARE_TURN = 70;
   function closedPart(path, tol) {
     const [, , major, minor] = principalAxis(path);
     const size = (Math.sqrt(major) + Math.sqrt(minor)) * 2, total = pathLength(path);
     // The loop may begin a little way in, where the end comes back to: the start can be a short
     // lead-in, as when the end lands on the first side rather than on the very first point.
     let lead = 1, walked = 0;
-    while (lead < path.length - 1 && walked + d2(path[lead - 1], path[lead]) <= tol.overrun * total) walked += d2(path[lead - 1], path[lead++]);
+    while (lead < path.length - 1 && walked + d2(path[lead - 1], path[lead]) <= tol.lead * total) walked += d2(path[lead - 1], path[lead++]);
     const s = seam(path, lead, Math.floor(path.length * 6 / 10));
-    if (!s || s.gap > tol.close * size) return null;
+    if (!s) return null;
     const before = path.slice(0, s.first + 1).concat([s.onFirst]), after = [s.onLast].concat(path.slice(s.last + 1));
     if (pathLength(after) > tol.overrun * total) return null;
     // Cut at the seam, the loop has no jog where its ends meet, which would read as a corner.
     const loop = [];
     for (const p of [s.onFirst, ...path.slice(s.first + 1, s.last + 1), s.onLast, s.onFirst]) if (!loop.length || d2(loop[loop.length - 1], p) > 1e-3) loop.push(p);
-    if (loop.length < 4) return null;
+    // How near the end comes back is measured on the loop it closes: a C, U or V left open by a
+    // whole side's worth stays as drawn.
+    if (loop.length < 4 || s.gap > tol.close * pathLength(loop)) return null;
+    // The gap's shape is judged with the loop stretched round along its axes, so a flattened loop's
+    // skew hides nothing: a flat C is as open as a round one.
+    const [mid, axis, loopMajor, loopMinor] = principalAxis(loop), ax = Math.cos(axis), ay = Math.sin(axis);
+    const along = Math.max(Math.sqrt(loopMajor), 1e-3), across = Math.max(Math.sqrt(loopMinor), 1e-3);
+    const round = p => { const dx = p[0] - mid[0], dy = p[1] - mid[1]; return [(dx * ax + dy * ay) / along, (dy * ax - dx * ay) / across]; };
+    // Nor may the gap take up most of the loop's width the way it runs: then it is the whole side of
+    // an open U or V, short beside the rest of the loop though it may be.
+    if (s.gap > 0) {
+      const from = round(s.onLast), to = round(s.onFirst), gap = d2(from, to);
+      const ux = (to[0] - from[0]) / Math.max(gap, 1e-6), uy = (to[1] - from[1]) / Math.max(gap, 1e-6);
+      let low = Infinity, high = -Infinity;
+      for (const q of loop) { const p = round(q), v = p[0] * ux + p[1] * uy; low = Math.min(low, v); high = Math.max(high, v); }
+      if (gap > MAX_BRIDGE * (high - low)) return null;
+    }
+    // Left open just short of a corner, the last side and the first carried on meet where the corner
+    // was meant; not where they are near parallel, as across a gap partway along a side.
+    if (s.gap > 0) {
+      const endFrom = path[Math.max(0, s.last - 3)], startTo = path[Math.min(path.length - 1, s.first + 4)];
+      const m = meeting(endFrom, s.onLast, s.onFirst, startTo);
+      const ahead = (from, to, of) => (to[0] - from[0]) * (of[0] - to[0]) + (to[1] - from[1]) * (of[1] - to[1]) > 0;
+      if (m && ahead(endFrom, s.onLast, m) && ahead(m, s.onFirst, startTo) && Math.max(d2(m, s.onLast), d2(m, s.onFirst)) <= s.gap
+        && turnAt(endFrom, m, startTo) >= 60 * Math.PI / 180) loop.splice(loop.length - 1, 0, m);
+      // Falling short of the start, a hand arrives heading along the gap. Ends that meet it square
+      // on are the arms of an open U, or a spiral's turn beside the next.
+      else if (s.gap > SQUARE_GAP * pathLength(loop)) {
+        const [a, b, e, f] = [endFrom, s.onLast, s.onFirst, startTo].map(round);
+        if (Math.min(turnAt(a, b, e), turnAt(b, e, f)) > SQUARE_TURN * Math.PI / 180) return null;
+      }
+    }
     // Beyond the seam the stroke stays on the loop, as an overshoot does, or stops soon, as where a
     // corner is crossed; a longer tail heads off somewhere else.
     const nearLoop = p => loop.some(q => d2(p, q) < tol.beside * size);
@@ -619,9 +659,9 @@
 
   // ---- The stage: an overlay over part of the page ------------------------------------------------
   const PRESETS = {
-    Laser: { color: '#ff2a2a', width: 4, opacity: 100, fade: 1000, smoothing: 2, style: 'glow', ink: false, snap: 35 },
-    Highlighter: { color: '#ffd400', width: 18, opacity: 40, fade: 3000, smoothing: 2, style: 'solid', ink: false, snap: 60 },
-    Pen: { color: '#1e90ff', width: 4, opacity: 100, fade: 1000, smoothing: 2, style: 'solid', ink: true, snap: 50 },
+    Laser: { color: '#ff2a2a', width: 4, opacity: 100, fade: 1200, smoothing: 4, style: 'glow', ink: false, snap: 70 },
+    Highlighter: { color: '#ffd400', width: 18, opacity: 40, fade: 3000, smoothing: 4, style: 'solid', ink: false, snap: 70 },
+    Pen: { color: '#1e90ff', width: 4, opacity: 100, fade: 1200, smoothing: 4, style: 'solid', ink: true, snap: 70 },
   };
   const SNAP_MS = 160, CLEAR_MS = 220, RIPPLE_MS = 400, RIPPLE_REACH = 60, TOAST_MS = 1400, TOAST_IN = 250, TOAST_OUT = 167;
   /** How far a snapping stroke has moved towards its shape, `ms` in: a spring that sets off at

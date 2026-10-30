@@ -7,26 +7,32 @@ presentation.
 
 [See it in action](https://ayricky.github.io/laser-pointer/): the site's demo runs the app's own stroke and shape code in the browser.
 
+[Get it from the Microsoft Store](https://apps.microsoft.com/detail/9MT6DPQK4631) (US$2.99, with a week's free trial), or build it from source below.
+
 ## Features
 
 - **Smooth laser trail** that tapers and fades over time, drawn as one anti-aliased
-  shape per stroke. Solid, Glow and Neon styles; any colour from the swatches or the built-in
+  shape per stroke. Solid or Glow; any colour from the swatches or the built-in
   picker; adjustable thickness, opacity and fade time.
 - **Keeps up with your hand.** The head of the stroke is drawn where the cursor is at the moment
   each frame starts, a few milliseconds ahead when you move fast. Each frame starts as late as is
   safe before Windows draws the screen, and on Windows 11 laptops the screen runs at its fastest
   refresh rate while you draw.
-- **Presets** — Laser, Highlighter and Pen to start with; create, rename, update and delete your
-  own (up to eight).
+- **Presets** — Laser, Highlighter and Pen to start with, side by side at the top of the panel;
+  add your own (up to eight), and right-click one to rename it, update it, give it a shortcut or
+  delete it.
 - **Keep strokes** — annotations stay on screen, even with the laser off and clicks passing
   through them, until you clear them. Undo and redo anything, clearing included.
 - **Straight lines** — hold Alt while drawing for a perfectly horizontal line, Shift+Alt for a
   vertical one.
 - **Shape snapping** — let go of a rough circle, box, triangle, line or arrow and it springs into
-  a clean one and glows once. A snapped shape holds still for its fade time, then fades out. How sloppy a stroke may be and still snap is set per preset, from Strict to
-  Lenient; hold Ctrl as you let go to keep a stroke freehand.
-- **Shortcuts for everything** — rebind or remove any action, including single keys. Keys that
-  only make sense while drawing (Esc, Undo) are claimed only while the laser is on.
+  a clean one and glows once. The end may stop a little short of where you started or run on past
+  it. A snapped shape holds still for its fade time, then fades out. How sloppy a stroke may be and
+  still snap is set per preset, from Strict to Lenient (the default); hold Ctrl as you let go to
+  keep a stroke freehand.
+- **Shortcuts** — rebind or remove any of them, including with single keys, and give any preset
+  its own. Keys that only make sense while drawing (Esc, Undo) are claimed only while the laser is
+  on.
 - **Cursor styles** — a soft glow, segment ring, classic cross, cross and dot, circle and dot,
   chevron, brackets or micro dot, in the laser colour. Each moves its own way: dots swell in and
   squeeze, crosshairs spin in and twist, rings pulse, the chevron tilts.
@@ -34,7 +40,8 @@ presentation.
   preset changes and size changes. Optionally, a ring closes in on the cursor as the laser turns
   on, so the audience can find it. Every animation follows Windows' Animation effects setting.
 - **Settings panel** in the Windows 11 style, following your light/dark theme and accent colour,
-  with a live preview. Left-click the tray icon to open it.
+  with a live preview. One page: presets and the pen at the top, then the cursor and shortcuts,
+  and the settings you set once under More. Left-click the tray icon to open it.
 - Light on resources: the overlay is hidden while there is nothing to show, only the parts of the
   screen that change are redrawn, kept strokes are drawn once, idle memory is handed back, and it
   uses no CPU while nothing moves. It follows each monitor's scaling, keeps your annotations when
@@ -50,8 +57,7 @@ presentation.
 | Redo | Ctrl+Y | while the laser is on |
 | Clear strokes | Alt+X | while strokes are on screen |
 | Keep strokes on or off | Alt+K | always |
-| Next / previous preset | Alt+] / Alt+[ | always |
-| Quit | Alt+Shift+L | always |
+| Next preset | Alt+] | always |
 
 While the laser is on: drag to draw, right-click to click through, middle and side buttons and
 both scroll wheels reach the app underneath, Ctrl+scroll changes thickness. While drawing, hold
@@ -101,7 +107,7 @@ workflow artifact to upload by hand.
 
 ## Support
 
-The Microsoft Store version (US$2.99) pays for the work. If you build it yourself and it helps,
+The [Microsoft Store version](https://apps.microsoft.com/detail/9MT6DPQK4631) (US$2.99) pays for the work. If you build it yourself and it helps,
 a tip on [Ko-fi](https://ko-fi.com/ayricky) is welcome.
 
 ## Licence

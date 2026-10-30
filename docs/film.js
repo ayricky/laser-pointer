@@ -5,7 +5,7 @@
   'use strict';
 
   const APPS = { present: '#d24726', teach: '#7719aa', demo: '#0f6cbd', code: '#23a9f2' };
-  const COLOURS = ['#ff2a2a', '#ff8a00', '#ffd400', '#2ecc40', '#1e90ff', '#d62aff'];
+  const COLOURS = ['#ff2a2a', '#ff8a00', '#ffd400', '#2ecc40', '#1e90ff', '#d62aff', '#ff4fa8'];
   const svgUri = svg => 'data:image/svg+xml,' + encodeURIComponent(svg);
   const TRAY = colour => `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path d="M2.5 13C5 13.6 7.4 11.6 7.6 9.4C7.9 6.6 4.6 6.4 4.4 8.6C4.2 11 9 11.4 12.2 4.6" fill="none" stroke="#888" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12.4" cy="4" r="2" fill="${colour}"/></svg>`;
   const WC = '<span class="wc">—&nbsp;&nbsp;▢&nbsp;&nbsp;✕</span>';
@@ -127,7 +127,7 @@
       present: () => { show('present'); look('Laser', { color: '#ff2a2a', style: 'glow', quiet: true }); stage.setCursor(cursorById('soft-glow')); caption('Point at it. It fades by itself.'); keys([]); },
       teach: () => { show('teach'); look('Pen'); stage.setCursor(cursorById('circle-dot')); caption('The Pen keeps what you write.'); keys([]); },
       demo: () => { show('demo'); look('Highlighter'); stage.setCursor(cursorById('segment-ring')); caption('Highlight exactly where to look.'); keys([]); },
-      code: () => { show('code'); look('Laser', { color: '#1e90ff', style: 'neon', quiet: true }); stage.setCursor(cursorById('brackets')); caption('Glow, neon or solid, in any colour.'); keys([]); },
+      code: () => { show('code'); look('Laser', { color: '#1e90ff', style: 'glow', quiet: true }); stage.setCursor(cursorById('brackets')); caption('Glow or solid, in any colour.'); keys([]); },
     };
     film.chapters = [
       { name: 'Presenting', blurb: 'Underline, circle, point. It fades by itself.', scene: 'present', steps: [
@@ -155,7 +155,7 @@
         act(() => caption('Then point them to the next step.'), 100),
         draw(() => K.arrow(m('d-save'), { from: 'right', length: 140 }), { wait: 1400 }),
       ] },
-      { name: 'Code review', blurb: 'Neon in any colour, and eight cursors.', scene: 'code', steps: [
+      { name: 'Code review', blurb: 'Glow in any colour, and eight cursors.', scene: 'code', steps: [
         act(opening.code, 1000),
         // The whole change, boxed: a box much wider than it is tall reads as a line, not a box.
         draw(() => { const top = K.box(m('c-hit')), wide = K.box(m('c-set')), end = K.box(m('c-return')); return K.rectAt(top.x - 12, top.y - 8, wide.x + wide.w + 14, end.y + end.h + 8); }),

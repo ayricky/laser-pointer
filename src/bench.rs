@@ -86,7 +86,7 @@ fn kept_pieces_look_like_the_whole_stroke() {
         D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_CPU_READ, D2D1_BITMAP_OPTIONS_TARGET, D2D1_MAP_OPTIONS_READ,
     };
     use crate::graphics::bitmap_properties;
-    use crate::settings::{STYLE_GLOW, STYLE_NEON};
+    use crate::settings::STYLE_GLOW;
     use crate::stroke::{self, Pieces, Scratch};
     unsafe {
         let size = 900u32;
@@ -121,7 +121,7 @@ fn kept_pieces_look_like_the_whole_stroke() {
         };
         let straight = |i: usize| (60.0 + i as f32 * 0.55, 100.0 + i as f32 * 0.5);
         type Path = fn(usize) -> (f32, f32);
-        let paths: [(u32, u32, Path); 4] = [(STYLE_GLOW, 2, spiral), (STYLE_NEON, 0, spiral), (0, 4, spiral), (STYLE_GLOW, 2, straight)];
+        let paths: [(u32, u32, Path); 4] = [(STYLE_GLOW, 2, spiral), (STYLE_GLOW, 0, spiral), (0, 4, spiral), (STYLE_GLOW, 2, straight)];
         for (style, smoothing, path) in paths {
             let mut look = settings::get().look;
             (look.ink, look.style, look.smoothing, look.width) = (true, style, smoothing, 6);
@@ -183,7 +183,7 @@ fn settled_shapes_drawn_once_look_like_plain_draw() {
         D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_CPU_READ, D2D1_BITMAP_OPTIONS_TARGET, D2D1_MAP_OPTIONS_READ,
     };
     use crate::graphics::bitmap_properties;
-    use crate::settings::{STYLE_GLOW, STYLE_NEON};
+    use crate::settings::STYLE_GLOW;
     use crate::stroke::{self, Pieces, Scratch, SHAPE_FADE_MS};
     unsafe {
         let size = 600u32;
@@ -208,7 +208,7 @@ fn settled_shapes_drawn_once_look_like_plain_draw() {
             out
         };
         let at = Instant::now();
-        for style in [0, STYLE_GLOW, STYLE_NEON] {
+        for style in [0, STYLE_GLOW] {
             let mut look = settings::get().look;
             (look.ink, look.style, look.smoothing, look.width) = (false, style, 0, 6);
             // A ring and a stroke through it, as an arrow's parts are.
@@ -516,7 +516,7 @@ fn baked_tiles_look_like_one_layer() {
         D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_CPU_READ, D2D1_BITMAP_OPTIONS_TARGET, D2D1_MAP_OPTIONS_READ,
     };
     use crate::graphics::bitmap_properties;
-    use crate::settings::{STYLE_GLOW, STYLE_NEON};
+    use crate::settings::STYLE_GLOW;
     use crate::stroke::{self, Pieces, Scratch};
     unsafe {
         // Tiles meet at 512 and 1024 both ways.
@@ -547,7 +547,7 @@ fn baked_tiles_look_like_one_layer() {
             .map(|(x, y)| Point { x, y, at: now })
             .collect();
         let mut strokes = vec![corner];
-        for (k, style) in [STYLE_GLOW, STYLE_NEON, 0].into_iter().enumerate() {
+        for (k, style) in [STYLE_GLOW, STYLE_GLOW, 0].into_iter().enumerate() {
             let mut look = settings::get().look;
             (look.ink, look.style, look.width) = (true, style, 8 + 4 * k as u32);
             let mut stroke = Stroke::new(Point { x: 0.0, y: 0.0, at: now }, look, 1.0);

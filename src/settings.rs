@@ -12,15 +12,14 @@ use windows::Win32::System::Registry::{
     RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW, HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_SZ,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    MOD_ALT, MOD_CONTROL, MOD_SHIFT, VK_ESCAPE, VK_OEM_4, VK_OEM_6,
+    MOD_ALT, MOD_CONTROL, VK_ESCAPE, VK_OEM_6,
 };
 
 use crate::cursors;
 
 pub const STYLE_SOLID: u32 = 0;
 pub const STYLE_GLOW: u32 = 1;
-pub const STYLE_NEON: u32 = 2;
-pub const STYLE_NAMES: [&str; 3] = ["Solid", "Glow", "Neon"];
+pub const STYLE_NAMES: [&str; 2] = ["Solid", "Glow"];
 
 pub const MAX_PRESETS: usize = 8;
 pub const MAX_NAME: usize = 24;
@@ -83,7 +82,7 @@ impl Look {
             width,
             opacity,
             fade_ms,
-            smoothing: 2,
+            smoothing: 4,
             style,
             ink,
             snap,
@@ -96,12 +95,13 @@ impl Look {
         self.opacity = self.opacity.clamp(10, 100);
         self.fade_ms = self.fade_ms.clamp(200, 5000);
         self.smoothing = self.smoothing.min(8);
-        self.style = self.style.min(STYLE_NEON);
+        // Neon, a third style older versions had, draws as Glow now.
+        self.style = self.style.min(STYLE_GLOW);
         self.snap = self.snap.min(100);
         self
     }
 
-    /// One line describing it, for the presets list.
+    /// One line describing it, for a preset's tooltip.
     pub fn summary(&self) -> String {
         let mut text = format!("{} px \u{b7} {}", self.width, STYLE_NAMES[self.style as usize]);
         if self.opacity < 100 {
@@ -116,7 +116,7 @@ impl Look {
     }
 }
 
-const LASER: Look = Look::new(0xff2a2a, 4, 100, 1000, STYLE_GLOW, false, 35);
+const LASER: Look = Look::new(0xff2a2a, 4, 100, 1200, STYLE_GLOW, false, 70);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Command {
@@ -127,11 +127,9 @@ pub enum Command {
     Clear,
     ToggleInk,
     NextPreset,
-    PreviousPreset,
-    Quit,
 }
 
-pub const COMMANDS: [Command; 9] = [
+pub const COMMANDS: [Command; 7] = [
     Command::Toggle,
     Command::Off,
     Command::Undo,
@@ -139,8 +137,6 @@ pub const COMMANDS: [Command; 9] = [
     Command::Clear,
     Command::ToggleInk,
     Command::NextPreset,
-    Command::PreviousPreset,
-    Command::Quit,
 ];
 
 impl Command {
@@ -157,8 +153,6 @@ impl Command {
             Self::Clear => "Clear strokes",
             Self::ToggleInk => "Keep strokes on or off",
             Self::NextPreset => "Next preset",
-            Self::PreviousPreset => "Previous preset",
-            Self::Quit => "Quit",
         }
     }
 
@@ -171,13 +165,11 @@ impl Command {
             Self::Clear => "key_clear",
             Self::ToggleInk => "key_ink",
             Self::NextPreset => "key_next_preset",
-            Self::PreviousPreset => "key_previous_preset",
-            Self::Quit => "key_quit",
         }
     }
 
     fn default_binding(self) -> Binding {
-        let (alt, ctrl, shift) = (MOD_ALT.0, MOD_CONTROL.0, MOD_SHIFT.0);
+        let (alt, ctrl) = (MOD_ALT.0, MOD_CONTROL.0);
         match self {
             Self::Toggle => Binding::new(alt, u32::from(b'L')),
             Self::Off => Binding::new(0, u32::from(VK_ESCAPE.0)),
@@ -186,8 +178,6 @@ impl Command {
             Self::Clear => Binding::new(alt, u32::from(b'X')),
             Self::ToggleInk => Binding::new(alt, u32::from(b'K')),
             Self::NextPreset => Binding::new(alt, u32::from(VK_OEM_6.0)),
-            Self::PreviousPreset => Binding::new(alt, u32::from(VK_OEM_4.0)),
-            Self::Quit => Binding::new(alt | shift, u32::from(b'L')),
         }
     }
 
@@ -256,11 +246,11 @@ fn default_presets() -> Vec<Preset> {
         preset("Laser", LASER),
         preset(
             "Highlighter",
-            Look::new(0xffd400, 18, 40, 3000, STYLE_SOLID, false, 60),
+            Look::new(0xffd400, 18, 40, 3000, STYLE_SOLID, false, 70),
         ),
         preset(
             "Pen",
-            Look::new(0x1e90ff, 4, 100, 1000, STYLE_SOLID, true, 50),
+            Look::new(0x1e90ff, 4, 100, 1200, STYLE_SOLID, true, 70),
         ),
     ]
 }
@@ -736,6 +726,23 @@ key_toggle = 0,0
         assert_eq!(parse_preset("Only|#ff0000|4"), None);
         assert_eq!(parse_preset(" |#ff0000|4|100|1000|500|2|1|0|0|0"), None);
         assert_eq!(parse_preset("Pen|red|4|100|1000|500|2|1|0|0|0"), None);
+    }
+
+    /// Neon draws as Glow now, and the Previous preset and Quit shortcuts older versions saved
+    /// are dropped without moving any other shortcut.
+    #[test]
+    fn neon_and_the_retired_shortcuts_load_without_harm() {
+        let old = "style=2\nkey_previous_preset=1,219\nkey_quit=5,76\nkey_next_preset=1,221\n\
+                   preset=Neon|#00e5ff|4|100|1000|0|2|2|0|0|0|70\n";
+        let (mut settings, list) = parse(old);
+        settings.look = settings.look.clamped();
+        assert_eq!(settings.look.style, STYLE_GLOW);
+        let mut expected = Settings::default().keys;
+        expected[Command::NextPreset.index()] = Binding::new(1, 221);
+        assert_eq!(settings.keys, expected);
+        set_presets(list.unwrap());
+        assert_eq!(presets()[0].look.style, STYLE_GLOW);
+        assert!(!serialize(&settings, &[]).contains("key_quit"));
     }
 
     #[test]

@@ -239,10 +239,15 @@ struct Tolerances {
     angle: f32,
     /// How close two sides or radii must be to be made equal.
     equal: f32,
-    /// How near the end must come back to the start to count as closed, relative to size.
+    /// How near the end must come back to the start to count as closed, of the loop's length
+    /// once closed. A C, a U or a V left open by a whole side's worth stays as drawn.
     close: f32,
-    /// How far a loop may run on past its start, or begin after a lead-in, of the stroke's length.
+    /// How far a loop may run on past its start, of the stroke's length.
     overrun: f32,
+    /// How far into the stroke the loop may begin, after a lead-in, of the stroke's length. Kept
+    /// short of `overrun`: the end is looked for from 60% of the way, and a lead-in reaching
+    /// towards that could find the end beside the middle of the loop rather than its start.
+    lead: f32,
     /// How near the loop a stub beyond it must keep, relative to size, unless it is short.
     beside: f32,
     /// The outline a loop's turning is counted on, relative to size: coarser ignores more tremor.
@@ -262,14 +267,15 @@ struct Tolerances {
 impl Tolerances {
     fn new(strength: f32) -> Self {
         Self {
-            line: lerp(0.03, 0.085, strength),
-            side: lerp(0.048, 0.19, strength),
+            line: lerp(0.04, 0.085, strength),
+            side: lerp(0.055, 0.19, strength),
             ellipse: lerp(0.07, 0.22, strength),
             angle: lerp(3.0, 12.0, strength).to_radians(),
             equal: lerp(0.07, 0.15, strength),
-            close: lerp(0.14, 0.3, strength),
-            overrun: lerp(0.12, 0.3, strength),
-            beside: lerp(0.08, 0.14, strength),
+            close: lerp(0.09, 0.19, strength),
+            overrun: lerp(0.18, 0.4, strength),
+            lead: lerp(0.12, 0.25, strength),
+            beside: lerp(0.08, 0.1, strength),
             outline: lerp(0.03, 0.05, strength),
             doubling: lerp(3.4, 4.6, strength) * PI,
             head: lerp(0.45, 0.6, strength),
@@ -399,10 +405,17 @@ struct Seam {
     gap: f32,
 }
 
-/// The first place the end crosses the beginning, or else where the two come nearest. The
+/// The first place the end crosses the beginning, or else where the two come nearest, counting
+/// against each pair a quarter of the stroke it would leave out of the loop: a long thin box
+/// left open has a side partway in that comes nearer the end than its start does. The
 /// beginning is the segments before `lead`, the end those from `from` on.
 fn seam(path: &[P], lead: usize, from: usize) -> Option<Seam> {
-    let mut best: Option<Seam> = None;
+    let mut walked = vec![0.0; path.len()];
+    for i in 1..path.len() {
+        walked[i] = walked[i - 1] + distance(path[i - 1], path[i]);
+    }
+    let total = walked[path.len() - 1];
+    let (mut best, mut best_cost): (Option<Seam>, f32) = (None, f32::MAX);
     for last in from..path.len() - 1 {
         let (c, d) = (path[last], path[last + 1]);
         for first in 0..lead.min(last.saturating_sub(2)) {
@@ -413,14 +426,23 @@ fn seam(path: &[P], lead: usize, from: usize) -> Option<Seam> {
             let pairs = [(nearest_on(c, a, b), c), (nearest_on(d, a, b), d), (a, nearest_on(a, c, d)), (b, nearest_on(b, c, d))];
             for (on_first, on_last) in pairs {
                 let gap = distance(on_first, on_last);
-                if best.as_ref().is_none_or(|best| gap < best.gap) {
-                    best = Some(Seam { first, last, on_first, on_last, gap });
+                let left_out = walked[first] + distance(a, on_first) + total - walked[last] - distance(c, on_last);
+                let cost = gap + 0.25 * left_out;
+                if cost < best_cost {
+                    (best, best_cost) = (Some(Seam { first, last, on_first, on_last, gap }), cost);
                 }
             }
         }
     }
     best
 }
+
+/// How much of a loop's width, the way the gap runs, a gap between its ends may take.
+const MAX_BRIDGE: f32 = 0.7;
+/// A gap longer than this share of its loop, met by both ends at more than this many degrees, is
+/// a side never drawn. Closer, an end landing beside the start meets it at any angle.
+const SQUARE_GAP: f32 = 0.04;
+const SQUARE_TURN: f32 = 70.0;
 
 /// If the end comes back to the beginning (or past it), the loop between.
 fn closed_part(path: &[P], tolerance: &Tolerances) -> Option<Vec<P>> {
@@ -430,15 +452,12 @@ fn closed_part(path: &[P], tolerance: &Tolerances) -> Option<Vec<P>> {
     // The loop may begin a little way in, where the end comes back to: the start can be a short
     // lead-in, as when the end lands on the first side rather than on the very first point.
     let (mut lead, mut walked) = (1, 0.0);
-    while lead < path.len() - 1 && walked + distance(path[lead - 1], path[lead]) <= tolerance.overrun * total {
+    while lead < path.len() - 1 && walked + distance(path[lead - 1], path[lead]) <= tolerance.lead * total {
         walked += distance(path[lead - 1], path[lead]);
         lead += 1;
     }
     // People overshoot when circling something: the end is looked for over the last part.
     let seam = seam(path, lead, path.len() * 6 / 10)?;
-    if seam.gap > tolerance.close * size {
-        return None;
-    }
     let before: Vec<P> = path[..=seam.first].iter().copied().chain([seam.on_first]).collect();
     let after: Vec<P> = [seam.on_last].into_iter().chain(path[seam.last + 1..].iter().copied()).collect();
     // Overshooting the start a little is how people circle things; a real tail beyond it is
@@ -454,8 +473,55 @@ fn closed_part(path: &[P], tolerance: &Tolerances) -> Option<Vec<P>> {
             loop_.push(p);
         }
     }
-    if loop_.len() < 4 {
+    if loop_.len() < 4 || seam.gap > tolerance.close * length(&loop_) {
         return None;
+    }
+    // The gap's shape is judged with the loop stretched round along its axes, so a flattened
+    // loop's skew hides nothing: a flat C is as open as a round one.
+    let round = {
+        let (centre, angle, major, minor) = principal_axis(&loop_);
+        let (ux, uy) = (angle.cos(), angle.sin());
+        let (along, across) = (major.sqrt().max(1e-3), minor.sqrt().max(1e-3));
+        move |p: P| {
+            let (dx, dy) = (p.0 - centre.0, p.1 - centre.1);
+            ((dx * ux + dy * uy) / along, (dy * ux - dx * uy) / across)
+        }
+    };
+    // Nor may the gap take up most of the loop's width the way it runs: then it is the whole side
+    // of an open U or V, short beside the rest of the loop though it may be.
+    if seam.gap > 0.0 {
+        let (from, to) = (round(seam.on_last), round(seam.on_first));
+        let gap = distance(from, to);
+        let (ux, uy) = ((to.0 - from.0) / gap.max(1e-6), (to.1 - from.1) / gap.max(1e-6));
+        let (low, high) = loop_.iter().map(|&p| round(p)).map(|p| p.0 * ux + p.1 * uy).fold((f32::MAX, f32::MIN), |(low, high), v| (low.min(v), high.max(v)));
+        if gap > MAX_BRIDGE * (high - low) {
+            return None;
+        }
+    }
+    // Left open just short of a corner, the last side and the first carried on meet where the
+    // corner was meant; a straight bridge would cut it off. Not where they are near parallel,
+    // as across a gap partway along a side or round a circle.
+    if seam.gap > 0.0 {
+        let (end_from, start_to) = (path[seam.last.saturating_sub(3)], path[(seam.first + 4).min(path.len() - 1)]);
+        let corner = meeting(end_from, seam.on_last, seam.on_first, start_to).filter(|&m| {
+            let ahead = |from: P, to: P, of: P| (to.0 - from.0) * (of.0 - to.0) + (to.1 - from.1) * (of.1 - to.1) > 0.0;
+            ahead(end_from, seam.on_last, m)
+                && ahead(m, seam.on_first, start_to)
+                && distance(m, seam.on_last).max(distance(m, seam.on_first)) <= seam.gap
+                && turn_at(end_from, m, start_to) >= 60f32.to_radians()
+        });
+        if let Some(corner) = corner {
+            loop_.insert(loop_.len() - 1, corner);
+        } else if seam.gap > SQUARE_GAP * length(&loop_) {
+            // Falling short of the start, a hand arrives heading along the gap. Ends that meet it
+            // square on are the arms of an open U, or a spiral's turn beside the next.
+            let (end_from, on_last, on_first, start_to) = (round(end_from), round(seam.on_last), round(seam.on_first), round(start_to));
+            let arriving = turn_at(end_from, on_last, on_first);
+            let leaving = turn_at(on_last, on_first, start_to);
+            if arriving.min(leaving) > SQUARE_TURN.to_radians() {
+                return None;
+            }
+        }
     }
     // Beyond the seam the stroke must stay on the loop, as an overshoot retracing it does, or stop
     // soon, as where a corner is crossed; a longer tail heads off somewhere else.
@@ -871,10 +937,10 @@ fn rectangle(corners: &[P], loop_: &[P], tolerance: &Tolerances, scale: f32) -> 
 mod tests {
     use super::*;
 
-    /// A tiny deterministic generator, so the tests need no crates.
-    /// The Laser preset's snap (35 of 100).
-    const LASER_DEFAULT: f32 = 0.35;
+    /// The default presets' snap (70 of 100).
+    const DEFAULT: f32 = 0.7;
 
+    /// A tiny deterministic generator, so the tests need no crates.
     struct Random(u64);
 
     impl Random {
@@ -1020,14 +1086,14 @@ mod tests {
     #[test]
     fn strokes_that_slip_between_the_samples_stay_freehand() {
         let fine_zigzag: Vec<P> = (0..=190).map(|i| (100.0 + 400.0 * i as f32 / 190.0, 100.0 + 60.0 * (i % 2) as f32)).collect();
-        assert_eq!(correct(&fine_zigzag, 1.0, LASER_DEFAULT).map(|c| c.shape), None);
+        assert_eq!(correct(&fine_zigzag, 1.0, DEFAULT).map(|c| c.shape), None);
         let on_the_shaft = [(0.0, 0.0), (300.0, 0.0), (264.0, 48.0), (300.0, 0.0), (245.0, 0.0)];
         let mirrored = on_the_shaft.map(|(x, y)| (x, -y));
         for outline in [on_the_shaft, mirrored] {
-            assert_ne!(correct(&polyline(&outline, 1.0), 1.0, LASER_DEFAULT).map(|c| c.shape), Some(Shape::Arrow));
+            assert_ne!(correct(&polyline(&outline, 1.0), 1.0, DEFAULT).map(|c| c.shape), Some(Shape::Arrow));
         }
         for bad in [f32::NAN, f32::INFINITY] {
-            assert!(correct(&[(0.0, 0.0), (100.0, 0.0), (bad, 0.0), (200.0, 0.0)], 1.0, LASER_DEFAULT).is_none());
+            assert!(correct(&[(0.0, 0.0), (100.0, 0.0), (bad, 0.0), (200.0, 0.0)], 1.0, DEFAULT).is_none());
         }
     }
 
@@ -1120,8 +1186,8 @@ mod tests {
     }
 
     #[test]
-    fn a_trembling_hand_still_snaps_at_the_laser_default() {
-        let strength = LASER_DEFAULT;
+    fn a_trembling_hand_still_snaps_at_the_default() {
+        let strength = DEFAULT;
         let corners = |random: &mut Random, corners: &[P]| {
             let mut ring: Vec<P> = corners.iter().map(|&(x, y)| (x + random.signed() * 6.0, y + random.signed() * 6.0)).collect();
             ring.push((ring[0].0 + random.signed() * 8.0, ring[0].1 + random.signed() * 8.0));
@@ -1158,7 +1224,7 @@ mod tests {
     /// or just short of it; and starting a little before the first corner.
     #[test]
     fn closes_where_the_end_meets_the_beginning() {
-        let strength = LASER_DEFAULT;
+        let strength = DEFAULT;
         let closings: [(&str, P, P); 4] = [
             // Lead-in (before the first corner), end (relative to the first corner).
             ("ends on the first side", (-12.0, -12.0), (0.0, 0.0)),
@@ -1202,7 +1268,7 @@ mod tests {
     fn an_arrow_whose_head_passes_the_tip_further_out_is_still_an_arrow() {
         // Out to the tip, back along one wing, and past the tip on the way to the other.
         let outline = polyline(&[(100.0, 300.0), (400.0, 300.0), (370.0, 280.0), (406.0, 302.0), (372.0, 322.0)], 1.0);
-        let hit = rate(30, |r| mouse(r, &outline, 0.8), LASER_DEFAULT, Shape::Arrow);
+        let hit = rate(30, |r| mouse(r, &outline, 0.8), DEFAULT, Shape::Arrow);
         assert!(hit >= 0.9, "only {:.0}% recognised", hit * 100.0);
     }
 
@@ -1263,7 +1329,7 @@ mod tests {
             }),
         ];
         for (shape, make) in cases {
-            let rates = [0.1, LASER_DEFAULT, 0.7, 1.0].map(|strength| rate(40, make, strength, shape));
+            let rates = [0.1, 0.35, DEFAULT, 1.0].map(|strength| rate(40, make, strength, shape));
             assert!(rates.windows(2).all(|pair| pair[1] >= pair[0]), "{shape:?} {rates:?}");
             assert!(rates[3] >= 0.85 && rates[3] - rates[0] >= 0.25, "{shape:?} {rates:?}");
         }
@@ -1356,7 +1422,7 @@ mod tests {
             let back: Vec<P> = ring.iter().rev().copied().collect();
             [polyline(&ring, 1.0), polyline(&back, 1.0)]
         };
-        for strength in [LASER_DEFAULT, 0.6, 1.0] {
+        for strength in [0.35, DEFAULT, 1.0] {
             for height in [10.0, 20.0, 40.0, 80.0] {
                 for thin in both_ways(&[(100.0, 100.0), (500.0, 100.0), (500.0, 100.0 + height), (100.0, 100.0 + height)]) {
                     let shape = correct(&thin, 1.0, strength).map(|c| c.shape);
@@ -1416,7 +1482,7 @@ mod tests {
         let start = outline.iter().position(|p| p.0 > 330.0).unwrap_or(0);
         outline.rotate_left(start);
         outline.push(outline[0]);
-        for strength in [LASER_DEFAULT, 0.6, 1.0] {
+        for strength in [0.35, DEFAULT, 1.0] {
             assert_eq!(correct(&outline, 1.0, strength).map(|c| c.shape), Some(Shape::Rectangle), "at {strength}");
         }
     }
@@ -1781,18 +1847,18 @@ mod tests {
         (hits, others)
     }
 
-    /// Mouse-drawn shapes, rounded corners and all, snap to what they are at the Laser's setting
-    /// and the most forgiving one, and never to something else.
+    /// Mouse-drawn shapes, rounded corners and all, snap to what they are at the old Laser
+    /// setting, the default and the most forgiving one, and never to something else.
     #[test]
     fn shapes_drawn_with_a_mouse_snap_to_what_they_are() {
         for (name, make, shape) in drawn_kinds() {
-            for strength in [LASER_DEFAULT, 1.0] {
+            for strength in [0.35, DEFAULT, 1.0] {
                 let (hits, others) = tally(60, &make, strength, shape);
                 let wrong: usize = others.iter().filter(|(k, _)| *k != "freehand").map(|(_, n)| n).sum();
                 assert!(hits >= 52 && wrong <= 6, "{name} at {strength}: {hits} of 60, else {others:?}");
             }
         }
-        for strength in [0.3, LASER_DEFAULT, 0.6, 1.0] {
+        for strength in [0.3, 0.6, DEFAULT, 1.0] {
             let mut random = Random(77);
             for _ in 0..5 {
                 for (name, points) in not_shapes(&mut random) {
@@ -1809,11 +1875,215 @@ mod tests {
     fn mouse_drawn_rates() {
         for (name, make, shape) in drawn_kinds() {
             let mut line = format!("{name:24}");
-            for strength in [LASER_DEFAULT, 0.6, 1.0] {
+            for strength in [0.35, DEFAULT, 1.0] {
                 let (hits, others) = tally(200, &make, strength, shape);
                 line += &format!(" | {strength:.2}: {:3}% {others:?}", hits / 2);
             }
             println!("{line}");
+        }
+    }
+
+
+    /// A closed shape drawn from a random point on it round to `end` of its perimeter short of
+    /// that point (negative) or past it (positive), its last quarter drifting `drift_out` of its
+    /// size outwards (or inwards, negative), as a hand that doesn't quite land where it began.
+    fn closing(random: &mut Random, kind: Shape, end: f32, drift_out: f32) -> Vec<P> {
+        let c = (300.0, 300.0);
+        let ring: Vec<P> = match kind {
+            Shape::Ellipse => {
+                let (a, round) = (80.0 + random.next() * 160.0, random.next() < 0.5);
+                let b = if round { a } else { a * (0.45 + random.next() * 0.3) };
+                (0..=240).map(|i| {
+                    let t = TAU * i as f32 / 240.0;
+                    (c.0 + a * t.cos(), c.1 + b * t.sin())
+                }).collect()
+            }
+            Shape::Rectangle => {
+                let (w, h) = (150.0 + random.next() * 300.0, 90.0 + random.next() * 200.0);
+                polyline(&[(c.0 - w / 2.0, c.1 - h / 2.0), (c.0 + w / 2.0, c.1 - h / 2.0), (c.0 + w / 2.0, c.1 + h / 2.0), (c.0 - w / 2.0, c.1 + h / 2.0), (c.0 - w / 2.0, c.1 - h / 2.0)], 1.0)
+            }
+            _ => {
+                let s = 150.0 + random.next() * 250.0;
+                polyline(&[(c.0, c.1 - s * 0.45), (c.0 + s / 2.0, c.1 + s * 0.4), (c.0 - s / 2.0, c.1 + s * 0.4), (c.0, c.1 - s * 0.45)], 1.0)
+            }
+        };
+        let mut ring = ring;
+        ring.pop();
+        let n = ring.len();
+        let first = (random.next() * n as f32) as usize % n;
+        let reverse = random.next() < 0.5;
+        let count = ((1.0 + end) * n as f32).round() as usize;
+        let mut outline: Vec<P> = (0..=count).map(|k| ring[if reverse { (first + n * 4 - k) % n } else { (first + k) % n }]).collect();
+        let size = outline.iter().map(|&p| distance(p, c)).fold(0.0, f32::max);
+        let total = outline.len();
+        for (k, p) in outline.iter_mut().enumerate() {
+            let ramp = ((k as f32 / total as f32 - 0.75) / 0.25).max(0.0);
+            let (dx, dy) = (p.0 - c.0, p.1 - c.1);
+            let r = dx.hypot(dy).max(1e-3);
+            let push = drift_out * size * ramp;
+            *p = (p.0 + dx / r * push, p.1 + dy / r * push);
+        }
+        if kind != Shape::Ellipse {
+            // Corners rounded off as a hand turns them.
+            let corners = simplify(&outline, 2.0);
+            outline = hand_path(random, &corners, 0.1, 0.02);
+        }
+        let outline = drift(random, outline, 3.0);
+        mouse(random, &outline, 0.8)
+    }
+
+    /// A spiral that opens out or closes in steadily stays as drawn, though one turn of it cut
+    /// from the middle would pass for a loop: round or square, from just over one turn to two,
+    /// either way round. Its turns a fifth of its size or more apart, that is: closer
+    /// than that it is a hand circling something twice, and snaps as a circle would.
+    #[test]
+    fn steady_spirals_stay_open() {
+        let mut random = Random(0x5e1f_5a1d);
+        let mut spirals = Vec::new();
+        // Flattened to half as tall, or square, starting anywhere round, just over one turn.
+        for phase in [0.0f32, 0.4, 0.6, 1.2, 2.5, 4.0] {
+            for turns in [1.01f32, 1.25] {
+                for square in [false, true] {
+                    let spiral: Vec<P> = (0..=480)
+                        .map(|i| {
+                            let k = i as f32 / 480.0;
+                            let (t, r) = (phase + TAU * turns * k, 60.0 + 100.0 * k);
+                            if square {
+                                let r = r / t.cos().abs().max(t.sin().abs());
+                                (300.0 + r * t.cos(), 300.0 + r * t.sin())
+                            } else {
+                                (300.0 + r * t.cos(), 300.0 + 0.5 * r * t.sin())
+                            }
+                        })
+                        .collect();
+                    // A square one turn round that starts just short of a corner stops beside it
+                    // as a triangle or box stopped at its corner does, heading round it, the gap
+                    // running on along the start's side. Nothing at the gap tells them apart.
+                    if square && turns < 1.1 && (0.3..0.7).contains(&phase) {
+                        continue;
+                    }
+                    let kind = if square { "square" } else { "flat" };
+                    spirals.push((format!("{kind} 60->160 over {turns} from {phase}"), spiral));
+                }
+            }
+        }
+        for (from, to) in [(100.0, 180.0), (60.0, 160.0), (60.0, 140.0), (180.0, 100.0)] {
+            for turns in [1.1f32, 1.25, 1.5, 1.75, 2.0] {
+                for square in [false, true] {
+                    let count = (turns * 240.0) as usize;
+                    let spiral: Vec<P> = (0..=count)
+                        .map(|i| {
+                            let k = i as f32 / count as f32;
+                            let (t, r) = (TAU * turns * k, from + (to - from) * k);
+                            // A square's outline is the circle's pushed out to its corners.
+                            let r = if square { r / t.cos().abs().max(t.sin().abs()) } else { r };
+                            (300.0 + r * t.cos(), 300.0 + r * t.sin())
+                        })
+                        .collect();
+                    let back: Vec<P> = spiral.iter().map(|p| (600.0 - p.0, p.1)).collect();
+                    spirals.push((format!("{from}->{to} over {turns}, square {square}"), spiral));
+                    spirals.push((format!("{from}->{to} over {turns}, square {square}, mirrored"), back));
+                }
+            }
+        }
+        let mut closed = Vec::new();
+        for strength in [0.35, DEFAULT, 1.0] {
+            for (name, spiral) in &spirals {
+                for drawn in [spiral.clone(), drift(&mut random, spiral.clone(), 2.0)] {
+                    let shape = correct(&drawn, 1.0, strength).map(|c| c.shape);
+                    if matches!(shape, Some(Shape::Rectangle | Shape::Triangle | Shape::Ellipse)) {
+                        closed.push(format!("{name} at {strength}: {shape:?}"));
+                    }
+                }
+            }
+        }
+        assert!(closed.is_empty(), "spirals that closed:
+{}", closed.join("
+"));
+    }
+
+    /// An ellipse left open by more than a quarter of the way round stays as drawn, however flat
+    /// and wherever its gap is.
+    #[test]
+    fn open_cs_stay_open() {
+        for strength in [0.35, DEFAULT, 1.0] {
+            for (a, b) in [(200.0, 60.0), (200.0, 100.0), (150.0, 150.0)] {
+                for start in [0.0f32, 1.0, 2.2, 3.4, 4.2, 5.3] {
+                    let c: Vec<P> = (0..=480)
+                        .map(|i| {
+                            let t = start + TAU * 0.69 * i as f32 / 480.0;
+                            (300.0 + a * t.cos(), 300.0 + b * t.sin())
+                        })
+                        .collect();
+                    let shape = correct(&c, 1.0, strength).map(|c| c.shape);
+                    assert_ne!(shape, Some(Shape::Ellipse), "{a}x{b} C from {start} at {strength}");
+                }
+            }
+        }
+    }
+
+    /// A U or V left open by a whole side stays as drawn, however tall or wide and whichever way
+    /// round, though the side it leaves out is short beside the rest of it, or than its base.
+    #[test]
+    fn open_us_and_vs_stay_open() {
+        let mut random = Random(0x0b5e_55ed);
+        for strength in [0.35, DEFAULT, 1.0] {
+            for (w, h) in [(60.0, 200.0), (80.0, 200.0), (120.0, 200.0), (200.0, 200.0), (200.0, 120.0), (300.0, 80.0)] {
+                let u = [(0.0, 0.0), (0.0, h), (w, h), (w, 0.0)];
+                let v = [(0.0, 0.0), (w / 2.0, h), (w, 0.0)];
+                // Its sides sloping in a little, so the side left out is shorter than the base.
+                let tapered = [(0.2 * w, 0.0), (0.0, h), (w, h), (0.8 * w, 0.0)];
+                for (name, corners) in [("U", &u[..]), ("V", &v[..]), ("tapered U", &tapered[..])] {
+                    for quarter in 0..4 {
+                        let turned: Vec<P> = corners.iter().map(|&p| rotate(p, (0.0, 0.0), quarter as f32 * PI / 2.0)).collect();
+                        let back: Vec<P> = turned.iter().rev().copied().collect();
+                        for way in [turned, back] {
+                            for drawn in [polyline(&way, 1.0), hand_path(&mut random, &way, 0.1, 0.02)] {
+                                let shape = correct(&drawn, 1.0, strength).map(|c| c.shape);
+                                let closed = matches!(shape, Some(Shape::Rectangle | Shape::Triangle | Shape::Ellipse));
+                                assert!(!closed, "{w}x{h} {name} turned {quarter} at {strength} became {shape:?}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Closed shapes whose end stops short of the start by up to a tenth of the way round, or
+    /// runs on past it by up to two fifths, drifting in or out as it goes, close at the default
+    /// strength; at the old Laser one, short by a sixteenth or past by a fifth.
+    #[test]
+    fn ends_that_fall_short_or_run_past_still_close() {
+        for (strength, ends) in [(DEFAULT, &[-0.1, -0.06, -0.03, 0.0, 0.1, 0.2, 0.3, 0.4][..]), (0.35, &[-0.06, -0.03, 0.0, 0.1, 0.2][..])] {
+            for kind in [Shape::Ellipse, Shape::Rectangle, Shape::Triangle] {
+                for drift_out in [0.0, 0.1, -0.1] {
+                    for &end in ends {
+                        let mut random = Random(0x51_7cc1_b727_220a);
+                        let hits = (0..40).filter(|_| correct(&closing(&mut random, kind, end, drift_out), 1.0, strength).is_some_and(|c| c.shape == kind)).count();
+                        assert!(hits >= 34, "{kind:?} ending {end:+} round, drifting {drift_out:+}, at {strength}: {hits} of 40");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "prints how often closed shapes snap as their ends fall short of, or run past, the start"]
+    fn closing_rates() {
+        let ends = [-0.2, -0.15, -0.1, -0.06, -0.03, 0.0, 0.05, 0.1, 0.2, 0.3, 0.4];
+        for kind in [Shape::Ellipse, Shape::Rectangle, Shape::Triangle] {
+            for drift_out in [0.0, 0.1, -0.1] {
+                for strength in [0.35, 0.5, DEFAULT, 1.0] {
+                    let mut line = format!("{kind:?} drift {drift_out:+.1} at {strength:.2}:");
+                    for end in ends {
+                        let mut random = Random(0x51_7cc1_b727_220a);
+                        let hits = (0..40).filter(|_| correct(&closing(&mut random, kind, end, drift_out), 1.0, strength).is_some_and(|c| c.shape == kind)).count();
+                        line += &format!(" {end:+.2}:{:3}%", hits * 100 / 40);
+                    }
+                    println!("{line}");
+                }
+            }
         }
     }
 }

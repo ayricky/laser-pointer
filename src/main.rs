@@ -81,7 +81,7 @@ use shapes::Correction;
 use settings::{Binding, Command, Slot, COMMANDS, MAX_PRESETS};
 use stroke::{rgba, Bounds, Point, Scratch, Stroke, MIN_STEP};
 
-// Hotkey ids: commands are 1..=9, presets start here.
+// Hotkey ids: commands are 1 and up, presets start here.
 const HOTKEY_PRESET: i32 = 100;
 const HOTKEY_PROBE: i32 = 99;
 
@@ -804,19 +804,13 @@ pub fn run_command(command: Command) {
             });
             settings_changed();
         }
-        Command::NextPreset | Command::PreviousPreset => {
+        Command::NextPreset => {
             let count = settings::presets().len();
             if count > 0 {
-                let step = if command == Command::NextPreset {
-                    1
-                } else {
-                    count - 1
-                };
-                let next = settings::active_preset().map_or(0, |index| (index + step) % count);
+                let next = settings::active_preset().map_or(0, |index| (index + 1) % count);
                 apply_preset(next);
             }
         }
-        Command::Quit => quit(),
     }
     sync_hotkeys();
 }

@@ -205,6 +205,13 @@ jobs:
           if (-not $listing) { throw 'The draft has no en-us listing' }
           $notes = (Get-Content packaging/whats-new.txt -Raw).Trim()
           $listing | Add-Member -NotePropertyName ReleaseNotes -NotePropertyValue $notes -Force
+          # Neon was dropped in 1.3.0; listings copied from earlier submissions still offer it.
+          if ($listing.Description) {
+            $listing.Description = $listing.Description -replace 'solid, glow or neon', 'solid or glow'
+          }
+          if ($listing.Features) {
+            $listing.Features = @($listing.Features | ForEach-Object { $_ -replace 'Solid, Glow and Neon styles', 'Solid and Glow styles' })
+          }
           # The update replaces the whole submission, price included.
           $submission.Pricing.PriceId = $env:PRICE_ID
           # Publish as soon as certification passes, whatever the last submission used.

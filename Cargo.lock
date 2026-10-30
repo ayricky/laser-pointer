@@ -32,7 +32,7 @@ dependencies = [
 
 [[package]]
 name = "laser-pointer"
-version = "1.2.2"
+version = "1.3.0"
 dependencies = [
  "embed-manifest",
  "windows",
