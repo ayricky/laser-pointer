@@ -299,13 +299,19 @@
     // How near the end comes back is measured on the loop it closes: a C, U or V left open by a
     // whole side's worth stays as drawn.
     if (loop.length < 4 || s.gap > tol.close * pathLength(loop)) return null;
+    // The gap's shape is judged with the loop stretched round along its axes, so a flattened loop's
+    // skew hides nothing: a flat C is as open as a round one.
+    const [mid, axis, loopMajor, loopMinor] = principalAxis(loop), ax = Math.cos(axis), ay = Math.sin(axis);
+    const along = Math.max(Math.sqrt(loopMajor), 1e-3), across = Math.max(Math.sqrt(loopMinor), 1e-3);
+    const round = p => { const dx = p[0] - mid[0], dy = p[1] - mid[1]; return [(dx * ax + dy * ay) / along, (dy * ax - dx * ay) / across]; };
     // Nor may the gap take up most of the loop's width the way it runs: then it is the whole side of
     // an open U or V, short beside the rest of the loop though it may be.
     if (s.gap > 0) {
-      const ux = (s.onFirst[0] - s.onLast[0]) / s.gap, uy = (s.onFirst[1] - s.onLast[1]) / s.gap;
+      const from = round(s.onLast), to = round(s.onFirst), gap = d2(from, to);
+      const ux = (to[0] - from[0]) / Math.max(gap, 1e-6), uy = (to[1] - from[1]) / Math.max(gap, 1e-6);
       let low = Infinity, high = -Infinity;
-      for (const p of loop) { const v = p[0] * ux + p[1] * uy; low = Math.min(low, v); high = Math.max(high, v); }
-      if (s.gap > MAX_BRIDGE * (high - low)) return null;
+      for (const q of loop) { const p = round(q), v = p[0] * ux + p[1] * uy; low = Math.min(low, v); high = Math.max(high, v); }
+      if (gap > MAX_BRIDGE * (high - low)) return null;
     }
     // Left open just short of a corner, the last side and the first carried on meet where the corner
     // was meant; not where they are near parallel, as across a gap partway along a side.
@@ -316,12 +322,8 @@
       if (m && ahead(endFrom, s.onLast, m) && ahead(m, s.onFirst, startTo) && Math.max(d2(m, s.onLast), d2(m, s.onFirst)) <= s.gap
         && turnAt(endFrom, m, startTo) >= 60 * Math.PI / 180) loop.splice(loop.length - 1, 0, m);
       // Falling short of the start, a hand arrives heading along the gap. Ends that meet it square
-      // on are the arms of an open U, or a spiral's turn beside the next. Measured with the loop
-      // stretched round, so a flat spiral's skew doesn't hide it.
+      // on are the arms of an open U, or a spiral's turn beside the next.
       else if (s.gap > SQUARE_GAP * pathLength(loop)) {
-        const [c, angle, major, minor] = principalAxis(loop), ux = Math.cos(angle), uy = Math.sin(angle);
-        const along = Math.max(Math.sqrt(major), 1e-3), across = Math.max(Math.sqrt(minor), 1e-3);
-        const round = p => { const dx = p[0] - c[0], dy = p[1] - c[1]; return [(dx * ux + dy * uy) / along, (dy * ux - dx * uy) / across]; };
         const [a, b, e, f] = [endFrom, s.onLast, s.onFirst, startTo].map(round);
         if (Math.min(turnAt(a, b, e), turnAt(b, e, f)) > SQUARE_TURN * Math.PI / 180) return null;
       }

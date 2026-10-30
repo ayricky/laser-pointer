@@ -476,12 +476,25 @@ fn closed_part(path: &[P], tolerance: &Tolerances) -> Option<Vec<P>> {
     if loop_.len() < 4 || seam.gap > tolerance.close * length(&loop_) {
         return None;
     }
+    // The gap's shape is judged with the loop stretched round along its axes, so a flattened
+    // loop's skew hides nothing: a flat C is as open as a round one.
+    let round = {
+        let (centre, angle, major, minor) = principal_axis(&loop_);
+        let (ux, uy) = (angle.cos(), angle.sin());
+        let (along, across) = (major.sqrt().max(1e-3), minor.sqrt().max(1e-3));
+        move |p: P| {
+            let (dx, dy) = (p.0 - centre.0, p.1 - centre.1);
+            ((dx * ux + dy * uy) / along, (dy * ux - dx * uy) / across)
+        }
+    };
     // Nor may the gap take up most of the loop's width the way it runs: then it is the whole side
     // of an open U or V, short beside the rest of the loop though it may be.
     if seam.gap > 0.0 {
-        let (ux, uy) = ((seam.on_first.0 - seam.on_last.0) / seam.gap, (seam.on_first.1 - seam.on_last.1) / seam.gap);
-        let (low, high) = loop_.iter().map(|p| p.0 * ux + p.1 * uy).fold((f32::MAX, f32::MIN), |(low, high), v| (low.min(v), high.max(v)));
-        if seam.gap > MAX_BRIDGE * (high - low) {
+        let (from, to) = (round(seam.on_last), round(seam.on_first));
+        let gap = distance(from, to);
+        let (ux, uy) = ((to.0 - from.0) / gap.max(1e-6), (to.1 - from.1) / gap.max(1e-6));
+        let (low, high) = loop_.iter().map(|&p| round(p)).map(|p| p.0 * ux + p.1 * uy).fold((f32::MAX, f32::MIN), |(low, high), v| (low.min(v), high.max(v)));
+        if gap > MAX_BRIDGE * (high - low) {
             return None;
         }
     }
@@ -501,15 +514,7 @@ fn closed_part(path: &[P], tolerance: &Tolerances) -> Option<Vec<P>> {
             loop_.insert(loop_.len() - 1, corner);
         } else if seam.gap > SQUARE_GAP * length(&loop_) {
             // Falling short of the start, a hand arrives heading along the gap. Ends that meet it
-            // square on are the arms of an open U, or a spiral's turn beside the next. Measured
-            // with the loop stretched round, so a flat spiral's skew doesn't hide it.
-            let (centre, angle, major, minor) = principal_axis(&loop_);
-            let (ux, uy) = (angle.cos(), angle.sin());
-            let (along, across) = (major.sqrt().max(1e-3), minor.sqrt().max(1e-3));
-            let round = |p: P| {
-                let (dx, dy) = (p.0 - centre.0, p.1 - centre.1);
-                ((dx * ux + dy * uy) / along, (dy * ux - dx * uy) / across)
-            };
+            // square on are the arms of an open U, or a spiral's turn beside the next.
             let (end_from, on_last, on_first, start_to) = (round(end_from), round(seam.on_last), round(seam.on_first), round(start_to));
             let arriving = turn_at(end_from, on_last, on_first);
             let leaving = turn_at(on_last, on_first, start_to);
@@ -1935,17 +1940,31 @@ mod tests {
     fn steady_spirals_stay_open() {
         let mut random = Random(0x5e1f_5a1d);
         let mut spirals = Vec::new();
-        // Flattened to half as tall, starting anywhere round, just over one turn.
-        for phase in [0.0f32, 0.4, 1.2, 2.5, 4.0] {
+        // Flattened to half as tall, or square, starting anywhere round, just over one turn.
+        for phase in [0.0f32, 0.4, 0.6, 1.2, 2.5, 4.0] {
             for turns in [1.01f32, 1.25] {
-                let flat: Vec<P> = (0..=480)
-                    .map(|i| {
-                        let k = i as f32 / 480.0;
-                        let (t, r) = (phase + TAU * turns * k, 60.0 + 100.0 * k);
-                        (300.0 + r * t.cos(), 300.0 + 0.5 * r * t.sin())
-                    })
-                    .collect();
-                spirals.push((format!("flat 60->160 over {turns} from {phase}"), flat));
+                for square in [false, true] {
+                    let spiral: Vec<P> = (0..=480)
+                        .map(|i| {
+                            let k = i as f32 / 480.0;
+                            let (t, r) = (phase + TAU * turns * k, 60.0 + 100.0 * k);
+                            if square {
+                                let r = r / t.cos().abs().max(t.sin().abs());
+                                (300.0 + r * t.cos(), 300.0 + r * t.sin())
+                            } else {
+                                (300.0 + r * t.cos(), 300.0 + 0.5 * r * t.sin())
+                            }
+                        })
+                        .collect();
+                    // A square one turn round that starts just short of a corner stops beside it
+                    // as a triangle or box stopped at its corner does, heading round it, the gap
+                    // running on along the start's side. Nothing at the gap tells them apart.
+                    if square && turns < 1.1 && (0.3..0.7).contains(&phase) {
+                        continue;
+                    }
+                    let kind = if square { "square" } else { "flat" };
+                    spirals.push((format!("{kind} 60->160 over {turns} from {phase}"), spiral));
+                }
             }
         }
         for (from, to) in [(100.0, 180.0), (60.0, 160.0), (60.0, 140.0), (180.0, 100.0)] {
@@ -1981,6 +2000,26 @@ mod tests {
         assert!(closed.is_empty(), "spirals that closed:
 {}", closed.join("
 "));
+    }
+
+    /// An ellipse left open by more than a quarter of the way round stays as drawn, however flat
+    /// and wherever its gap is.
+    #[test]
+    fn open_cs_stay_open() {
+        for strength in [0.35, DEFAULT, 1.0] {
+            for (a, b) in [(200.0, 60.0), (200.0, 100.0), (150.0, 150.0)] {
+                for start in [0.0f32, 1.0, 2.2, 3.4, 4.2, 5.3] {
+                    let c: Vec<P> = (0..=480)
+                        .map(|i| {
+                            let t = start + TAU * 0.69 * i as f32 / 480.0;
+                            (300.0 + a * t.cos(), 300.0 + b * t.sin())
+                        })
+                        .collect();
+                    let shape = correct(&c, 1.0, strength).map(|c| c.shape);
+                    assert_ne!(shape, Some(Shape::Ellipse), "{a}x{b} C from {start} at {strength}");
+                }
+            }
+        }
     }
 
     /// A U or V left open by a whole side stays as drawn, however tall or wide and whichever way
