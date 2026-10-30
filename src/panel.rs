@@ -1253,6 +1253,7 @@ impl Panel {
             Widget::Binding(slot) => {
                 self.capturing = if self.capturing == Some(slot) { None } else { Some(slot) };
                 self.status = None;
+                self.reveal_row(slot);
                 return Action::Redraw;
             }
             Widget::Unbind(slot) => {
@@ -1326,9 +1327,7 @@ impl Panel {
                 let slot = Slot::Preset(index);
                 self.capturing = Some(slot);
                 self.status = None;
-                if let Some(&(_, top)) = unsafe { self.page() }.rows.iter().find(|(row, _)| *row == slot) {
-                    self.reveal(top, top + ROW);
-                }
+                self.reveal_row(slot);
                 Action::Redraw
             }
             PresetChoice::Unbind => {
@@ -1439,6 +1438,13 @@ impl Panel {
         }
         self.reveal_renaming();
         Action::Redraw
+    }
+
+    /// Scrolls a shortcut's line into view, clear of the strip that opens while it records.
+    fn reveal_row(&mut self, slot: Slot) {
+        if let Some(&(_, top)) = unsafe { self.page() }.rows.iter().find(|(row, _)| *row == slot) {
+            self.reveal(top, top + ROW);
+        }
     }
 
     /// Scrolls to the chip whose name is being typed, should typing have moved it out of view.
@@ -2269,6 +2275,23 @@ mod tests {
         assert_eq!(panel.capturing, Some(Slot::Preset(1)));
         let area = panel.area_of(line).expect("the preset's line is in view");
         assert!(area.top >= VIEW_TOP && area.bottom <= HEIGHT - STRIP);
+    }
+
+    /// Clicking a shortcut low in the panel to record it keeps it clear of the strip that opens.
+    #[test]
+    fn a_shortcut_being_recorded_stays_clear_of_the_strip() {
+        let canvas = canvas(96);
+        let mut panel = panel(&canvas, true, 96);
+        let slot = Slot::Command(Command::Toggle);
+        let top = unsafe { panel.page() }.rows.iter().find(|(row, _)| *row == slot).unwrap().1;
+        // Its box just above the panel's foot.
+        panel.scroll = top + VIEW_TOP + ROW - HEIGHT + 4.0;
+        let field = panel.area_of(Widget::Binding(slot)).unwrap();
+        assert!(field.bottom > HEIGHT - STRIP);
+        panel.mouse_down(field.left + 10.0, field.top + 10.0);
+        assert_eq!(panel.capturing, Some(slot));
+        let field = panel.area_of(Widget::Binding(slot)).expect("the box shows");
+        assert!(field.top >= VIEW_TOP && field.bottom <= HEIGHT - STRIP, "{field:?}");
     }
 
     /// Typing a shorter name doesn't send its chip up a row and out of sight above the page.

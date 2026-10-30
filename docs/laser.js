@@ -279,6 +279,9 @@
 
   // How much of a loop's width, the way the gap runs, a gap between its ends may take.
   const MAX_BRIDGE = 0.7;
+  // A gap longer than this share of its loop, met by both ends at more than this many degrees, is a
+  // side never drawn. Closer, an end landing beside the start meets it at any angle.
+  const SQUARE_GAP = 0.04, SQUARE_TURN = 70;
   function closedPart(path, tol) {
     const [, , major, minor] = principalAxis(path);
     const size = (Math.sqrt(major) + Math.sqrt(minor)) * 2, total = pathLength(path);
@@ -312,6 +315,10 @@
       const ahead = (from, to, of) => (to[0] - from[0]) * (of[0] - to[0]) + (to[1] - from[1]) * (of[1] - to[1]) > 0;
       if (m && ahead(endFrom, s.onLast, m) && ahead(m, s.onFirst, startTo) && Math.max(d2(m, s.onLast), d2(m, s.onFirst)) <= s.gap
         && turnAt(endFrom, m, startTo) >= 60 * Math.PI / 180) loop.splice(loop.length - 1, 0, m);
+      // Falling short of the start, a hand arrives heading along the gap. Ends that meet it square
+      // on are the arms of an open U, or a spiral's turn beside the next.
+      else if (s.gap > SQUARE_GAP * pathLength(loop)
+        && Math.min(turnAt(endFrom, s.onLast, s.onFirst), turnAt(s.onLast, s.onFirst, startTo)) > SQUARE_TURN * Math.PI / 180) return null;
     }
     // Beyond the seam the stroke stays on the loop, as an overshoot does, or stops soon, as where a
     // corner is crossed; a longer tail heads off somewhere else.

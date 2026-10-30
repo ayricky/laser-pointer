@@ -439,6 +439,10 @@ fn seam(path: &[P], lead: usize, from: usize) -> Option<Seam> {
 
 /// How much of a loop's width, the way the gap runs, a gap between its ends may take.
 const MAX_BRIDGE: f32 = 0.7;
+/// A gap longer than this share of its loop, met by both ends at more than this many degrees, is
+/// a side never drawn. Closer, an end landing beside the start meets it at any angle.
+const SQUARE_GAP: f32 = 0.04;
+const SQUARE_TURN: f32 = 70.0;
 
 /// If the end comes back to the beginning (or past it), the loop between.
 fn closed_part(path: &[P], tolerance: &Tolerances) -> Option<Vec<P>> {
@@ -495,6 +499,14 @@ fn closed_part(path: &[P], tolerance: &Tolerances) -> Option<Vec<P>> {
         });
         if let Some(corner) = corner {
             loop_.insert(loop_.len() - 1, corner);
+        } else if seam.gap > SQUARE_GAP * length(&loop_) {
+            // Falling short of the start, a hand arrives heading along the gap. Ends that meet it
+            // square on are the arms of an open U, or a spiral's turn beside the next.
+            let arriving = turn_at(end_from, seam.on_last, seam.on_first);
+            let leaving = turn_at(seam.on_last, seam.on_first, start_to);
+            if arriving.min(leaving) > SQUARE_TURN.to_radians() {
+                return None;
+            }
         }
     }
     // Beyond the seam the stroke must stay on the loop, as an overshoot retracing it does, or stop
@@ -1907,15 +1919,15 @@ mod tests {
     }
 
     /// A spiral that opens out or closes in steadily stays as drawn, though one turn of it cut
-    /// from the middle would pass for a loop: round or square, between one and a half and two
-    /// turns, either way round. Its turns a fifth of its size or more apart, that is: closer
+    /// from the middle would pass for a loop: round or square, from just over one turn to two,
+    /// either way round. Its turns a fifth of its size or more apart, that is: closer
     /// than that it is a hand circling something twice, and snaps as a circle would.
     #[test]
     fn steady_spirals_stay_open() {
         let mut random = Random(0x5e1f_5a1d);
         let mut spirals = Vec::new();
-        for (from, to) in [(100.0, 180.0), (60.0, 160.0), (180.0, 100.0)] {
-            for turns in [1.5f32, 1.75, 2.0] {
+        for (from, to) in [(100.0, 180.0), (60.0, 160.0), (60.0, 140.0), (180.0, 100.0)] {
+            for turns in [1.1f32, 1.25, 1.5, 1.75, 2.0] {
                 for square in [false, true] {
                     let count = (turns * 240.0) as usize;
                     let spiral: Vec<P> = (0..=count)
@@ -1950,7 +1962,7 @@ mod tests {
     }
 
     /// A U or V left open by a whole side stays as drawn, however tall or wide and whichever way
-    /// round, though the side it leaves out is short beside the rest of it.
+    /// round, though the side it leaves out is short beside the rest of it, or than its base.
     #[test]
     fn open_us_and_vs_stay_open() {
         let mut random = Random(0x0b5e_55ed);
@@ -1958,7 +1970,9 @@ mod tests {
             for (w, h) in [(60.0, 200.0), (80.0, 200.0), (120.0, 200.0), (200.0, 200.0), (200.0, 120.0), (300.0, 80.0)] {
                 let u = [(0.0, 0.0), (0.0, h), (w, h), (w, 0.0)];
                 let v = [(0.0, 0.0), (w / 2.0, h), (w, 0.0)];
-                for (name, corners) in [("U", &u[..]), ("V", &v[..])] {
+                // Its sides sloping in a little, so the side left out is shorter than the base.
+                let tapered = [(0.2 * w, 0.0), (0.0, h), (w, h), (0.8 * w, 0.0)];
+                for (name, corners) in [("U", &u[..]), ("V", &v[..]), ("tapered U", &tapered[..])] {
                     for quarter in 0..4 {
                         let turned: Vec<P> = corners.iter().map(|&p| rotate(p, (0.0, 0.0), quarter as f32 * PI / 2.0)).collect();
                         let back: Vec<P> = turned.iter().rev().copied().collect();
