@@ -501,9 +501,18 @@ fn closed_part(path: &[P], tolerance: &Tolerances) -> Option<Vec<P>> {
             loop_.insert(loop_.len() - 1, corner);
         } else if seam.gap > SQUARE_GAP * length(&loop_) {
             // Falling short of the start, a hand arrives heading along the gap. Ends that meet it
-            // square on are the arms of an open U, or a spiral's turn beside the next.
-            let arriving = turn_at(end_from, seam.on_last, seam.on_first);
-            let leaving = turn_at(seam.on_last, seam.on_first, start_to);
+            // square on are the arms of an open U, or a spiral's turn beside the next. Measured
+            // with the loop stretched round, so a flat spiral's skew doesn't hide it.
+            let (centre, angle, major, minor) = principal_axis(&loop_);
+            let (ux, uy) = (angle.cos(), angle.sin());
+            let (along, across) = (major.sqrt().max(1e-3), minor.sqrt().max(1e-3));
+            let round = |p: P| {
+                let (dx, dy) = (p.0 - centre.0, p.1 - centre.1);
+                ((dx * ux + dy * uy) / along, (dy * ux - dx * uy) / across)
+            };
+            let (end_from, on_last, on_first, start_to) = (round(end_from), round(seam.on_last), round(seam.on_first), round(start_to));
+            let arriving = turn_at(end_from, on_last, on_first);
+            let leaving = turn_at(on_last, on_first, start_to);
             if arriving.min(leaving) > SQUARE_TURN.to_radians() {
                 return None;
             }
@@ -1926,6 +1935,19 @@ mod tests {
     fn steady_spirals_stay_open() {
         let mut random = Random(0x5e1f_5a1d);
         let mut spirals = Vec::new();
+        // Flattened to half as tall, starting anywhere round, just over one turn.
+        for phase in [0.0f32, 0.4, 1.2, 2.5, 4.0] {
+            for turns in [1.01f32, 1.25] {
+                let flat: Vec<P> = (0..=480)
+                    .map(|i| {
+                        let k = i as f32 / 480.0;
+                        let (t, r) = (phase + TAU * turns * k, 60.0 + 100.0 * k);
+                        (300.0 + r * t.cos(), 300.0 + 0.5 * r * t.sin())
+                    })
+                    .collect();
+                spirals.push((format!("flat 60->160 over {turns} from {phase}"), flat));
+            }
+        }
         for (from, to) in [(100.0, 180.0), (60.0, 160.0), (60.0, 140.0), (180.0, 100.0)] {
             for turns in [1.1f32, 1.25, 1.5, 1.75, 2.0] {
                 for square in [false, true] {

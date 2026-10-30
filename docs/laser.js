@@ -316,9 +316,15 @@
       if (m && ahead(endFrom, s.onLast, m) && ahead(m, s.onFirst, startTo) && Math.max(d2(m, s.onLast), d2(m, s.onFirst)) <= s.gap
         && turnAt(endFrom, m, startTo) >= 60 * Math.PI / 180) loop.splice(loop.length - 1, 0, m);
       // Falling short of the start, a hand arrives heading along the gap. Ends that meet it square
-      // on are the arms of an open U, or a spiral's turn beside the next.
-      else if (s.gap > SQUARE_GAP * pathLength(loop)
-        && Math.min(turnAt(endFrom, s.onLast, s.onFirst), turnAt(s.onLast, s.onFirst, startTo)) > SQUARE_TURN * Math.PI / 180) return null;
+      // on are the arms of an open U, or a spiral's turn beside the next. Measured with the loop
+      // stretched round, so a flat spiral's skew doesn't hide it.
+      else if (s.gap > SQUARE_GAP * pathLength(loop)) {
+        const [c, angle, major, minor] = principalAxis(loop), ux = Math.cos(angle), uy = Math.sin(angle);
+        const along = Math.max(Math.sqrt(major), 1e-3), across = Math.max(Math.sqrt(minor), 1e-3);
+        const round = p => { const dx = p[0] - c[0], dy = p[1] - c[1]; return [(dx * ux + dy * uy) / along, (dy * ux - dx * uy) / across]; };
+        const [a, b, e, f] = [endFrom, s.onLast, s.onFirst, startTo].map(round);
+        if (Math.min(turnAt(a, b, e), turnAt(b, e, f)) > SQUARE_TURN * Math.PI / 180) return null;
+      }
     }
     // Beyond the seam the stroke stays on the loop, as an overshoot does, or stops soon, as where a
     // corner is crossed; a longer tail heads off somewhere else.
