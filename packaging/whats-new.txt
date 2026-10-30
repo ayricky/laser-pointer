@@ -1,3 +1,7 @@
-Kept strokes take much less memory. They used to sit on one layer the size of every monitor together, which on a three-monitor desktop held over 100 MB for a single annotation. Now they take room only where you've drawn.
+Settings fit on one page now. Presets sit at the top beside the pen, so you pick one and adjust it in one place. Right-click a preset to rename it, update it, give it a shortcut or delete it. Opacity, smoothing and the switches you set once are under More.
 
-The first Glow or Neon stroke after starting no longer stutters as it begins.
+Shape snapping forgives more. A circle, box or triangle still snaps when its end stops short of where you started or runs on past it, and a box that stops just short of a corner closes at the corner. New installs start with snapping at Lenient, smoothing at Medium and a 1.2 second fade.
+
+Pink joins the colours.
+
+Two shortcuts are gone. Next preset still goes round every preset, so Previous preset isn't needed, and Quit stays in the tray menu and the panel. Neon is gone too: anything that used it draws with Glow.

@@ -127,7 +127,7 @@
       present: () => { show('present'); look('Laser', { color: '#ff2a2a', style: 'glow', quiet: true }); stage.setCursor(cursorById('soft-glow')); caption('Point at it. It fades by itself.'); keys([]); },
       teach: () => { show('teach'); look('Pen'); stage.setCursor(cursorById('circle-dot')); caption('The Pen keeps what you write.'); keys([]); },
       demo: () => { show('demo'); look('Highlighter'); stage.setCursor(cursorById('segment-ring')); caption('Highlight exactly where to look.'); keys([]); },
-      code: () => { show('code'); look('Laser', { color: '#1e90ff', style: 'neon', quiet: true }); stage.setCursor(cursorById('brackets')); caption('Glow, neon or solid, in any colour.'); keys([]); },
+      code: () => { show('code'); look('Laser', { color: '#1e90ff', style: 'glow', quiet: true }); stage.setCursor(cursorById('brackets')); caption('Glow or solid, in any colour.'); keys([]); },
     };
     film.chapters = [
       { name: 'Presenting', blurb: 'Underline, circle, point. It fades by itself.', scene: 'present', steps: [
@@ -155,7 +155,7 @@
         act(() => caption('Then point them to the next step.'), 100),
         draw(() => K.arrow(m('d-save'), { from: 'right', length: 140 }), { wait: 1400 }),
       ] },
-      { name: 'Code review', blurb: 'Neon in any colour, and eight cursors.', scene: 'code', steps: [
+      { name: 'Code review', blurb: 'Glow in any colour, and eight cursors.', scene: 'code', steps: [
         act(opening.code, 1000),
         // The whole change, boxed: a box much wider than it is tall reads as a line, not a box.
         draw(() => { const top = K.box(m('c-hit')), wide = K.box(m('c-set')), end = K.box(m('c-return')); return K.rectAt(top.x - 12, top.y - 8, wide.x + wide.w + 14, end.y + end.h + 8); }),

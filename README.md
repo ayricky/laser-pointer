@@ -12,14 +12,15 @@ presentation.
 ## Features
 
 - **Smooth laser trail** that tapers and fades over time, drawn as one anti-aliased
-  shape per stroke. Solid, Glow and Neon styles; any colour from the swatches or the built-in
+  shape per stroke. Solid or Glow; any colour from the swatches or the built-in
   picker; adjustable thickness, opacity and fade time.
 - **Keeps up with your hand.** The head of the stroke is drawn where the cursor is at the moment
   each frame starts, a few milliseconds ahead when you move fast. Each frame starts as late as is
   safe before Windows draws the screen, and on Windows 11 laptops the screen runs at its fastest
   refresh rate while you draw.
-- **Presets** — Laser, Highlighter and Pen to start with; create, rename, update and delete your
-  own (up to eight).
+- **Presets** — Laser, Highlighter and Pen to start with, side by side at the top of the panel;
+  add your own (up to eight), and right-click one to rename it, update it, give it a shortcut or
+  delete it.
 - **Keep strokes** — annotations stay on screen, even with the laser off and clicks passing
   through them, until you clear them. Undo and redo anything, clearing included.
 - **Straight lines** — hold Alt while drawing for a perfectly horizontal line, Shift+Alt for a
@@ -38,7 +39,8 @@ presentation.
   preset changes and size changes. Optionally, a ring closes in on the cursor as the laser turns
   on, so the audience can find it. Every animation follows Windows' Animation effects setting.
 - **Settings panel** in the Windows 11 style, following your light/dark theme and accent colour,
-  with a live preview. Left-click the tray icon to open it.
+  with a live preview. One page: presets and the pen at the top, then the cursor and shortcuts,
+  and the settings you set once under More. Left-click the tray icon to open it.
 - Light on resources: the overlay is hidden while there is nothing to show, only the parts of the
   screen that change are redrawn, kept strokes are drawn once, idle memory is handed back, and it
   uses no CPU while nothing moves. It follows each monitor's scaling, keeps your annotations when
@@ -54,8 +56,7 @@ presentation.
 | Redo | Ctrl+Y | while the laser is on |
 | Clear strokes | Alt+X | while strokes are on screen |
 | Keep strokes on or off | Alt+K | always |
-| Next / previous preset | Alt+] / Alt+[ | always |
-| Quit | Alt+Shift+L | always |
+| Next preset | Alt+] | always |
 
 While the laser is on: drag to draw, right-click to click through, middle and side buttons and
 both scroll wheels reach the app underneath, Ctrl+scroll changes thickness. While drawing, hold

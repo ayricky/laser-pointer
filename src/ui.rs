@@ -35,12 +35,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SW_SHOWNORMAL,
     TPM_BOTTOMALIGN, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WA_INACTIVE, WM_ACTIVATE,
     WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_KEYDOWN,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NULL, WM_PAINT,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NULL, WM_PAINT, WM_RBUTTONUP,
     WM_SETTINGCHANGE, WM_SYSCHAR, WM_SYSKEYDOWN, WM_THEMECHANGED, WM_TIMER, WNDCLASSW,
     WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
-use crate::panel::{self, Action, Panel};
+use crate::panel::{self, Action, Panel, PresetChoice};
 use crate::settings::{self, Binding, Command};
 
 const TRAY_CLASS: PCWSTR = w!("LaserPointerTray");
@@ -58,6 +58,13 @@ const MENU_CLEAR: usize = 3;
 const MENU_SETTINGS: usize = 4;
 const MENU_QUIT: usize = 5;
 const MENU_PRESET: usize = 100;
+
+// A preset's menu in the settings panel.
+const PRESET_UPDATE: usize = 1;
+const PRESET_RENAME: usize = 2;
+const PRESET_SHORTCUT: usize = 3;
+const PRESET_UNBIND: usize = 4;
+const PRESET_DELETE: usize = 5;
 
 #[derive(Default)]
 struct State {
@@ -554,6 +561,11 @@ extern "system" fn panel_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
                 act(hwnd, with_panel(Panel::mouse_up));
                 LRESULT(0)
             }
+            WM_RBUTTONUP => {
+                let (x, y) = point(lparam, scale);
+                act(hwnd, with_panel(|panel| panel.right_click(x, y)));
+                LRESULT(0)
+            }
             // Alt+key arrives as a system key; swallow it so the shortcut boxes can record it.
             WM_KEYDOWN | WM_SYSKEYDOWN => {
                 act(hwnd, with_panel(|panel| panel.key(wparam.0 as u32)));
@@ -630,10 +642,43 @@ unsafe fn act(hwnd: HWND, action: Option<Action>) {
         Some(Action::Open(target)) => {
             let _ = ShellExecuteW(Some(hwnd), w!("open"), &HSTRING::from(target), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL);
         }
+        Some(Action::PresetMenu(index)) => preset_menu(hwnd, index),
         Some(Action::Quit) => crate::quit(),
         Some(Action::Close) => {
             let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
         }
         Some(Action::None) | None => {}
     }
+}
+
+/// What can be done to a preset, from a right-click on it in the panel. The panel was given the
+/// borrow back first: the menu runs messages of its own, the panel's paints among them.
+unsafe fn preset_menu(hwnd: HWND, index: usize) {
+    let Some(preset) = settings::presets().get(index).cloned() else { return };
+    let Ok(menu) = CreatePopupMenu() else { return };
+    let grayed = |off: bool| if off { MF_GRAYED } else { MENU_ITEM_FLAGS(0) };
+    let current = preset.look == settings::get().look;
+    let _ = AppendMenuW(menu, MF_STRING | grayed(current), PRESET_UPDATE, w!("Update to the current pen"));
+    let _ = AppendMenuW(menu, MF_STRING, PRESET_RENAME, w!("Rename"));
+    if preset.key.is_set() {
+        let _ = AppendMenuW(menu, MF_STRING, PRESET_SHORTCUT, &with_shortcut("Change shortcut", preset.key));
+        let _ = AppendMenuW(menu, MF_STRING, PRESET_UNBIND, w!("Remove shortcut"));
+    } else {
+        let _ = AppendMenuW(menu, MF_STRING, PRESET_SHORTCUT, w!("Add shortcut"));
+    }
+    let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+    let _ = AppendMenuW(menu, MF_STRING, PRESET_DELETE, w!("Delete"));
+    let mut at = POINT::default();
+    let _ = GetCursorPos(&mut at);
+    let chosen = TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY, at.x, at.y, None, hwnd, None);
+    let _ = DestroyMenu(menu);
+    let choice = match chosen.0 as usize {
+        PRESET_UPDATE => PresetChoice::Update,
+        PRESET_RENAME => PresetChoice::Rename,
+        PRESET_SHORTCUT => PresetChoice::Shortcut,
+        PRESET_UNBIND => PresetChoice::Unbind,
+        PRESET_DELETE => PresetChoice::Delete,
+        _ => return,
+    };
+    act(hwnd, with_panel(|panel| panel.preset_choice(index, choice)));
 }

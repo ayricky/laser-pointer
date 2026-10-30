@@ -29,7 +29,7 @@ Text for Partner Center (Store listings → English (United States)). Limits are
 > Right-click clicks the app underneath, and the scroll wheel and your slide clicker keep
 > working, so you never have to turn the laser off to drive your presentation.
 >
-> Make it yours: any colour; solid, glow or neon; thickness, opacity, fade time and smoothing; how
+> Make it yours: any colour; solid or glow; thickness, opacity, fade time and smoothing; how
 > readily shapes snap, or not at all; eight animated cursors; up to eight presets; and every
 > command's shortcut can be changed or turned off.
 >
@@ -53,7 +53,7 @@ Later releases take it from `whats-new.txt`.
 5. Keep strokes on screen until you clear them; undo and redo
 6. Right-click clicks the app underneath; scrolling and slide clickers keep working
 7. Eight animated cursors in your laser colour
-8. Solid, Glow and Neon styles in any colour
+8. Solid and Glow styles in any colour
 9. Every command's shortcut can be changed or turned off
 10. A program under half a megabyte; no CPU while it waits; per-monitor scaling
 

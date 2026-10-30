@@ -17,7 +17,7 @@ use windows::Win32::Graphics::Direct2D::{
 use windows_numerics::Matrix3x2;
 use windows_numerics::Vector2;
 
-use crate::settings::{Look, STYLE_GLOW, STYLE_NEON};
+use crate::settings::{Look, STYLE_GLOW};
 
 // Dropping tiny moves keeps a slow hand from leaving a jittery cluster of points.
 pub const MIN_STEP: f32 = 2.0;
@@ -243,12 +243,11 @@ fn layers(style: u32) -> &'static [(f32, f32, f32)] {
     match style {
         // A thin near-white core, so the trail reads as light rather than paint.
         STYLE_GLOW => &[(1.0, 1.0, 0.0), (0.38, 0.85, 0.6)],
-        STYLE_NEON => &[(1.0, 1.0, 0.0), (0.45, 1.0, 0.85)],
         _ => &[(1.0, 1.0, 0.0)],
     }
 }
 
-/// The light around a Glow or Neon stroke: the stroke itself blurred by `spread` times its
+/// The light around a Glow stroke: the stroke itself blurred by `spread` times its
 /// radius and drawn `strength` times as opaque beneath it, so it falls off smoothly where
 /// wider copies of the stroke would end in hard steps.
 #[derive(Clone, Copy)]
@@ -260,7 +259,6 @@ struct Halo {
 fn halo(style: u32) -> Option<Halo> {
     match style {
         STYLE_GLOW => Some(Halo { strength: 0.85, spread: 2.0 }),
-        STYLE_NEON => Some(Halo { strength: 1.0, spread: 2.2 }),
         _ => None,
     }
 }
@@ -1058,11 +1056,10 @@ pub(crate) mod gallery {
         let mut stroke = Stroke::new(Point { x: 0.0, y: 0.0, at: t0 }, laser, s);
         stroke.points = (0..1000).map(|i| { let t = i as f32 * 0.0034; Point { x: s * (260.0 + 200.0 * (t * 1.7).sin()), y: s * (220.0 + 160.0 * (t * 2.3).cos()), at: at(i) } }).collect();
         out.push((stroke, at(1000)));
-        // Neon, a fast flick: samples 40 px apart.
-        let mut neon = laser;
-        neon.style = STYLE_NEON;
-        neon.color = 0x00e5ff;
-        let mut stroke = Stroke::new(Point { x: 0.0, y: 0.0, at: t0 }, neon, s);
+        // Glow in cyan, a fast flick: samples 40 px apart.
+        let mut flick = laser;
+        flick.color = 0x00e5ff;
+        let mut stroke = Stroke::new(Point { x: 0.0, y: 0.0, at: t0 }, flick, s);
         stroke.points = (0..24).map(|i| { let t = i as f32 / 23.0; Point { x: s * (560.0 + 320.0 * t), y: s * (300.0 - 230.0 * (t * PI).sin()), at: at(300 + i as u64 * 8) } }).collect();
         out.push((stroke, at(500)));
         // Solid laser, sharp zigzag.
@@ -1138,17 +1135,17 @@ pub(crate) mod glow_gallery {
     use std::time::Duration;
     use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
 
-    /// Glow and Neon at three widths, on dark and light, to judge the halo.
+    /// Glow in red and cyan at three widths, on dark and light, to judge the halo.
     pub fn scenes() -> Vec<(Stroke, Instant)> {
         let t0 = Instant::now();
         let mut out = Vec::new();
-        for (row, style) in [STYLE_GLOW, STYLE_NEON].into_iter().enumerate() {
+        for (row, color) in [0xff2a2a, 0x00e5ff].into_iter().enumerate() {
             for (col, width) in [4u32, 12, 24].into_iter().enumerate() {
                 let mut look = presets()[0].look;
-                look.style = style;
+                look.style = STYLE_GLOW;
+                look.color = color;
                 look.width = width;
                 look.ink = true;
-                if style == STYLE_NEON { look.color = 0x00e5ff; }
                 let (x0, y0) = (60.0 + col as f32 * 330.0, 80.0 + row as f32 * 200.0);
                 let mut stroke = Stroke::new(Point { x: 0.0, y: 0.0, at: t0 }, look, 1.0);
                 stroke.points = (0..120).map(|i| { let t = i as f32 / 119.0; Point { x: x0 + 260.0 * t, y: y0 + 50.0 * (t * PI * 1.5).sin(), at: t0 + Duration::from_millis(i) } }).collect();

@@ -11,12 +11,11 @@
   const LAYERS = {
     solid: [[1, 1, 0]],
     glow: [[1, 1, 0], [0.38, 0.85, 0.6]],
-    neon: [[1, 1, 0], [0.45, 1, 0.85]],
   };
-  // The light around Glow and Neon: the stroke blurred by `spread` times its radius, `strength`
+  // The light around Glow: the stroke blurred by `spread` times its radius, `strength`
   // times as opaque, beneath it. A browser whose canvas can't blur gets wider copies instead.
-  const HALO = { glow: { strength: 0.85, spread: 2.0 }, neon: { strength: 1.0, spread: 2.2 } };
-  const BANDS = { glow: [[3.4, 0.10, 0], [2.1, 0.20, 0]], neon: [[3.8, 0.12, 0], [2.3, 0.26, 0]] };
+  const HALO = { glow: { strength: 0.85, spread: 2.0 } };
+  const BANDS = { glow: [[3.4, 0.10, 0], [2.1, 0.20, 0]] };
   const canBlur = typeof CanvasRenderingContext2D !== 'undefined' && 'filter' in CanvasRenderingContext2D.prototype;
   const easeOut4 = k => 1 - Math.pow(1 - k, 4);
   // A snapped shape glows brighter once as it settles, then holds for its fade time and fades
