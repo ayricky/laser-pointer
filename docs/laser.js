@@ -236,7 +236,7 @@
   const tolerances = s => ({
     line: lerp(0.04, 0.085, s), side: lerp(0.055, 0.19, s), ellipse: lerp(0.07, 0.22, s), angle: lerp(3, 12, s) * Math.PI / 180,
     equal: lerp(0.07, 0.15, s), close: lerp(0.09, 0.19, s),
-    overrun: lerp(0.18, 0.4, s), lead: lerp(0.12, 0.25, s), beside: lerp(0.08, 0.14, s), outline: lerp(0.03, 0.05, s), doubling: lerp(3.4, 4.6, s) * Math.PI,
+    overrun: lerp(0.18, 0.4, s), lead: lerp(0.12, 0.25, s), beside: lerp(0.08, 0.1, s), outline: lerp(0.03, 0.05, s), doubling: lerp(3.4, 4.6, s) * Math.PI,
     head: lerp(0.45, 0.6, s), hook: lerp(110, 100, s) * Math.PI / 180,
     wing: lerp(0.35, 0.25, s), barbs: lerp(0.18, 0.22, s),
   });

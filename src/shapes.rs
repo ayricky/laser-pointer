@@ -275,7 +275,7 @@ impl Tolerances {
             close: lerp(0.09, 0.19, strength),
             overrun: lerp(0.18, 0.4, strength),
             lead: lerp(0.12, 0.25, strength),
-            beside: lerp(0.08, 0.14, strength),
+            beside: lerp(0.08, 0.1, strength),
             outline: lerp(0.03, 0.05, strength),
             doubling: lerp(3.4, 4.6, strength) * PI,
             head: lerp(0.45, 0.6, strength),
@@ -1904,6 +1904,49 @@ mod tests {
         }
         let outline = drift(random, outline, 3.0);
         mouse(random, &outline, 0.8)
+    }
+
+    /// A spiral that opens out or closes in steadily stays as drawn, though one turn of it cut
+    /// from the middle would pass for a loop: round or square, between one and a half and two
+    /// turns, either way round. Its turns a fifth of its size or more apart, that is: closer
+    /// than that it is a hand circling something twice, and snaps as a circle would.
+    #[test]
+    fn steady_spirals_stay_open() {
+        let mut random = Random(0x5e1f_5a1d);
+        let mut spirals = Vec::new();
+        for (from, to) in [(100.0, 180.0), (60.0, 160.0), (180.0, 100.0)] {
+            for turns in [1.5f32, 1.75, 2.0] {
+                for square in [false, true] {
+                    let count = (turns * 240.0) as usize;
+                    let spiral: Vec<P> = (0..=count)
+                        .map(|i| {
+                            let k = i as f32 / count as f32;
+                            let (t, r) = (TAU * turns * k, from + (to - from) * k);
+                            // A square's outline is the circle's pushed out to its corners.
+                            let r = if square { r / t.cos().abs().max(t.sin().abs()) } else { r };
+                            (300.0 + r * t.cos(), 300.0 + r * t.sin())
+                        })
+                        .collect();
+                    let back: Vec<P> = spiral.iter().map(|p| (600.0 - p.0, p.1)).collect();
+                    spirals.push((format!("{from}->{to} over {turns}, square {square}"), spiral));
+                    spirals.push((format!("{from}->{to} over {turns}, square {square}, mirrored"), back));
+                }
+            }
+        }
+        let mut closed = Vec::new();
+        for strength in [0.35, DEFAULT, 1.0] {
+            for (name, spiral) in &spirals {
+                for drawn in [spiral.clone(), drift(&mut random, spiral.clone(), 2.0)] {
+                    let shape = correct(&drawn, 1.0, strength).map(|c| c.shape);
+                    if matches!(shape, Some(Shape::Rectangle | Shape::Triangle | Shape::Ellipse)) {
+                        closed.push(format!("{name} at {strength}: {shape:?}"));
+                    }
+                }
+            }
+        }
+        assert!(closed.is_empty(), "spirals that closed:
+{}", closed.join("
+"));
     }
 
     /// A U or V left open by a whole side stays as drawn, however tall or wide and whichever way
